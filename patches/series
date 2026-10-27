@@ -8,3 +8,4 @@ build/objc-entitlement-header.patch
 build/shared-storage-bindings.patch
 build/conditional-closures.patch
 build/settings-alert-import.patch
+build/history-ui-compatibility.patch

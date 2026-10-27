@@ -1,0 +1,45 @@
+Subject: Match history UI to upstream localization and presentation APIs
+
+diff --git a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+index a4bebb63603913785e1b4a5e4e683d80b245b4d7..61c43788d69d60af866bf99a3dd3684ae23644f2 100644
+--- a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
++++ b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+@@ -48,7 +48,7 @@ final class AdditionalHistoryController: ViewController {
+             guard let self else { return }
+             let current = self.context.sharedContext.currentPresentationData.with { $0 }
+             let sheet = ActionSheetController(presentationData: current)
+-            sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Common_Copy, color: .accent, action: { [weak sheet] in
++            sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Conversation_ContextMenuCopy, color: .accent, action: { [weak sheet] in
+                 UIPasteboard.general.string = message.text; sheet?.dismissAnimated()
+             })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
+             self.present(sheet, in: .window(.root))
+@@ -58,7 +58,7 @@ final class AdditionalHistoryController: ViewController {
+             chatLocation: .peer(id: original.id.peerId), chatLocationContextHolder: Atomic(value: nil), adMessagesContext: nil, tag: nil,
+             source: .custom(messages: messages.get(), messageId: nil, quote: nil, isSavedMusic: false, canReorder: false, richMessageId: nil, loadMore: nil),
+             subject: nil, controllerInteraction: interaction, selectedMessages: .single(nil), mode: .bubbles, isChatPreview: true, messageTransitionNode: { nil })
+-        history.canReadHistory.set(.single(false))
++        history.canReadHistory.set(Signal<Bool, NoError>.single(false))
+         history.enableUnreadAlignment = false
+         self.history = history
+         displayNode.addSubnode(history)
+@@ -352,6 +352,6 @@ return ChatControllerInteraction(
+             automaticMediaDownloadSettings: MediaAutoDownloadSettings.defaultSettings,
+             pollActionState: ChatInterfacePollActionState(),
+             stickerSettings: ChatInterfaceStickerSettings(),
+-            presentationContext: ChatPresentationContext(context: context, backgroundNode: backgroundNode as? WallpaperBackgroundNode)
++            presentationContext: ChatPresentationContext(context: context, backgroundNode: backgroundNode)
+         )
+ }
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 71d5350a42c46b0391bbe64046fec09806c1eccd..9626bd3d80937b9cd0c99a4cd057e59516361177 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -974,7 +974,7 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+     return combineLatest(dataSignal, revisionsSignal)
+     |> deliverOnMainQueue
+     |> map { [context] tuple, savedRevisions -> ContextController.Items in
+-        let (data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, messageViewsPrivacyTips, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer) = tuple
++        let (data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, _, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer) = tuple
+         let isPremium = accountPeer?.isPremium ?? false
+ 
+         var actions: [ContextMenuItem] = []
