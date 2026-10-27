@@ -1,0 +1,15 @@
+Subject: Parenthesize closure arguments in conditional expressions
+
+diff --git a/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift b/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
+index ddd41c34b41eb2b65026aa64b12825023e7ba173..997dbca1098d91bfe55421ab326f975fac987756 100644
+--- a/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
++++ b/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
+@@ -72,7 +72,7 @@ private final class LegacyICloudFileController: LegacyController, UIDocumentPick
+         } catch {
+             completion([])
+             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+-                guard let root = controller.view.window?.rootViewController ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }.first(where: { $0.isKeyWindow })?.rootViewController else { return }
++                guard let root = controller.view.window?.rootViewController ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first(where: { $0.isKeyWindow })?.rootViewController else { return }
+                 var presenter = root
+                 while let next = presenter.presentedViewController, !next.isBeingDismissed { presenter = next }
+                 let alert = UIAlertController(title: "Could not import file", message: "Check that the file provider is available and try again. " + error.localizedDescription, preferredStyle: .alert)
