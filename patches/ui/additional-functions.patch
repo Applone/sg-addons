@@ -1,0 +1,1140 @@
+Subject: additional functions
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
+
+diff --git a/Swiftgram/SGSettingsUI/BUILD b/Swiftgram/SGSettingsUI/BUILD
+index dc1613e7810a8245059a10a41bb77fea37733b6d..aaee9800eb6bf4d6222b6b1dedb30e392014124d 100644
+--- a/Swiftgram/SGSettingsUI/BUILD
++++ b/Swiftgram/SGSettingsUI/BUILD
+@@ -16,6 +16,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++    "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
+         "//Swiftgram/SGItemListUI:SGItemListUI",
+         "//Swiftgram/SGLogging:SGLogging",
+         "//Swiftgram/SGSimpleSettings:SGSimpleSettings",
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c3d243116e18576f3cce412910aa05dc4ae2de2
+--- /dev/null
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+@@ -0,0 +1,238 @@
++import Foundation
++import UIKit
++import UniformTypeIdentifiers
++import Display
++import Postbox
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import ItemListUI
++import AccountContext
++import SGAdditionalCore
++import SGStrings
++
++func additionalSettingsChanges() -> Signal<Int, NoError> {
++    Signal { subscriber in
++        subscriber.putNext(AddonSettings.shared.version())
++        let token = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: .main) { _ in
++            subscriber.putNext(AddonSettings.shared.version())
++        }
++        return ActionDisposable { NotificationCenter.default.removeObserver(token) }
++    }
++}
++
++func additionalError(context: AccountContext, error: Error) -> ViewController {
++    let data = context.sharedContext.currentPresentationData.with { $0 }
++    return textAlertController(context: context, title: nil, text: error.localizedDescription, actions: [TextAlertAction(type: .defaultAction, title: data.strings.Common_OK, action: {})])
++}
++
++private struct AdditionalFormEntry: ItemListNodeEntry {
++    enum Kind: Equatable { case input, toggle, action, disclosure, notice }
++    let stableId: Int
++    let section: ItemListSectionId
++    let kind: Kind
++    let title: String
++    var value: String = ""
++    static func < (lhs: Self, rhs: Self) -> Bool { lhs.stableId < rhs.stableId }
++    func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
++        let model = arguments as! AdditionalForm
++        switch kind {
++        case .input:
++            return ItemListSingleLineInputItem(presentationData: presentationData, systemStyle: .glass, title: NSAttributedString(string: title), text: value, placeholder: title, type: .regular(capitalization: false, autocorrection: false), clearType: .always, sectionId: section, textUpdated: { model.input(self.stableId, $0) }, action: {})
++        case .toggle:
++            return ItemListSwitchItem(presentationData: presentationData, systemStyle: .glass, title: title, value: value == "1", sectionId: section, style: .blocks, updated: { model.input(self.stableId, $0 ? "1" : "0") })
++        case .action:
++            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: title, kind: .generic, alignment: .natural, sectionId: section, style: .blocks, action: { model.action(self.stableId) })
++        case .disclosure:
++            return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: title, label: value, sectionId: section, style: .blocks, action: { model.action(self.stableId) })
++        case .notice:
++            return ItemListTextItem(presentationData: presentationData, text: .plain(title), sectionId: section)
++        }
++    }
++}
++
++private final class AdditionalForm {
++    let context: AccountContext
++    let revision = ValuePromise<Int>(0, ignoreRepeated: false)
++    weak var controller: ItemListController?
++    var entries: (String) -> [AdditionalFormEntry] = { _ in [] }
++    var input: (Int, String) -> Void = { _, _ in }
++    var action: (Int) -> Void = { _ in }
++    var documentDelegate: AdditionalDocuments?
++    init(context: AccountContext) { self.context = context }
++    func refresh() { revision.set(0) }
++    func error(_ error: Error) { controller?.present(additionalError(context: context, error: error), in: .window(.root)) }
++    func push(_ next: ViewController) { (controller?.navigationController as? NavigationController)?.pushViewController(next) }
++    func make(title: String) -> ViewController {
++        let state = combineLatest(context.sharedContext.presentationData, revision.get(), additionalSettingsChanges())
++        |> deliverOnMainQueue
++        |> map { [self] data, _, _ -> (ItemListControllerState, (ItemListNodeState, AdditionalForm)) in
++            let presentation = ItemListPresentationData(data)
++            return (ItemListControllerState(presentationData: presentation, title: .text(title), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: data.strings.Common_Back)),
++                (ItemListNodeState(presentationData: presentation, entries: entries(data.strings.baseLanguageCode), style: .blocks), self))
++        }
++        let controller = ItemListController(context: context, state: state)
++        self.controller = controller
++        return controller
++    }
++}
++
++func additionalRetentionController(context: AccountContext, account: String?) -> ViewController {
++    let model = AdditionalForm(context: context)
++    var value = String(AddonSettings.shared.profile(account).retentionDays)
++    model.entries = { lang in [AdditionalFormEntry(stableId: 0, section: 0, kind: .input, title: i18n("Additional.Retention", lang), value: value), AdditionalFormEntry(stableId: 1, section: 1, kind: .action, title: i18n("Additional.Save", lang))] }
++    model.input = { _, text in value = text }
++    model.action = { [weak model] _ in
++        guard let model else { return }
++        do {
++            guard let days = Int(value), (1...365).contains(days) else { throw SettingsError.invalid("1–365") }
++            var profile = AddonSettings.shared.profile(account); profile.retentionDays = days
++            try AddonSettings.shared.save(profile, account: account)
++            model.controller?.navigationController?.popViewController(animated: true)
++        } catch { model.error(error) }
++    }
++    return model.make(title: i18n("Additional.Retention", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++}
++
++func additionalPeersController(context: AccountContext, title: String, values initial: [String], changed: @escaping ([String]) -> Void) -> ViewController {
++    let model = AdditionalForm(context: context)
++    var values = initial
++    var names: [String: String] = [:]
++    model.entries = { lang in
++        [AdditionalFormEntry(stableId: 0, section: 0, kind: .action, title: i18n("Additional.Add", lang))] + values.enumerated().map { index, id in
++            AdditionalFormEntry(stableId: index + 1, section: 1, kind: .action, title: (names[id] ?? id) + " · " + i18n("Additional.Remove", lang))
++        }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id > 0 {
++            guard values.indices.contains(id - 1) else { return }
++            values.remove(at: id - 1); changed(values); model.refresh()
++        } else {
++            let picker = context.sharedContext.makePeerSelectionController(PeerSelectionControllerParams(context: context, filter: [.excludeSecretChats, .doNotSearchMessages], title: title, selectForumThreads: false))
++            picker.peerSelected = { [weak model, weak picker] peer, _ in
++                guard let model, let key = additionalChatKey(peer.id) else { return }
++                names[key] = peer.debugDisplayTitle
++                if !values.contains(key) { values.append(key); changed(values) }
++                picker?.navigationController?.popViewController(animated: true)
++                model.refresh()
++            }
++            model.push(picker)
++        }
++    }
++    return model.make(title: title)
++}
++
++func additionalFiltersController(context: AccountContext, account: String?) -> ViewController {
++    let model = AdditionalForm(context: context)
++    model.entries = { lang in
++        var entries = [AdditionalFormEntry(stableId: 0, section: 0, kind: .action, title: i18n("Additional.Add", lang)), AdditionalFormEntry(stableId: 1, section: 0, kind: .action, title: i18n("Additional.Import", lang)), AdditionalFormEntry(stableId: 2, section: 0, kind: .action, title: i18n("Additional.Export", lang))]
++        entries += AddonSettings.shared.profile(account).filters.enumerated().map { index, rule in
++            AdditionalFormEntry(stableId: index + 10, section: 1, kind: .disclosure, title: rule.pattern.isEmpty ? rule.users.joined(separator: ", ") : rule.pattern, value: rule.enabled ? "✓" : "")
++        }
++        return entries
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 1 || id == 2 {
++            let delegate = AdditionalDocuments(model: model, account: account)
++            model.documentDelegate = delegate
++            do { try delegate.open(export: id == 2) } catch { model.error(error) }
++        } else {
++            model.push(additionalRuleController(context: context, account: account, index: id == 0 ? nil : id - 10))
++        }
++    }
++    return model.make(title: i18n("Additional.EditFilters", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++}
++
++private func additionalRuleController(context: AccountContext, account: String?, index: Int?) -> ViewController {
++    let model = AdditionalForm(context: context)
++    let initial = AddonSettings.shared.profile(account).filters
++    var rule = index.flatMap { initial.indices.contains($0) ? initial[$0] : nil } ?? FilterRule()
++    model.entries = { lang in
++        func entry(_ id: Int, _ section: Int32, _ kind: AdditionalFormEntry.Kind, _ key: String, _ value: String = "") -> AdditionalFormEntry {
++            AdditionalFormEntry(stableId: id, section: section, kind: kind, title: i18n("Additional." + key, lang), value: value)
++        }
++        return [entry(0, 0, .toggle, "Enabled", rule.enabled ? "1" : "0"), entry(1, 0, .input, "Pattern", rule.pattern), entry(2, 0, .disclosure, "Mode", i18n("Additional." + rule.mode, lang)), entry(3, 0, .toggle, "CaseSensitive", rule.caseSensitive ? "1" : "0"), entry(4, 0, .toggle, "Reversed", rule.reversed ? "1" : "0"), entry(5, 1, .disclosure, "Chats", String(rule.chats.count)), entry(6, 1, .disclosure, "ExcludeChats", String(rule.excludeChats.count)), entry(7, 1, .disclosure, "Users", String(rule.users.count)), entry(8, 2, .action, "Save")] + (index == nil ? [] : [entry(9, 2, .action, "Remove")])
++    }
++    model.input = { [weak model] id, text in
++        switch id { case 0: rule.enabled = text == "1"; case 1: rule.pattern = text; case 3: rule.caseSensitive = text == "1"; case 4: rule.reversed = text == "1"; default: break }
++        if id != 1 { model?.refresh() }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 2 {
++            let modes = ["contains", "word", "regex"]
++            rule.mode = modes[((modes.firstIndex(of: rule.mode) ?? 0) + 1) % modes.count]
++            model.refresh()
++        } else if (5...7).contains(id) {
++            let keyPath: WritableKeyPath<FilterRule, [String]> = id == 5 ? \.chats : (id == 6 ? \.excludeChats : \.users)
++            let lang = context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }
++            model.push(additionalPeersController(context: context, title: i18n("Additional." + (id == 5 ? "Chats" : id == 6 ? "ExcludeChats" : "Users"), lang), values: rule[keyPath: keyPath], changed: { values in rule[keyPath: keyPath] = values; model.refresh() }))
++        } else if id == 8 || id == 9 {
++            do {
++                var profile = AddonSettings.shared.profile(account)
++                // Avoid applying an index to a list replaced by an import while this editor was open.
++                guard initial == profile.filters else { throw SettingsError.invalid("Filters changed. Reopen this editor.") }
++                if let index { if id == 9 { profile.filters.remove(at: index) } else { try rule.validate(); profile.filters[index] = rule } }
++                else { try rule.validate(); profile.filters.append(rule) }
++                try AddonSettings.shared.save(profile, account: account)
++                model.controller?.navigationController?.popViewController(animated: true)
++            } catch { model.error(error) }
++        }
++    }
++    return model.make(title: i18n("Additional.Filters", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++}
++
++func additionalDiagnosticsController(context: AccountContext) -> ViewController {
++    let model = AdditionalForm(context: context)
++    model.entries = { _ in [AdditionalFormEntry(stableId: 0, section: 0, kind: .notice, title: MessageArchive.shared.status() ?? "Message archive ready"), AdditionalFormEntry(stableId: 1, section: 1, kind: .notice, title: UserDefaults.standard.string(forKey: "SwiftgramAddonStorageStatus") ?? "Storage status unavailable")] }
++    return model.make(title: i18n("Additional.Diagnostics", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++}
++
++private final class AdditionalDocuments: NSObject, UIDocumentPickerDelegate {
++    weak var model: AdditionalForm?
++    let account: String?
++    private var exporting = false
++    init(model: AdditionalForm, account: String?) { self.model = model; self.account = account }
++    func open(export: Bool) throws {
++        guard let model, let controller = model.controller else { return }
++        let picker: UIDocumentPickerViewController
++        self.exporting = export
++        if export {
++            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("AdditionalExport-" + UUID().uuidString)
++            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++            let url = directory.appendingPathComponent("filters.json")
++            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
++            try encoder.encode(AddonSettings.shared.profile(account).filters).write(to: url, options: .atomic)
++            picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
++        } else {
++            picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json], asCopy: false)
++        }
++        picker.delegate = self
++        controller.present(picker, animated: true)
++    }
++    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
++        guard !exporting, let url = urls.first, let model else { return }
++        let access = url.startAccessingSecurityScopedResource()
++        defer { if access { url.stopAccessingSecurityScopedResource() } }
++        do {
++            let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
++            guard size <= 4 * 1024 * 1024 else { throw SettingsError.invalid("Filter file exceeds 4 MB") }
++            let data = try Data(contentsOf: url)
++            guard data.count <= 4 * 1024 * 1024 else { throw SettingsError.invalid("Filter file exceeds 4 MB") }
++            var profile = AddonSettings.shared.profile(account)
++            profile.filters = try JSONDecoder().decode([FilterRule].self, from: data)
++            try AddonSettings.shared.save(profile, account: account)
++            model.refresh()
++        } catch { model.error(error) }
++    }
++}
++
++func additionalEditingContext(context: AccountContext, account: String?, completed: @escaping (AccountContext) -> Void) {
++    guard let account, account != additionalAccountKey(context.account.peerId) else { completed(context); return }
++    let _ = (context.sharedContext.activeAccountsWithInfo |> take(1) |> deliverOnMainQueue).start(next: { info in
++        guard let selected = info.accounts.first(where: { additionalAccountKey($0.account.peerId) == account }) else { return }
++        completed(context.sharedContext.makeTempAccountContext(account: selected.account))
++    })
++}
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index d81bf654e42f86c60fef5e240b22fc7535fb1905..e2bc8959ee3b78da774166098cec991297635258 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -1,3 +1,4 @@
++import SGAdditionalCore
+ // MARK: Swiftgram
+ import SGLogging
+ import SGSimpleSettings
+@@ -27,6 +28,7 @@ import UndoUI
+ 
+ private enum SGControllerSection: Int32, SGItemListSection {
+     case search
++    case additionalAccount, additionalGhost, additionalHistory, additionalFilters, additionalPremium, additionalAbout
+     case trending
+     case content
+     case tabs
+@@ -46,6 +48,18 @@ private enum SGControllerSection: Int32, SGItemListSection {
+ }
+ 
+ private enum SGBoolSetting: String {
++    case additionalGhostEnabled
++    case additionalHideRead
++    case additionalHideStories
++    case additionalHideOnline
++    case additionalHideTyping
++    case additionalHideUpload
++    case additionalSaveDeleted
++    case additionalDimDeleted
++    case additionalSaveEditHistory
++    case additionalFiltersEnabled
++    case additionalLocalPremium
++
+     case hidePhoneInSettings
+     case showTabNames
+     case showContactsTab
+@@ -127,6 +141,8 @@ private enum SGSliderSetting: String {
+ }
+ 
+ private enum SGDisclosureLink: String {
++    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics
++
+     case contentSettings
+     case languageSettings
+ }
+@@ -138,6 +154,8 @@ private struct PeerNameColorScreenState: Equatable {
+ 
+ private struct SGSettingsControllerState: Equatable {
+     var searchQuery: String?
++    var additionalAccount: String?
++    var additionalAccountName: String?
+ }
+ 
+ private typealias SGControllerEntry = SGItemListUIEntry<SGControllerSection, SGBoolSetting, SGSliderSetting, SGOneFromManySetting, SGDisclosureLink, AnyHashable>
+@@ -154,6 +172,34 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.searchInput(id: id.count, section: .search, title: NSAttributedString(string: "🔍"), text: state.searchQuery ?? "", placeholder: strings.Common_Search))
+     
+     
++    let profile = AddonSettings.shared.profile(state.additionalAccount)
++    func text(_ key: String) -> String { i18n("Additional." + key, lang) }
++    entries.append(.header(id: id.count, section: .additionalAccount, text: text("Title"), badge: nil))
++    entries.append(.disclosure(id: id.count, section: .additionalAccount, link: .additionalAccount, text: state.additionalAccountName ?? text("Default")))
++    entries.append(.notice(id: id.count, section: .additionalAccount, text: text("AccountNotice")))
++    entries.append(.header(id: id.count, section: .additionalGhost, text: text("Ghost"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalGhostEnabled, value: profile.ghostEnabled, text: text("ghostEnabled"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideRead, value: profile.hideRead, text: text("hideRead"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideStories, value: profile.hideStories, text: text("hideStories"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideOnline, value: profile.hideOnline, text: text("hideOnline"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideTyping, value: profile.hideTyping, text: text("hideTyping"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideUpload, value: profile.hideUpload, text: text("hideUpload"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalGhost, link: .additionalExceptions, text: text("Exceptions")))
++    entries.append(.header(id: id.count, section: .additionalHistory, text: text("History"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDeleted, value: profile.saveDeleted, text: text("saveDeleted"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalDimDeleted, value: profile.dimDeleted, text: text("dimDeleted"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveEditHistory, value: profile.saveEditHistory, text: text("saveEditHistory"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalRetention, text: text("Retention")))
++    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("Clear")))
++    entries.append(.notice(id: id.count, section: .additionalHistory, text: text("HistoryNotice")))
++    entries.append(.header(id: id.count, section: .additionalFilters, text: text("Filters"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalFilters, settingName: .additionalFiltersEnabled, value: profile.filtersEnabled, text: text("filtersEnabled"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalFilters, link: .additionalFilters, text: text("EditFilters")))
++    entries.append(.header(id: id.count, section: .additionalPremium, text: text("Premium"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalPremium, settingName: .additionalLocalPremium, value: profile.localPremium, text: text("localPremium"), enabled: true))
++    entries.append(.notice(id: id.count, section: .additionalPremium, text: text("PremiumNotice")))
++    entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalDiagnostics, text: text("Diagnostics")))
++
+     if SGSimpleSettings.shared.canUseNY {
+         entries.append(.header(id: id.count, section: .trending, text: i18n("Settings.NY.Header", lang), badge: newStr))
+         entries.append(.toggle(id: id.count, section: .trending, settingName: .nyStyleSnow, value: SGSimpleSettings.shared.nyStyle == SGSimpleSettings.NYStyle.snow.rawValue, text: i18n("Settings.NY.Style.snow", lang), enabled: true))
+@@ -367,7 +413,16 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+               return updatedState
+           }
+         },*/ setBoolValue: { setting, value in
++        if let keyPath = setting.additionalKeyPath {
++            var profile = AddonSettings.shared.profile(stateValue.with { $0.additionalAccount })
++            profile[keyPath: keyPath] = value
++            do { try AddonSettings.shared.save(profile, account: stateValue.with { $0.additionalAccount }) }
++            catch { presentControllerImpl?(additionalError(context: context, error: error), nil) }
++            simplePromise.set(true)
++            return
++        }
+         switch setting {
++        case .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalLocalPremium: break
+         case .hidePhoneInSettings:
+             SGSimpleSettings.shared.hidePhoneInSettings = value
+             askForRestart?()
+@@ -690,7 +745,50 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+         ])])
+         presentControllerImpl?(actionSheet, ViewControllerPresentationArguments(presentationAnimation: .modalSheet))
+     }, openDisclosureLink: { link in
++        let account = stateValue.with { $0.additionalAccount }
++        let data = context.sharedContext.currentPresentationData.with { $0 }
++        let lang = data.strings.baseLanguageCode
+         switch (link) {
++        case .additionalAccount:
++            let _ = (context.sharedContext.activeAccountsWithInfo |> take(1) |> deliverOnMainQueue).start(next: { info in
++                let sheet = ActionSheetController(presentationData: data)
++                var choices: [(String?, String)] = [(nil, i18n("Additional.Default", lang))]
++                choices += info.accounts.map { (additionalAccountKey($0.account.peerId), $0.peer.debugDisplayTitle) }
++                sheet.setItemGroups([ActionSheetItemGroup(items: choices.map { key, title in
++                    ActionSheetButtonItem(title: title, color: .accent, action: { [weak sheet] in
++                        sheet?.dismissAnimated()
++                        updateState { state in
++                            var state = state; state.additionalAccount = key; state.additionalAccountName = title; return state
++                        }
++                    })
++                }), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
++                presentControllerImpl?(sheet, nil)
++            })
++        case .additionalExceptions:
++            additionalEditingContext(context: context, account: account) { editingContext in
++            pushControllerImpl?(additionalPeersController(context: editingContext, title: i18n("Additional.Exceptions", lang), values: AddonSettings.shared.profile(account).ghostExceptions, changed: { values in
++                var profile = AddonSettings.shared.profile(account); profile.ghostExceptions = values
++                do { try AddonSettings.shared.save(profile, account: account) }
++                catch { presentControllerImpl?(additionalError(context: context, error: error), nil) }
++            }))
++            }
++        case .additionalRetention:
++            pushControllerImpl?(additionalRetentionController(context: context, account: account))
++        case .additionalFilters:
++            additionalEditingContext(context: context, account: account) { editingContext in
++                pushControllerImpl?(additionalFiltersController(context: editingContext, account: account))
++            }
++        case .additionalClear:
++            let sheet = ActionSheetController(presentationData: data)
++            sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetTextItem(title: i18n(account == nil ? "Additional.ClearAllNotice" : "Additional.ClearAccountNotice", lang)), ActionSheetButtonItem(title: i18n("Additional.Clear", lang), color: .destructive, action: { [weak sheet] in
++                sheet?.dismissAnimated()
++                MessageArchive.shared.clearHistory(account: account) { success in
++                    if !success { presentControllerImpl?(additionalError(context: context, error: SettingsError.invalid("Could not clear history")), nil) }
++                }
++            })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
++            presentControllerImpl?(sheet, nil)
++        case .additionalDiagnostics:
++            pushControllerImpl?(additionalDiagnosticsController(context: context))
+             case .languageSettings:
+                 pushControllerImpl?(context.sharedContext.makeLocalizationListController(context: context))
+             case .contentSettings:
+@@ -717,7 +815,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+     contentSettingsConfiguration.set(.single(nil)
+     |> then(updatedContentSettingsConfiguration))
+     
+-    let signal = combineLatest(simplePromise.get(), /*sliderPromise.get(),*/ statePromise.get(), context.sharedContext.presentationData, sharedData, preferences, contentSettingsConfiguration.get(),
++    let signal = combineLatest(combineLatest(simplePromise.get(), additionalSettingsChanges()) |> map { _, _ in true }, /*sliderPromise.get(),*/ statePromise.get(), context.sharedContext.presentationData, sharedData, preferences, contentSettingsConfiguration.get(),
+         context.engine.accountData.observeAvailableColorOptions(scope: .replies),
+         context.engine.accountData.observeAvailableColorOptions(scope: .profile)
+     )
+@@ -783,3 +881,22 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+     return controller
+ 
+ }
++
++private extension SGBoolSetting {
++    var additionalKeyPath: WritableKeyPath<AddonProfile, Bool>? {
++        switch self {
++        case .additionalGhostEnabled: return \AddonProfile.ghostEnabled
++        case .additionalHideRead: return \AddonProfile.hideRead
++        case .additionalHideStories: return \AddonProfile.hideStories
++        case .additionalHideOnline: return \AddonProfile.hideOnline
++        case .additionalHideTyping: return \AddonProfile.hideTyping
++        case .additionalHideUpload: return \AddonProfile.hideUpload
++        case .additionalSaveDeleted: return \AddonProfile.saveDeleted
++        case .additionalDimDeleted: return \AddonProfile.dimDeleted
++        case .additionalSaveEditHistory: return \AddonProfile.saveEditHistory
++        case .additionalFiltersEnabled: return \AddonProfile.filtersEnabled
++        case .additionalLocalPremium: return \AddonProfile.localPremium
++        default: return nil
++        }
++    }
++}
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index 9c397fb5a1adde832c4c2dbe08bd562e1e32e993..d9eb4b23d1df4cd2b03fdd217206b3fe850778d1 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -282,3 +282,51 @@
+ "Settings.NY.Style.lightning" = "Lightning";
+ "Settings.NY.Notice" = "Available for a limited time only!";
+ "Settings.HideAccountInNotifications" = "Hide Account in Notifications";
++
++// Native additional functions
++"Additional.Title" = "Additional functions";
++"Additional.Default" = "Default for all accounts";
++"Additional.AccountNotice" = "Defaults apply to accounts without an override.";
++"Additional.Ghost" = "Privacy";
++"Additional.History" = "Message history";
++"Additional.Filters" = "Message filters";
++"Additional.Premium" = "Local Premium";
++"Additional.Exceptions" = "Chat exceptions";
++"Additional.Retention" = "History retention, days";
++"Additional.Clear" = "Clear saved history";
++"Additional.HistoryNotice" = "Only versions observed while capture is enabled are saved. Secret and expiring messages are excluded. Earlier edits cannot be recovered.";
++"Additional.EditFilters" = "Edit filters";
++"Additional.PremiumNotice" = "Changes affect this client only. Server features still require a subscription. Select your profile badge from your profile.";
++"Additional.Diagnostics" = "Diagnostics";
++"Additional.ClearAllNotice" = "Delete saved revisions for all accounts?";
++"Additional.ClearAccountNotice" = "Delete saved revisions for this account?";
++"Additional.EditHistory" = "Edit history";
++"Additional.Latest" = "Latest locally saved version";
++"Additional.EmptyHistory" = "No versions saved on this device. Earlier edits cannot be recovered.";
++"Additional.Add" = "Add";
++"Additional.Pattern" = "Text or expression";
++"Additional.CaseSensitive" = "Case sensitive";
++"Additional.Reversed" = "Invert text match";
++"Additional.Mode" = "Match mode";
++"Additional.contains" = "Contains";
++"Additional.word" = "Whole word";
++"Additional.regex" = "Regular expression";
++"Additional.Chats" = "Only these chats";
++"Additional.ExcludeChats" = "Except these chats";
++"Additional.Users" = "Only these authors";
++"Additional.Remove" = "Remove";
++"Additional.Save" = "Save";
++"Additional.Enabled" = "Enabled";
++"Additional.Import" = "Import JSON";
++"Additional.Export" = "Export JSON";
++"Additional.ghostEnabled" = "Ghost Mode";
++"Additional.hideRead" = "Hide message read receipts";
++"Additional.hideStories" = "Hide story views";
++"Additional.hideOnline" = "Hide online status";
++"Additional.hideTyping" = "Hide typing and recording";
++"Additional.hideUpload" = "Hide upload activity";
++"Additional.saveDeleted" = "Keep deleted messages";
++"Additional.dimDeleted" = "Dim deleted messages";
++"Additional.saveEditHistory" = "Save edit history";
++"Additional.filtersEnabled" = "Enable filters";
++"Additional.localPremium" = "Local Premium";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index 83d23ad9dbe0676c9006265bf2aeadcc9406db96..9812bb0ffaae9ed58553ec0adb6b31000f8b22f4 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -277,3 +277,51 @@
+ "Settings.NY.Notice" = "Доступны только на ограниченное время!";
+ "Settings.videoControlsInFooter" = "Кнопки видео снизу";
+ "Settings.HideAccountInNotifications" = "Скрыть аккаунт в уведомлениях";
++
++// Native additional functions
++"Additional.Title" = "Дополнительные функции";
++"Additional.Default" = "По умолчанию для всех аккаунтов";
++"Additional.AccountNotice" = "Общие настройки действуют для аккаунтов без индивидуальных настроек.";
++"Additional.Ghost" = "Приватность";
++"Additional.History" = "История сообщений";
++"Additional.Filters" = "Фильтры сообщений";
++"Additional.Premium" = "Локальный Premium";
++"Additional.Exceptions" = "Исключения чатов";
++"Additional.Retention" = "Срок хранения истории, дней";
++"Additional.Clear" = "Очистить сохранённую историю";
++"Additional.HistoryNotice" = "Сохраняются только версии, полученные при включённой записи. Секретные и исчезающие сообщения исключены. Более ранние изменения восстановить нельзя.";
++"Additional.EditFilters" = "Настроить фильтры";
++"Additional.PremiumNotice" = "Изменения действуют только в этом клиенте. Серверные возможности требуют подписки. Значок профиля выбирается в профиле.";
++"Additional.Diagnostics" = "Диагностика";
++"Additional.ClearAllNotice" = "Удалить сохранённые версии для всех аккаунтов?";
++"Additional.ClearAccountNotice" = "Удалить сохранённые версии для этого аккаунта?";
++"Additional.EditHistory" = "История изменений";
++"Additional.Latest" = "Последняя сохранённая на устройстве версия";
++"Additional.EmptyHistory" = "На устройстве нет сохранённых версий. Более ранние изменения восстановить нельзя.";
++"Additional.Add" = "Добавить";
++"Additional.Pattern" = "Текст или выражение";
++"Additional.CaseSensitive" = "Учитывать регистр";
++"Additional.Reversed" = "Инвертировать совпадение текста";
++"Additional.Mode" = "Способ сравнения";
++"Additional.contains" = "Содержит";
++"Additional.word" = "Целое слово";
++"Additional.regex" = "Регулярное выражение";
++"Additional.Chats" = "Только в этих чатах";
++"Additional.ExcludeChats" = "Кроме этих чатов";
++"Additional.Users" = "Только эти авторы";
++"Additional.Remove" = "Удалить";
++"Additional.Save" = "Сохранить";
++"Additional.Enabled" = "Включено";
++"Additional.Import" = "Импорт JSON";
++"Additional.Export" = "Экспорт JSON";
++"Additional.ghostEnabled" = "Режим невидимки";
++"Additional.hideRead" = "Не отправлять прочтение сообщений";
++"Additional.hideStories" = "Скрывать просмотры историй";
++"Additional.hideOnline" = "Скрывать статус онлайн";
++"Additional.hideTyping" = "Скрывать набор и запись";
++"Additional.hideUpload" = "Скрывать загрузку файлов";
++"Additional.saveDeleted" = "Сохранять удалённые сообщения";
++"Additional.dimDeleted" = "Затемнять удалённые сообщения";
++"Additional.saveEditHistory" = "Сохранять историю изменений";
++"Additional.filtersEnabled" = "Включить фильтры";
++"Additional.localPremium" = "Локальный Premium";
+diff --git a/submodules/TelegramUI/BUILD b/submodules/TelegramUI/BUILD
+index 8edb3eeb64423b85309daeef8b330faa6a0768fc..47222f161c2c80367241ae5b9e4ea4ea8efeec1e 100644
+--- a/submodules/TelegramUI/BUILD
++++ b/submodules/TelegramUI/BUILD
+@@ -6,6 +6,7 @@ load(
+ )
+ 
+ sgdeps = [
++    "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
+     "//Swiftgram/SGSettingsUI:SGSettingsUI",
+     "//Swiftgram/SGConfig:SGConfig",
+     "//Swiftgram/SGAPIWebSettings:SGAPIWebSettings",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/BUILD b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/BUILD
+index affbb0c2d1680a3cf7e6e292cae4515d12c12aab..729de1244779883747d805d0da35722a686000f9 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/BUILD
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/BUILD
+@@ -10,6 +10,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
+         "//submodules/AsyncDisplayKit",
+         "//submodules/LottieSettings:LottieSettings",
+         "//submodules/Display",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
+index 0f756f61414cf069cca8695fe672d11e6991f935..377b802534136ef61e68ea687021a73bf382ec10 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
+@@ -1,3 +1,4 @@
++import SGAdditionalCore
+ import SGSimpleSettings
+ import Foundation
+ import LottieSettings
+@@ -655,7 +656,32 @@ public enum InternalBubbleTapAction {
+ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+     public let layoutConstants = (ChatMessageItemLayoutConstants.compact, ChatMessageItemLayoutConstants.regular)
+     
+-    open var item: ChatMessageItem?
++    private var additionalObservers: [NSObjectProtocol] = []
++    private var additionalOriginalAlpha: CGFloat?
++    private func updateAdditionalAppearance() {
++        guard Thread.isMainThread else { return }
++        let dim: Bool
++        if let item, !item.context.account.supplementary, let key = additionalMessageKey(account: item.context.account.peerId, id: item.message.id) {
++            let profile = AddonSettings.shared.profile(key.account)
++            dim = profile.saveDeleted && profile.dimDeleted && MessageArchive.shared.isDeleted(key)
++        } else { dim = false }
++        if dim {
++            if additionalOriginalAlpha == nil { additionalOriginalAlpha = self.alpha }
++            self.alpha = (additionalOriginalAlpha ?? 1) * 0.55
++        } else if let alpha = additionalOriginalAlpha {
++            self.alpha = alpha; additionalOriginalAlpha = nil
++        }
++    }
++    open var item: ChatMessageItem? {
++        didSet {
++            if additionalObservers.isEmpty {
++                for name in [Notification.Name.retainedMessagesChanged, Notification.Name("SGASettingsDidChange")] {
++                    additionalObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.updateAdditionalAppearance() })
++                }
++            }
++            updateAdditionalAppearance()
++        }
++    }
+     open var accessibilityData: ChatMessageAccessibilityData?
+     open var safeInsets = UIEdgeInsets()
+     open var scrollTiltProvider: ((CFTimeInterval) -> Float)?
+@@ -682,6 +708,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+     }
+     
+     deinit {
++        for observer in additionalObservers { NotificationCenter.default.removeObserver(observer) }
+         self.fetchEffectDisposable?.dispose()
+     }
+     
+diff --git a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..02062ad23c47035b6e4a648b9d7c755f3e872e37
+--- /dev/null
++++ b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+@@ -0,0 +1,357 @@
++import Foundation
++import UIKit
++import AsyncDisplayKit
++import Display
++import Postbox
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import TelegramUIPreferences
++import AccountContext
++import ChatControllerInteraction
++import ChatInterfaceState
++import ChatPresentationInterfaceState
++import WallpaperBackgroundNode
++import SGAdditionalCore
++import SGStrings
++
++/// Read-only history. Its messages are constructed in memory and never enter Postbox.
++final class AdditionalHistoryController: ViewController {
++    private let context: AccountContext
++    private let original: Message
++    private let key: MessageKey
++    private let messages = Promise<([Message], Int32, Bool)>()
++    private var history: ChatHistoryListNodeImpl?
++    private var background: WallpaperBackgroundNode?
++    private let notice = UILabel()
++    private var presentationDisposable: Disposable?
++    private var latestVersion: Int64?
++
++    init(context: AccountContext, message: Message, key: MessageKey) {
++        self.context = context; self.original = message; self.key = key
++        let data = context.sharedContext.currentPresentationData.with { $0 }
++        super.init(navigationBarPresentationData: NavigationBarPresentationData(presentationData: data, style: .glass))
++        self.title = i18n("Additional.EditHistory", data.strings.baseLanguageCode)
++        self.navigationItem.backBarButtonItem = UIBarButtonItem(title: data.strings.Common_Back, style: .plain, target: nil, action: nil)
++        self.ready.set(.single(true))
++    }
++    required init(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
++    deinit { presentationDisposable?.dispose() }
++
++    override func loadDisplayNode() {
++        self.displayNode = ASDisplayNode()
++        let data = context.sharedContext.currentPresentationData.with { $0 }
++        let background = createWallpaperBackgroundNode(context: context, forChatDisplay: true)
++        self.background = background
++        displayNode.addSubnode(background)
++        let interaction = historyInteraction(context: context, backgroundNode: background) { [weak self] message in
++            guard let self else { return }
++            let current = self.context.sharedContext.currentPresentationData.with { $0 }
++            let sheet = ActionSheetController(presentationData: current)
++            sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Common_Copy, color: .accent, action: { [weak sheet] in
++                UIPasteboard.general.string = message.text; sheet?.dismissAnimated()
++            })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
++            self.present(sheet, in: .window(.root))
++        }
++        interaction.canReadHistory = false
++        let history = ChatHistoryListNodeImpl(context: context, updatedPresentationData: (data, context.sharedContext.presentationData), systemStyle: .glass,
++            chatLocation: .peer(id: original.id.peerId), chatLocationContextHolder: Atomic(value: nil), adMessagesContext: nil, tag: nil,
++            source: .custom(messages: messages.get(), messageId: nil, quote: nil, isSavedMusic: false, canReorder: false, richMessageId: nil, loadMore: nil),
++            subject: nil, controllerInteraction: interaction, selectedMessages: .single(nil), mode: .bubbles, isChatPreview: true, messageTransitionNode: { nil })
++        history.canReadHistory.set(.single(false))
++        history.enableUnreadAlignment = false
++        self.history = history
++        displayNode.addSubnode(history)
++        notice.numberOfLines = 0; notice.textAlignment = .center
++        notice.adjustsFontForContentSizeCategory = true
++        notice.font = UIFont.preferredFont(forTextStyle: .footnote)
++        notice.isAccessibilityElement = true
++        displayNode.view.addSubview(notice)
++        presentationDisposable = (context.sharedContext.presentationData |> deliverOnMainQueue).start(next: { [weak self] data in
++            self?.apply(data)
++        })
++        MessageArchive.shared.history(key) { [weak self] revisions in
++            guard let self else { return }
++            self.latestVersion = revisions.last?.version
++            let result: [Message] = revisions.enumerated().map { index, revision in
++                let id = MessageId(peerId: self.original.id.peerId, namespace: Namespaces.Message.Local, id: Int32(clamping: index + 1))
++                return Message(stableId: UInt32(index + 1), stableVersion: 0, id: id, globallyUniqueId: nil, groupingKey: nil, groupInfo: nil, threadId: nil,
++                    timestamp: Int32(clamping: revision.version), flags: self.original.flags.contains(.Incoming) ? [.Incoming] : [], tags: [], globalTags: [], localTags: [], customTags: [],
++                    forwardInfo: nil, author: self.original.author, text: revision.text,
++                    attributes: [TextEntitiesMessageAttribute(entities: additionalTextEntities(revision))], media: [], peers: self.original.peers,
++                    associatedMessages: SimpleDictionary(), associatedMessageIds: [], associatedMedia: [:], associatedThreadInfo: nil, associatedStories: [:])
++            }
++            self.messages.set(.single((Array(result.reversed()), 0, false)))
++            self.apply(self.context.sharedContext.currentPresentationData.with { $0 })
++            self.requestLayout(transition: .immediate)
++        }
++        apply(data)
++    }
++
++    private func apply(_ data: PresentationData) {
++        background?.update(wallpaper: data.chatWallpaper, animated: false)
++        notice.textColor = data.theme.list.itemSecondaryTextColor
++        notice.backgroundColor = data.theme.list.blocksBackgroundColor.withAlphaComponent(0.9)
++        let lang = data.strings.baseLanguageCode
++        if let version = latestVersion {
++            let formatter = DateFormatter(); formatter.dateStyle = .medium; formatter.timeStyle = .medium
++            notice.text = i18n("Additional.Latest", lang) + " · " + formatter.string(from: Date(timeIntervalSince1970: TimeInterval(version))) + "\n" + i18n("Additional.HistoryNotice", lang)
++        } else { notice.text = i18n("Additional.EmptyHistory", lang) }
++        self.navigationBar?.updatePresentationData(NavigationBarPresentationData(presentationData: data, style: .glass), transition: .immediate)
++        self.statusBar.statusBarStyle = data.theme.rootController.statusBarStyle.style
++        self.title = i18n("Additional.EditHistory", lang)
++    }
++    override func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
++        super.containerLayoutUpdated(layout, transition: transition)
++        guard let history, let background else { return }
++        transition.updateFrame(node: background, frame: CGRect(origin: .zero, size: layout.size))
++        background.updateLayout(size: layout.size, displayMode: .aspectFill, transition: transition)
++        let top = self.navigationLayout(layout: layout).navigationFrame.maxY
++        let height = notice.sizeThatFits(CGSize(width: max(1, layout.size.width - 32), height: .greatestFiniteMagnitude)).height + 16
++        notice.frame = CGRect(x: 16, y: top + 8, width: layout.size.width - 32, height: height)
++        transition.updateFrame(node: history, frame: CGRect(origin: .zero, size: layout.size))
++        history.updateLayout(transition: transition, updateSizeAndInsets: ListViewUpdateSizeAndInsets(size: layout.size,
++            insets: UIEdgeInsets(top: top + height + 24, left: layout.safeInsets.left, bottom: layout.intrinsicInsets.bottom + 12, right: layout.safeInsets.right), duration: 0, curve: .Default(duration: nil)))
++    }
++}
++
++private func historyInteraction(context: AccountContext, backgroundNode: WallpaperBackgroundNode, copy: @escaping (Message) -> Void) -> ChatControllerInteraction {
++return ChatControllerInteraction(
++            openMessage: { message, _ in
++                copy(message)
++                return true
++            },
++            openPeer: { _, _, _, _ in },
++            openPeerMention: { _, _ in },
++            openMessageContextMenu: { message, _, _, _, _, _ in copy(message) },
++            openMessageReactionContextMenu: { _, _, _, _ in
++            },
++            updateMessageReaction: { _, _, _, _ in },
++            activateMessagePinch: { _ in
++            },
++            openMessageContextActions: { _, _, _, _ in },
++            navigateToMessage: { _, _, _ in },
++            navigateToMessageStandalone: { _ in
++            },
++            navigateToThreadMessage: { _, _, _ in
++            },
++            tapMessage: { message in copy(message) },
++            clickThroughMessage: { _, _ in },
++            toggleMessagesSelection: { _, _ in },
++            sendCurrentMessage: { _, _ in },
++            sendMessage: { _, _ in },
++            sendSticker: { _, _, _, _, _, _, _, _, _ in return false },
++            sendEmoji: { _, _, _ in },
++            sendGif: { _, _, _, _, _ in return false },
++            sendBotContextResultAsGif: { _, _, _, _, _, _ in
++                return false
++            },
++            editGif: { _, _ in
++            },
++            requestMessageActionCallback: { _, _, _, _, _ in },
++            requestMessageActionUrlAuth: { _, _ in },
++            activateSwitchInline: { _, _, _ in },
++            openUrl: { _ in },
++            openExternalInstantPage: { _ in
++            },
++            shareCurrentLocation: { _ in },
++            shareAccountContact: { _ in },
++            sendBotCommand: { _, _ in },
++            openInstantPage: { _, _ in  },
++            openWallpaper: { _ in  },
++            openTheme: { _ in  },
++            openHashtag: { _, _ in },
++            updateInputState: { _ in },
++            updateInputMode: { _ in },
++            updatePresentationState: { _ in },
++            openMessageShareMenu: { _ in
++            },
++            presentController: { _, _ in
++            },
++            presentControllerInCurrent: { _, _ in
++            },
++            navigationController: {
++                return nil
++            },
++            chatControllerNode: {
++                return nil
++            },
++            presentGlobalOverlayController: { _, _ in },
++            callPeer: { _, _ in },
++            openConferenceCall: { _ in
++            },
++            longTap: { _, _ in
++            },
++            todoItemLongTap: { _, _ in
++            },
++            pollOptionLongTap: { _, _ in
++            },
++            openCheckoutOrReceipt: { _, _ in
++            },
++            openSearch: {
++            },
++            setupReply: { _ in
++            },
++            canSetupReply: { _ in
++                return .none
++            },
++            canSendMessages: {
++                return false
++            },
++            navigateToFirstDateMessage: { _, _ in
++            },
++            requestRedeliveryOfFailedMessages: { _ in
++            },
++            addContact: { _ in
++            },
++            rateCall: { _, _, _ in
++            },
++            requestSelectMessagePollOptions: { _, _ in
++            },
++            requestAddMessagePollOption: { _, _, _, _, _ in
++            },
++            requestOpenMessagePollResults: { _, _ in
++            },
++            openAppStorePage: {
++            },
++            displayMessageTooltip: { _, _, _, _, _ in
++            },
++            seekToTimecode: { _, _, _ in
++            },
++            scheduleCurrentMessage: { _ in
++            },
++            sendScheduledMessagesNow: { _ in
++            },
++            editScheduledMessagesTime: { _ in
++            },
++            performTextSelectionAction: { _, _, _, _, _ in
++            },
++            displayImportedMessageTooltip: { _ in
++            },
++            displaySwipeToReplyHint: {
++            },
++            dismissReplyMarkupMessage: { _ in
++            },
++            openMessagePollResults: { _, _ in
++            },
++            openPollCreation: { _, _ in
++            },
++            openPollMedia: { _, _ in
++            },
++            displayPollSolution: { _, _ in
++            },
++            displayPsa: { _, _ in
++            },
++            displayDiceTooltip: { _ in
++            },
++            animateDiceSuccess: { _, _ in
++            },
++            displayPremiumStickerTooltip: { _, _ in
++            },
++            displayEmojiPackTooltip: { _, _ in
++            },
++            openPeerContextMenu: { _, _, _, _, _ in
++            },
++            openMessageReplies: { _, _, _ in
++            },
++            openReplyThreadOriginalMessage: { _ in
++            },
++            openMessageStats: { _ in
++            },
++            editMessageMedia: { _, _ in
++            },
++            copyText: { text in UIPasteboard.general.string = text },
++            displayUndo: { _ in
++            },
++            isAnimatingMessage: { _ in
++                return false
++            },
++            getMessageTransitionNode: {
++                return nil
++            },
++            updateChoosingSticker: { _ in
++            },
++            commitEmojiInteraction: { _, _, _, _ in
++            },
++            openLargeEmojiInfo: { _, _, _ in
++            },
++            openJoinLink: { _ in
++            },
++            openWebView: { _, _, _, _, _ in
++            },
++            activateAdAction: { _, _, _, _ in
++            },
++            adContextAction: { _, _, _ in
++            },
++            removeAd: { _ in
++            },
++            openRequestedPeerSelection: { _, _, _, _ in
++            },
++            saveMediaToFiles: { _ in
++            },
++            openNoAdsDemo: {
++            },
++            openAdsInfo: {
++            },
++            displayGiveawayParticipationStatus: { _ in
++            },
++            openPremiumStatusInfo: { _, _, _, _ in
++            },
++            openRecommendedChannelContextMenu: { _, _, _ in
++            },
++            openGroupBoostInfo: { _, _ in
++            },
++            openStickerEditor: {
++            },
++            openAgeRestrictedMessageMedia: { _, _ in
++            },
++            playMessageEffect: { _ in
++            },
++            editMessageFactCheck: { _ in
++            },
++            sendGift: { _ in
++            },
++            openUniqueGift: { _ in
++            },
++            openMessageFeeException: {
++            },
++            requestMessageUpdate: { _, _, _ in
++            },
++            cancelInteractiveKeyboardGestures: {
++            },
++            dismissTextInput: {
++            },
++            scrollToMessageId: { _, _ in
++            },
++            scrollToMessageIdWithAnchor: { _, _ in
++            },
++            navigateToStory: { _, _ in
++            },
++            attemptedNavigationToPrivateQuote: { _ in
++            },
++            forceUpdateWarpContents: {
++            },
++            playShakeAnimation: {
++            },
++            displayQuickShare: { _, _ ,_ in
++            },
++            updateChatLocationThread: { _, _ in
++            },
++            requestToggleTodoMessageItem: { _, _, _ in
++            },
++            displayTodoToggleUnavailable: { _ in
++            },
++            openStarsPurchase: { _ in
++            },
++            openRankInfo: { _, _, _ in
++            },
++            openSetPeerAvatar: {
++            },
++            displayPollRestrictedToast: { _ in
++            },
++            automaticMediaDownloadSettings: MediaAutoDownloadSettings.defaultSettings,
++            pollActionState: ChatInterfacePollActionState(),
++            stickerSettings: ChatInterfaceStickerSettings(),
++            presentationContext: ChatPresentationContext(context: context, backgroundNode: backgroundNode as? WallpaperBackgroundNode)
++        )
++}
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+index caffaf838acd83a4547af370379232f9c2535e4d..c56b082f1ca56e8eb3b2eda2739fff45991c32db 100644
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ // MARK: Swiftgram
+ import StoreKit
+ import SGIAP
+@@ -326,7 +327,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         }
+         
+         let baseAppBundleId = Bundle.main.bundleIdentifier!
+-        let appGroupName = "group.\(baseAppBundleId)"
++        let appGroupName = sgAppGroupIdentifier()
+ 
+         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
+         configuration.sharedContainerIdentifier = appGroupName
+@@ -577,11 +578,11 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "unknown"
+         
+         let baseAppBundleId = Bundle.main.bundleIdentifier!
+-        let appGroupName = "group.\(baseAppBundleId)"
++        let appGroupName = sgAppGroupIdentifier()
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+             BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+         })
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let maybeAppGroupUrl = sgSharedContainerURL()
+         
+         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)
+         self.buildConfig = buildConfig
+diff --git a/submodules/TelegramUI/Sources/ApplicationContext.swift b/submodules/TelegramUI/Sources/ApplicationContext.swift
+index d25de19ced22613a87aac1a0923396da0fb30c68..5132f9ba6d7d055504c569dfd9f876835e890330 100644
+--- a/submodules/TelegramUI/Sources/ApplicationContext.swift
++++ b/submodules/TelegramUI/Sources/ApplicationContext.swift
+@@ -794,10 +794,11 @@ final class AuthorizedApplicationContext {
+             }
+         }
+         self.context.account.importableContacts.set(optionalImportableContacts)
+-        self.context.sharedContext.deviceContactPhoneNumbers.set(optionalImportableContacts
++        self.context.sharedContext.deviceContactPhoneNumbers.set(.single(Set<String>())
++        |> then(optionalImportableContacts
+         |> map { contacts in
+             return Set(contacts.keys.map { cleanPhoneNumber($0.rawValue) })
+-        })
++        }))
+         
+         let previousTheme = Atomic<PresentationTheme?>(value: nil)
+         self.presentationDataDisposable = (context.sharedContext.presentationData
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 601aff5a2fd3ce6a7b07729f90045fb8656efad8..71d5350a42c46b0391bbe64046fec09806c1eccd 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -1,3 +1,5 @@
++import SGAdditionalCore
++import SGStrings
+ import SGSimpleSettings // MARK: Swiftgram
+ import PeerInfoUI
+ import Foundation
+@@ -961,12 +963,32 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+         return (data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, messageViewsPrivacyTips, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer)
+     }
+     
+-    return dataSignal
++    let additionalKey = additionalMessageKey(account: context.account.peerId, id: message.id)
++    let additionalEligible = additionalKey != nil && additionalCanArchive(attributes: message.attributes, media: message.media)
++    let revisionsSignal: Signal<[MessageRevision], NoError> = Signal { subscriber in
++        if additionalEligible, let key = additionalKey {
++            MessageArchive.shared.history(key) { revisions in subscriber.putNext(revisions); subscriber.putCompletion() }
++        } else { subscriber.putNext([]); subscriber.putCompletion() }
++        return EmptyDisposable
++    }
++    return combineLatest(dataSignal, revisionsSignal)
+     |> deliverOnMainQueue
+-    |> map { [context] data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, messageViewsPrivacyTips, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer -> ContextController.Items in
++    |> map { [context] tuple, savedRevisions -> ContextController.Items in
++        let (data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, messageViewsPrivacyTips, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer) = tuple
+         let isPremium = accountPeer?.isPremium ?? false
+ 
+         var actions: [ContextMenuItem] = []
++        if additionalEligible, let key = additionalKey,
++           !savedRevisions.isEmpty || AddonSettings.shared.profile(key.account).saveEditHistory {
++            actions.append(.action(ContextMenuActionItem(text: i18n("Additional.EditHistory", chatPresentationInterfaceState.strings.baseLanguageCode), icon: { theme in
++                UIImage(systemName: "clock.arrow.circlepath")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)
++            }, action: { controller, _ in
++                controller?.dismiss(completion: {
++                    controllerInteraction.navigationController()?.pushViewController(AdditionalHistoryController(context: context, message: message, key: key))
++                })
++            })))
++        }
++
+ 
+         if isSharedMediaPolls && messages.count == 1 {
+             actions.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.SharedMedia_ViewInChat, icon: { theme in
+diff --git a/submodules/TelegramUI/Sources/TelegramRootController.swift b/submodules/TelegramUI/Sources/TelegramRootController.swift
+index 85480aaf8dc8934e297a309751b8938cf8b3e536..840a52f61fb84c12e70d13a7b4c0ce3f014a6a58 100644
+--- a/submodules/TelegramUI/Sources/TelegramRootController.swift
++++ b/submodules/TelegramUI/Sources/TelegramRootController.swift
+@@ -1,3 +1,4 @@
++import SGSettingsUI
+ import SGSimpleSettings
+ import Foundation
+ import UIKit
+@@ -71,7 +72,14 @@ private class DetailsChatPlaceholderNode: ASDisplayNode, NavigationDetailsPlaceh
+     }
+ }
+ 
++private final class AdditionalSettingsGesture: UILongPressGestureRecognizer {
++    override func canPrevent(_ other: UIGestureRecognizer) -> Bool { false }
++    override func canBePrevented(by other: UIGestureRecognizer) -> Bool { false }
++}
++
+ public final class TelegramRootController: NavigationController, TelegramRootControllerInterface {
++    private var additionalGesture: AdditionalSettingsGesture?
++
+     private let context: AccountContext
+     
+     public var rootTabController: TabBarController?
+@@ -142,6 +150,21 @@ public final class TelegramRootController: NavigationController, TelegramRootCon
+         fatalError("init(coder:) has not been implemented")
+     }
+     
++    override public func viewDidAppear(_ animated: Bool) {
++        super.viewDidAppear(animated)
++        if additionalGesture == nil {
++            let gesture = AdditionalSettingsGesture(target: self, action: #selector(openAdditionalSettings(_:)))
++            gesture.numberOfTouchesRequired = 3; gesture.minimumPressDuration = 0.8
++            gesture.cancelsTouchesInView = false; gesture.delaysTouchesBegan = false; gesture.delaysTouchesEnded = false
++            self.view.addGestureRecognizer(gesture); additionalGesture = gesture
++        }
++    }
++    @objc private func openAdditionalSettings(_ gesture: UILongPressGestureRecognizer) {
++        guard gesture.state == .began, self.presentedViewController == nil,
++              self.viewControllers.last?.navigationItem.title != "Swiftgram" else { return }
++        self.pushViewController(sgSettingsController(context: context))
++    }
++
+     deinit {
+         self.permissionsDisposable?.dispose()
+         self.presentationDataDisposable?.dispose()

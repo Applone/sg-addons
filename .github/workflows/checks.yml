@@ -1,0 +1,62 @@
+name: Patch checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: '0.13.5'
+          python-version: '3.13'
+      - run: uv sync --frozen
+      - name: Python lint, formatting and types
+        run: |
+          uv run --frozen ruff check tools
+          uv run --frozen ruff format --check tools
+          uv run --frozen mypy
+      - name: Workflow and shell checks
+        run: |
+          uv run --frozen yamllint --strict .github .yamllint.yml
+          bash -n tools/test-core.sh
+          shellcheck tools/test-core.sh
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12 -color
+      - run: uv run --frozen python tools/patches.py check
+
+  patches:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Fetch pinned sources and apply the complete patch series
+        run: python3 tools/patches.py prepare build/source
+
+  core:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Prepare sources without build submodules
+        run: python3 tools/patches.py prepare build/source
+      - name: Use upstream Xcode
+        run: |
+          xcode_version="$(python3 -c 'import json; print(json.load(open("build/source/versions.json"))["xcode"])')"
+          sudo xcode-select -s "/Applications/Xcode_${xcode_version}.app/Contents/Developer"
+      - name: Run existing native core regression checks
+        run: bash tools/test-core.sh build/source

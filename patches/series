@@ -1,0 +1,5 @@
+core/native-settings-and-history.patch
+core/shared-app-storage.patch
+core/telegram-engine.patch
+ui/additional-functions.patch
+build/bazel-architecture-checksums.patch

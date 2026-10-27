@@ -1,0 +1,74 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 360
+    env:
+      SOURCE_DIR: /Users/Shared/sg-addons-source
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Load application configuration
+        env:
+          BUILD_CONFIGURATION_JSON: ${{ secrets.BUILD_CONFIGURATION_JSON }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          raw = os.environ['BUILD_CONFIGURATION_JSON']
+          if not raw:
+              raise SystemExit('Set the BUILD_CONFIGURATION_JSON repository secret; see README.md')
+          config = json.loads(raw)
+          for key in ('api_id', 'api_hash', 'bundle_id', 'team_id'):
+              if not config.get(key):
+                  raise SystemExit(f'BUILD_CONFIGURATION_JSON is missing {key}')
+          Path(os.environ['RUNNER_TEMP'], 'sg-addons-build.json').write_text(raw)
+          PY
+      - name: Fetch pinned upstream, apply patches and fetch build submodules
+        run: python3 tools/patches.py prepare "$SOURCE_DIR" --submodules
+      - name: Select upstream Xcode
+        run: |
+          cd "$SOURCE_DIR"
+          xcode_version="$(python3 -c 'import json; print(json.load(open("versions.json"))["xcode"])')"
+          sudo xcode-select -s "/Applications/Xcode_${xcode_version}.app/Contents/Developer"
+          xcodebuild -version
+      - name: Run native core regression checks
+        run: bash tools/test-core.sh "$SOURCE_DIR"
+      - name: Build device IPA using the upstream build system
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          cd "$SOURCE_DIR"
+          python3 -u build-system/Make/Make.py \
+            --bazelUserRoot="$RUNNER_TEMP/bazel-root" \
+            build \
+            --configurationPath="$RUNNER_TEMP/sg-addons-build.json" \
+            --xcodeManagedCodesigning \
+            --disableProvisioningProfiles \
+            --configuration=release_arm64 \
+            --buildNumber="$BUILD_NUMBER" \
+            --outputBuildArtifactsPath="$GITHUB_WORKSPACE/build/artifacts"
+      - name: Include source provenance
+        run: |
+          cp upstream.json patches/series build/artifacts/
+          git rev-parse HEAD > build/artifacts/patchset-commit.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sg-addons-unsigned-${{ github.run_number }}
+          path: build/artifacts/
+          if-no-files-found: error
+          retention-days: 14

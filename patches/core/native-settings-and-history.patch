@@ -1,0 +1,756 @@
+Subject: native settings and history
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
+
+diff --git a/Swiftgram/SGAdditionalCore/BUILD b/Swiftgram/SGAdditionalCore/BUILD
+new file mode 100644
+index 0000000000000000000000000000000000000000..994a2d3eb758ffd9b69c2e3d0145b736a9470095
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/BUILD
+@@ -0,0 +1,9 @@
++load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
++
++swift_library(
++    name = "SGAdditionalCore",
++    module_name = "SGAdditionalCore",
++    srcs = glob(["Sources/**/*.swift"]),
++    linkopts = ["-lsqlite3"],
++    visibility = ["//visibility:public"],
++)
+diff --git a/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift b/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..04c0d3835cb4151dad68fe935ba89aaac272b9a5
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift
+@@ -0,0 +1,40 @@
++import Foundation
++
++/// The legacy record is preserved byte-for-byte except for an explicit badge selection.
++public final class AdditionalLocalProfileState {
++    public static let shared = AdditionalLocalProfileState()
++    private struct State: Codable { var serverUser: Data?; var badge: Data? }
++    private let lock = NSLock()
++    #if TESTING
++    private let defaults = UserDefaults(suiteName: "app.swiftgram.native-premium.tests.\(ProcessInfo.processInfo.processIdentifier)")!
++    #else
++    private let defaults = UserDefaults(suiteName: "app.swiftgram.ayu-addon")!
++    #endif
++    private var accounts: [String: State]
++    private init() {
++        accounts = defaults.data(forKey: "localPremiumState").flatMap { try? JSONDecoder().decode([String: State].self, from: $0) } ?? [:]
++    }
++    public func legacyServerUser(account: String) -> Data? {
++        lock.lock(); defer { lock.unlock() }; return accounts[account]?.serverUser
++    }
++    public func legacyProfileNeedsRestoration(account: String) -> Bool {
++        lock.lock(); defer { lock.unlock() }
++        return accounts[account]?.serverUser != nil && !(defaults.stringArray(forKey: "nativeRestoredProfiles") ?? []).contains(account)
++    }
++    public func didRestoreLegacyProfile(account: String) {
++        lock.lock(); defer { lock.unlock() }
++        var values = defaults.stringArray(forKey: "nativeRestoredProfiles") ?? []
++        if !values.contains(account) { values.append(account); defaults.set(values, forKey: "nativeRestoredProfiles") }
++    }
++    public func badge(account: String) -> Data? {
++        lock.lock(); defer { lock.unlock() }; return accounts[account]?.badge
++    }
++    public func select(badge: Data, account: String) {
++        lock.lock()
++        var state = accounts[account] ?? State(); state.badge = badge
++        accounts[account] = state
++        if let data = try? JSONEncoder().encode(accounts) { defaults.set(data, forKey: "localPremiumState") }
++        lock.unlock()
++        DispatchQueue.main.async { NotificationCenter.default.post(name: Notification.Name("SGASettingsDidChange"), object: nil) }
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..f9fa6267ac4ab931e1720d0a012a907437ff3b69
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+@@ -0,0 +1,293 @@
++import Foundation
++import SQLite3
++
++public struct MessageKey: Hashable {
++    public let account: String
++    public let chat: String
++    public let id: Int64
++    public init(account: String, chat: String, id: Int64) { self.account = account; self.chat = chat; self.id = id }
++}
++
++// The native Postbox remains the message store. This database records which
++// ordinary messages may be retained and which of them were remotely deleted.
++// Keep the previous path/schema so existing local data is not discarded.
++public final class MessageArchive {
++    public static let shared = MessageArchive()
++    private let queue = DispatchQueue(label: "app.swiftgram.functions.messages", qos: .utility)
++    private let lock = NSLock()
++    private var db: OpaquePointer?
++    private var eligible = Set<MessageKey>()
++    private var deleted = Set<MessageKey>()
++    private var excluded = Set<MessageKey>()
++    private var pending = Set<MessageKey>()
++    private var flushScheduled = false
++    private var lastHistoryPrune: [String: Date] = [:]
++    private var settingsObserver: NSObjectProtocol?
++    private var failure: String?
++    private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
++
++    private init() {
++        queue.async { self.load(); self.pruneAllHistory() }
++        settingsObserver = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil) { [weak self] _ in
++            self?.queue.async { [weak self] in self?.pruneAllHistory() }
++        }
++    }
++    deinit {
++        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
++        sqlite3_close(db)
++    }
++    private func pruneAllHistory() {
++        guard let sql = statement("SELECT DISTINCT account FROM revisions") else { return }
++        var accounts: [String] = []
++        while sqlite3_step(sql) == SQLITE_ROW { accounts.append(String(cString: sqlite3_column_text(sql, 0))) }
++        sqlite3_finalize(sql)
++        for account in accounts { pruneHistory(account: account, days: AddonSettings.shared.profile(account).retentionDays, force: true) }
++    }
++
++    private func load() {
++        do {
++            #if TESTING
++            let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SGA_TEST_DIRECTORY"]!)
++            #else
++            let root = try FileManager.default.url(for: .applicationSupportDirectory,
++                in: .userDomainMask, appropriateFor: nil, create: true)
++            #endif
++            var directory = root.appendingPathComponent("SwiftgramAyu", isDirectory: true)
++            #if os(iOS)
++            let attributes: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
++            #else
++            let attributes: [FileAttributeKey: Any] = [:]
++            #endif
++            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: attributes)
++            var values = URLResourceValues(); values.isExcludedFromBackup = true
++            try directory.setResourceValues(values)
++            guard sqlite3_open_v2(directory.appendingPathComponent("messages.sqlite3").path, &db,
++                SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
++                throw SettingsError.invalid("Cannot open retained-message metadata.")
++            }
++            sqlite3_busy_timeout(db, 1000)
++            try execute("PRAGMA journal_mode=WAL")
++            try execute("""
++                CREATE TABLE IF NOT EXISTS messages (
++                  account TEXT NOT NULL, chat TEXT NOT NULL, id INTEGER NOT NULL,
++                  sender TEXT NOT NULL, body TEXT NOT NULL, date INTEGER NOT NULL,
++                  seen INTEGER NOT NULL, deleted INTEGER, wire BLOB NOT NULL,
++                  PRIMARY KEY(account,chat,id))
++                """)
++            try execute("CREATE INDEX IF NOT EXISTS retained_message_ids ON messages(account,id)")
++            try execute("""
++                CREATE TABLE IF NOT EXISTS revisions (
++                  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
++                  account TEXT NOT NULL, chat TEXT NOT NULL, id INTEGER NOT NULL,
++                  version INTEGER NOT NULL, observed INTEGER NOT NULL,
++                  payload BLOB NOT NULL)
++                """)
++            try execute("CREATE INDEX IF NOT EXISTS revision_keys ON revisions(account,chat,id,version,sequence)")
++            try execute("CREATE INDEX IF NOT EXISTS revision_expiry ON revisions(account,observed)")
++            guard let sql = statement("SELECT account,chat,id,deleted FROM messages") else { return }
++            defer { sqlite3_finalize(sql) }
++            lock.lock(); defer { lock.unlock() }
++            while sqlite3_step(sql) == SQLITE_ROW {
++                let key = MessageKey(account: String(cString: sqlite3_column_text(sql, 0)),
++                    chat: String(cString: sqlite3_column_text(sql, 1)), id: sqlite3_column_int64(sql, 2))
++                if excluded.contains(key) { continue }
++                eligible.insert(key)
++                if sqlite3_column_type(sql, 3) != SQLITE_NULL { deleted.insert(key) }
++            }
++        } catch { setFailure(error.localizedDescription) }
++    }
++    private func setFailure(_ value: String) { lock.lock(); failure = value; lock.unlock() }
++    private func execute(_ sql: String) throws {
++        guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
++            throw SettingsError.invalid("Retained-message metadata could not be updated.")
++        }
++    }
++    private func statement(_ query: String) -> OpaquePointer? {
++        guard db != nil else { return nil }
++        var sql: OpaquePointer?
++        guard sqlite3_prepare_v2(db, query, -1, &sql, nil) == SQLITE_OK else {
++            setFailure("Retained-message query failed."); return nil
++        }
++        return sql
++    }
++    private func bind(_ sql: OpaquePointer, _ index: Int32, _ text: String) {
++        _ = text.withCString { sqlite3_bind_text(sql, index, $0, -1, transient) }
++    }
++    public func observe(_ key: MessageKey) {
++        lock.lock()
++        guard !excluded.contains(key), eligible.insert(key).inserted else { lock.unlock(); return }
++        pending.insert(key)
++        let schedule = !flushScheduled
++        flushScheduled = true
++        lock.unlock()
++        if schedule { queue.asyncAfter(deadline: .now() + 0.1) { self.flush() } }
++    }
++    public func exclude(_ key: MessageKey) {
++        lock.lock(); excluded.insert(key); eligible.remove(key); deleted.remove(key); pending.remove(key); lock.unlock()
++        queue.async {
++            for table in ["messages", "revisions"] {
++                guard let sql = self.statement("DELETE FROM \(table) WHERE account=? AND chat=? AND id=?") else { continue }
++                self.bind(sql, 1, key.account); self.bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++                if sqlite3_step(sql) != SQLITE_DONE { self.setFailure("Removing expiring message data failed.") }
++                sqlite3_finalize(sql)
++            }
++        }
++    }
++    private func flush() {
++        lock.lock(); let batch = pending; pending.removeAll(keepingCapacity: true); flushScheduled = false; lock.unlock()
++        guard !batch.isEmpty, db != nil else { return }
++        do {
++            try execute("BEGIN IMMEDIATE")
++            defer { try? execute("COMMIT") }
++            guard let sql = statement("""
++                INSERT INTO messages(account,chat,id,sender,body,date,seen,wire)
++                VALUES(?,?,?,'','',0,?,zeroblob(0))
++                ON CONFLICT(account,chat,id) DO NOTHING
++                """) else { return }
++            defer { sqlite3_finalize(sql) }
++            for key in batch {
++                sqlite3_reset(sql); sqlite3_clear_bindings(sql)
++                bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++                sqlite3_bind_int64(sql, 4, Int64(Date().timeIntervalSince1970))
++
++                if sqlite3_step(sql) != SQLITE_DONE { setFailure("Saving retained-message metadata failed.") }
++            }
++        } catch { setFailure(error.localizedDescription) }
++    }
++
++    // Return only known, non-expiring messages. Unknown/secret/TTL deletions
++    // continue through the host. Preserve every update's pts and ptsCount.
++    public func retain(account: String, channel: Int64?, ids: [Int64]) -> Set<Int64> {
++        // Wait for the initial metadata read on the update-processing thread,
++        // never from the rendering path. This also drains pending captures.
++        queue.sync { flush() }
++        let wanted = Set(ids)
++        let channelChat = channel.map { "channel:\($0)" }
++        lock.lock()
++        let keys = eligible.filter { key in key.account == account && wanted.contains(key.id) &&
++            (channelChat.map { key.chat == $0 } ?? !key.chat.hasPrefix("channel:")) }
++        deleted.formUnion(keys)
++        lock.unlock()
++        guard !keys.isEmpty else { return [] }
++        queue.async {
++            do {
++                try self.execute("BEGIN IMMEDIATE")
++                defer { try? self.execute("COMMIT") }
++                guard let sql = self.statement("UPDATE messages SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND id=?") else { return }
++                defer { sqlite3_finalize(sql) }
++                for key in keys {
++                    sqlite3_reset(sql); sqlite3_clear_bindings(sql)
++                    sqlite3_bind_int64(sql, 1, Int64(Date().timeIntervalSince1970))
++                    self.bind(sql, 2, key.account); self.bind(sql, 3, key.chat); sqlite3_bind_int64(sql, 4, key.id)
++                    if sqlite3_step(sql) != SQLITE_DONE { self.setFailure("Marking a retained message failed.") }
++                }
++            } catch { self.setFailure(error.localizedDescription) }
++        }
++        DispatchQueue.main.async { NotificationCenter.default.post(name: .retainedMessagesChanged, object: nil) }
++        return Set(keys.map(\.id))
++    }
++    public func retain(_ key: MessageKey) -> Bool {
++        queue.sync { flush() }
++        lock.lock()
++        let allowed = eligible.contains(key) && !excluded.contains(key)
++        lock.unlock()
++        guard allowed else { return false }
++        var saved = false
++        queue.sync {
++            guard let sql = statement("UPDATE messages SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND id=?") else { return }
++            defer { sqlite3_finalize(sql) }
++            sqlite3_bind_int64(sql, 1, Int64(Date().timeIntervalSince1970))
++            bind(sql, 2, key.account); bind(sql, 3, key.chat); sqlite3_bind_int64(sql, 4, key.id)
++            saved = sqlite3_step(sql) == SQLITE_DONE && sqlite3_changes(db) > 0
++        }
++        guard saved else { return false }
++        lock.lock(); deleted.insert(key); lock.unlock()
++        DispatchQueue.main.async { NotificationCenter.default.post(name: .retainedMessagesChanged, object: nil) }
++        return true
++    }
++
++    /// Complete queued snapshots before allowing Postbox to replace their source.
++    public func synchronize() { queue.sync { flush() } }
++
++    public func capture(_ revision: MessageRevision, key: MessageKey, retentionDays: Int) {
++        lock.lock(); let allowed = !excluded.contains(key); lock.unlock()
++        guard allowed else { return }
++        queue.async {
++            self.lock.lock(); let excluded = self.excluded.contains(key); self.lock.unlock()
++            guard !excluded else { return }
++            self.pruneHistory(account: key.account, days: retentionDays)
++            // Compare with the latest snapshot no newer than this observation.
++            // A delayed history response must not replace a newer revision.
++            let previous = self.readHistory(key).last(where: { $0.version <= revision.version })
++            if let previous, previous.text == revision.text && previous.entities == revision.entities { return }
++            guard let payload = try? JSONEncoder().encode(revision), let sql = self.statement("""
++                INSERT INTO revisions(account,chat,id,version,observed,payload) VALUES(?,?,?,?,?,?)
++                """) else { return }
++            defer { sqlite3_finalize(sql) }
++            self.bind(sql, 1, key.account); self.bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++            sqlite3_bind_int64(sql, 4, revision.version)
++            sqlite3_bind_int64(sql, 5, Int64(Date().timeIntervalSince1970))
++            _ = payload.withUnsafeBytes { sqlite3_bind_blob(sql, 6, $0.baseAddress, Int32($0.count), self.transient) }
++            if sqlite3_step(sql) != SQLITE_DONE { self.setFailure("Saving message history failed.") }
++        }
++    }
++    private func pruneHistory(account: String, days: Int, force: Bool = false) {
++        let now = Date()
++        guard force || now.timeIntervalSince(lastHistoryPrune[account] ?? .distantPast) > 60 else { return }
++        guard let sql = statement("DELETE FROM revisions WHERE account=? AND observed<?") else { return }
++        defer { sqlite3_finalize(sql) }
++        bind(sql, 1, account); sqlite3_bind_int64(sql, 2, Int64(now.timeIntervalSince1970) - Int64(days) * 86400)
++        if sqlite3_step(sql) == SQLITE_DONE { lastHistoryPrune[account] = now }
++        else { setFailure("Expiring message history failed.") }
++    }
++    private func readHistory(_ key: MessageKey) -> [MessageRevision] {
++        guard let sql = statement("SELECT payload FROM revisions WHERE account=? AND chat=? AND id=? ORDER BY version,sequence") else { return [] }
++        defer { sqlite3_finalize(sql) }
++        bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++        var result: [MessageRevision] = []
++        while sqlite3_step(sql) == SQLITE_ROW {
++            guard let bytes = sqlite3_column_blob(sql, 0) else { continue }
++            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(sql, 0)))
++            if let revision = try? JSONDecoder().decode(MessageRevision.self, from: data) { result.append(revision) }
++        }
++        return result
++    }
++    public func history(_ key: MessageKey, completion: @escaping ([MessageRevision]) -> Void) {
++        queue.async {
++            self.pruneHistory(account: key.account, days: AddonSettings.shared.profile(key.account).retentionDays, force: true)
++            let revisions = self.readHistory(key)
++            DispatchQueue.main.async { completion(revisions) }
++        }
++    }
++    public func clearHistory(account: String?, completion: @escaping (Bool) -> Void) {
++        queue.async {
++            // The default settings page clears all accounts; an account page clears only itself.
++            guard let sql = self.statement(account == nil ? "DELETE FROM revisions" : "DELETE FROM revisions WHERE account=?") else {
++                DispatchQueue.main.async { completion(false) }; return
++            }
++            if let account { self.bind(sql, 1, account) }
++            let success = sqlite3_step(sql) == SQLITE_DONE
++            sqlite3_finalize(sql)
++            DispatchQueue.main.async { completion(success) }
++        }
++    }
++    #if TESTING
++    public func pruneHistoryForTesting(account: String, days: Int) { queue.sync { pruneHistory(account: account, days: days, force: true) } }
++    public func clearHistoryForTesting(account: String) { queue.sync {
++        guard let sql = statement("DELETE FROM revisions WHERE account=?") else { return }
++        bind(sql, 1, account); _ = sqlite3_step(sql); sqlite3_finalize(sql)
++    } }
++    public func historyForTesting(_ key: MessageKey) -> [MessageRevision] { queue.sync { readHistory(key) } }
++    #endif
++    public func isDeleted(_ key: MessageKey) -> Bool {
++        lock.lock(); defer { lock.unlock() }; return deleted.contains(key)
++    }
++    public func status() -> String? { lock.lock(); defer { lock.unlock() }; return failure }
++    #if TESTING
++    public func drain() { queue.sync { flush() } }
++    #endif
++}
++
++extension Notification.Name {
++    public static let retainedMessagesChanged = Notification.Name("SGARetainedMessagesChanged")
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift b/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..30b976a45c6b147403e51f809fa990ecc7f3d3ad
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift
+@@ -0,0 +1,22 @@
++import Foundation
++
++public struct RevisionEntity: Codable, Equatable {
++    public let kind: String
++    public let offset: Int
++    public let length: Int
++    public let value: String?
++    public init(kind: String, offset: Int, length: Int, value: String? = nil) {
++        self.kind = kind; self.offset = offset; self.length = length; self.value = value
++    }
++}
++
++public struct MessageRevision: Codable, Equatable {
++    public let text: String
++    public let entities: [RevisionEntity]
++    public let messageDate: Int64
++    public let editDate: Int64?
++    public var version: Int64 { editDate ?? messageDate }
++    public init(text: String, entities: [RevisionEntity], messageDate: Int64, editDate: Int64?) {
++        self.text = text; self.entities = entities; self.messageDate = messageDate; self.editDate = editDate
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Privacy.swift b/Swiftgram/SGAdditionalCore/Sources/Privacy.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..b3b29bd49a0ddf7632d7365671e17dd9c230d4b5
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/Privacy.swift
+@@ -0,0 +1,19 @@
++import Foundation
++
++public enum AdditionalPrivacyAction { case read, story, typing, upload, online, cancel }
++
++public enum AdditionalPrivacy {
++    public static func suppress(_ action: AdditionalPrivacyAction, account: String, chat: String? = nil) -> Bool {
++        let profile = AddonSettings.shared.profile(account)
++        guard profile.ghostEnabled else { return false }
++        if action != .online, let chat, profile.ghostExceptions.contains(chat) { return false }
++        switch action {
++        case .read: return profile.hideRead
++        case .story: return profile.hideStories
++        case .typing: return profile.hideTyping
++        case .upload: return profile.hideUpload
++        case .online: return profile.hideOnline
++        case .cancel: return false
++        }
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Settings.swift b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..1472f7142b85b821b0e2fdc5f2a00164659a6272
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+@@ -0,0 +1,211 @@
++import Foundation
++
++public struct FilterRule: Codable, Equatable {
++    public var enabled = true
++    public var pattern = ""
++    public var mode = "contains"
++    public var caseSensitive = false
++    public var reversed = false
++    public var chats: [String] = []
++    public var excludeChats: [String] = []
++    public var users: [String] = []
++
++    public init() {}
++    private enum CodingKeys: String, CodingKey {
++        case enabled, pattern, mode, caseSensitive, reversed, chats, excludeChats, users
++    }
++    public init(from decoder: Decoder) throws {
++        let values = try decoder.container(keyedBy: CodingKeys.self)
++        enabled = try values.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
++        pattern = try values.decodeIfPresent(String.self, forKey: .pattern) ?? ""
++        mode = try values.decodeIfPresent(String.self, forKey: .mode) ?? "contains"
++        caseSensitive = try values.decodeIfPresent(Bool.self, forKey: .caseSensitive) ?? false
++        reversed = try values.decodeIfPresent(Bool.self, forKey: .reversed) ?? false
++        chats = try values.decodeIfPresent([String].self, forKey: .chats) ?? []
++        excludeChats = try values.decodeIfPresent([String].self, forKey: .excludeChats) ?? []
++        users = try values.decodeIfPresent([String].self, forKey: .users) ?? []
++    }
++
++    public func validate() throws {
++        guard pattern.utf16.count <= 2048 else {
++            throw SettingsError.invalid("Filter patterns may contain at most 2,048 characters.")
++        }
++        guard ["contains", "word", "regex"].contains(mode) else {
++            throw SettingsError.invalid("Filter mode must be contains, word, or regex.")
++        }
++        guard !pattern.isEmpty || !users.isEmpty else {
++            throw SettingsError.invalid("A filter needs a pattern or user IDs.")
++        }
++        if mode == "regex" { _ = try NSRegularExpression(pattern: pattern) }
++        for peer in chats + excludeChats + users {
++            guard let kind = peer.split(separator: ":").first,
++                  ["user", "chat", "channel"].contains(String(kind)),
++                  peer.split(separator: ":").count == 2,
++                  let id = Int64(peer.split(separator: ":")[1]), id > 0 else {
++                throw SettingsError.invalid("Peer IDs use user:123, chat:123, or channel:123.")
++            }
++        }
++    }
++}
++
++public enum SettingsError: LocalizedError {
++    case invalid(String)
++    public var errorDescription: String? { if case let .invalid(text) = self { return text }; return nil }
++}
++
++public struct AddonProfile: Codable {
++    public var ghostEnabled = false
++    public var hideRead = true
++    public var hideStories = true
++    public var hideOnline = true
++    public var hideTyping = true
++    public var hideUpload = true
++    public var ghostExceptions: [String] = []
++    public var saveDeleted = false
++    public var dimDeleted = true
++    public var retentionDays = 30
++    public var filtersEnabled = false
++    public var filters: [FilterRule] = []
++    public var saveEditHistory = false
++    public var localPremium = false
++
++    public init() {}
++    private enum CodingKeys: String, CodingKey {
++        case ghostEnabled, hideRead, hideStories, hideOnline, hideTyping, hideUpload
++        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium, saveEditHistory
++    }
++    public init(from decoder: Decoder) throws {
++        let values = try decoder.container(keyedBy: CodingKeys.self)
++        ghostEnabled = try values.decodeIfPresent(Bool.self, forKey: .ghostEnabled) ?? false
++        hideRead = try values.decodeIfPresent(Bool.self, forKey: .hideRead) ?? true
++        hideStories = try values.decodeIfPresent(Bool.self, forKey: .hideStories) ?? true
++        hideOnline = try values.decodeIfPresent(Bool.self, forKey: .hideOnline) ?? true
++        hideTyping = try values.decodeIfPresent(Bool.self, forKey: .hideTyping) ?? true
++        hideUpload = try values.decodeIfPresent(Bool.self, forKey: .hideUpload) ?? true
++        ghostExceptions = try values.decodeIfPresent([String].self, forKey: .ghostExceptions) ?? []
++        saveDeleted = try values.decodeIfPresent(Bool.self, forKey: .saveDeleted) ?? false
++        dimDeleted = try values.decodeIfPresent(Bool.self, forKey: .dimDeleted) ?? true
++        retentionDays = try values.decodeIfPresent(Int.self, forKey: .retentionDays) ?? 30
++        filtersEnabled = try values.decodeIfPresent(Bool.self, forKey: .filtersEnabled) ?? false
++        filters = try values.decodeIfPresent([FilterRule].self, forKey: .filters) ?? []
++        saveEditHistory = try values.decodeIfPresent(Bool.self, forKey: .saveEditHistory) ?? false
++        localPremium = try values.decodeIfPresent(Bool.self, forKey: .localPremium) ?? false
++        try validate()
++    }
++
++    public func validate() throws {
++        guard (1...365).contains(retentionDays) else {
++            throw SettingsError.invalid("Retention must be between 1 and 365 days.")
++        }
++        guard filters.count <= 200 else { throw SettingsError.invalid("Maximum 200 filters.") }
++        for rule in filters { try rule.validate() }
++        if !ghostExceptions.isEmpty {
++            var rule = FilterRule()
++            rule.pattern = "validation"
++            rule.chats = ghostExceptions
++            try rule.validate()
++        }
++    }
++}
++
++public final class AddonSettings {
++    public static let shared = AddonSettings()
++    private let lock = NSLock()
++    #if TESTING
++    private let defaults = UserDefaults(suiteName: "app.swiftgram.functions.tests.\(ProcessInfo.processInfo.processIdentifier)")!
++    #else
++    private let defaults = UserDefaults(suiteName: "app.swiftgram.ayu-addon")!
++    #endif
++    private var profiles: [String: AddonProfile]
++    private var revision = 0
++    private var enabled = false
++    private var retaining = false
++
++    private init() {
++        profiles = defaults.data(forKey: "profiles").flatMap {
++            try? JSONDecoder().decode([String: AddonProfile].self, from: $0)
++        } ?? [:]
++        updateEnabled()
++    }
++    private func updateEnabled() {
++        enabled = profiles.values.contains { $0.ghostEnabled || $0.saveDeleted || $0.filtersEnabled || $0.localPremium || $0.saveEditHistory }
++        retaining = profiles.values.contains(where: \.saveDeleted)
++    }
++    public func anyEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return enabled }
++    public func anyHistoryEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return profiles.values.contains(where: \.saveEditHistory) }
++    public func anyRetentionEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return retaining }
++    public func profile(_ account: String?) -> AddonProfile {
++        lock.lock(); defer { lock.unlock() }
++        return profiles[account ?? "default"] ?? profiles["default"] ?? AddonProfile()
++    }
++    public func version() -> Int { lock.lock(); defer { lock.unlock() }; return revision }
++    public func save(_ profile: AddonProfile, account: String?) throws {
++        try profile.validate()
++        lock.lock(); defer { lock.unlock() }
++        var next = profiles
++        next[account ?? "default"] = profile
++        let bytes = try JSONEncoder().encode(next)
++        defaults.set(bytes, forKey: "profiles")
++        profiles = next
++        updateEnabled()
++        revision += 1
++        DispatchQueue.main.async {
++            NotificationCenter.default.post(name: Notification.Name("SGASettingsDidChange"), object: nil)
++        }
++    }
++    public func accounts() -> [String] {
++        lock.lock(); defer { lock.unlock() }
++        return profiles.keys.filter { $0 != "default" }.sorted()
++    }
++}
++
++public final class CompiledFilters {
++    public init() {}
++    private var version = -1
++    private var account: String?
++    private var rules: [(FilterRule, NSRegularExpression?)] = []
++
++    // Called under the engine's serial lock. Regex objects are reused per revision.
++    public func matches(text: String, chat: String, authors: [String], profile: AddonProfile, account: String?) -> Bool {
++        guard profile.filtersEnabled else { return false }
++        let currentVersion = AddonSettings.shared.version()
++        if version != currentVersion || self.account != account {
++            version = currentVersion
++            self.account = account
++            rules = profile.filters.filter(\.enabled).map { rule in
++                let pattern: String
++                switch rule.mode {
++                case "regex": pattern = rule.pattern
++                case "word": pattern = "\\b" + NSRegularExpression.escapedPattern(for: rule.pattern) + "\\b"
++                default: pattern = NSRegularExpression.escapedPattern(for: rule.pattern)
++                }
++                let regex = rule.pattern.isEmpty ? nil : try? NSRegularExpression(
++                    pattern: pattern, options: rule.caseSensitive ? [] : [.caseInsensitive])
++                return (rule, regex)
++            }
++        }
++        let deadline = Date().addingTimeInterval(0.025)
++        for (rule, regex) in rules {
++            if Date() > deadline { return false }
++            if !rule.chats.isEmpty && !rule.chats.contains(chat) { continue }
++            if rule.excludeChats.contains(chat) { continue }
++            if !rule.users.isEmpty && !authors.contains(where: rule.users.contains) { continue }
++            if rule.pattern.isEmpty { return true }
++            var found = false
++            var timedOut = false
++            let started = Date()
++            regex?.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(text.startIndex..., in: text)) { match, _, stop in
++                if Date() > deadline || Date().timeIntervalSince(started) > 0.02 {
++                    timedOut = true
++                    stop.pointee = true
++                } else if match != nil {
++                    found = true
++                    stop.pointee = true
++                }
++            }
++            if timedOut { continue }
++            if rule.reversed ? !found : found { return true }
++        }
++        return false
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/History.swift b/Swiftgram/SGAdditionalCore/Tests/History.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..31e3982bb76515d2d30cbc1148e382472fac047c
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/History.swift
+@@ -0,0 +1,46 @@
++import Foundation
++import SQLite3
++
++enum HistoryChecks {
++    static func run(root: URL) throws {
++        let key = MessageKey(account: "77", chat: "user:42", id: 811)
++        let otherAccount = MessageKey(account: "88", chat: key.chat, id: key.id)
++        let otherChat = MessageKey(account: key.account, chat: "channel:42", id: key.id)
++        let bold = RevisionEntity(kind: "messageEntityBold", offset: 0, length: 5, value: nil)
++        let original = MessageRevision(text: "First caption", entities: [bold], messageDate: 100, editDate: nil)
++        let edit = MessageRevision(text: "Edited caption", entities: [], messageDate: 100, editDate: 120)
++        let intermediate = MessageRevision(text: "Intermediate", entities: [], messageDate: 100, editDate: 110)
++        let archive = MessageArchive.shared
++        archive.capture(original, key: key, retentionDays: 30)
++        archive.capture(edit, key: key, retentionDays: 30)
++        archive.capture(edit, key: key, retentionDays: 30)
++        archive.capture(intermediate, key: key, retentionDays: 30)
++        archive.capture(original, key: key, retentionDays: 30)
++        CheckCore.require(archive.historyForTesting(key) == [original, intermediate, edit], "ordered, deduplicated revisions; stale fetch cannot replace latest")
++        archive.capture(original, key: otherAccount, retentionDays: 30)
++        archive.capture(edit, key: otherChat, retentionDays: 30)
++        CheckCore.require(archive.historyForTesting(otherAccount) == [original], "revision account isolation")
++        CheckCore.require(archive.historyForTesting(otherChat) == [edit], "revision chat namespace isolation")
++        let formatEdit = MessageRevision(text: edit.text, entities: [bold], messageDate: 100, editDate: 121)
++        archive.capture(formatEdit, key: key, retentionDays: 30)
++        CheckCore.require(archive.historyForTesting(key).last == formatEdit, "formatting-only edit is retained")
++        let sameSecondA = MessageRevision(text: "A", entities: [], messageDate: 100, editDate: 122)
++        let sameSecondB = MessageRevision(text: "B", entities: [], messageDate: 100, editDate: 122)
++        for revision in [sameSecondA, sameSecondB, sameSecondA, sameSecondB] { archive.capture(revision, key: key, retentionDays: 30) }
++        CheckCore.require(Array(archive.historyForTesting(key).suffix(4)) == [sameSecondA, sameSecondB, sameSecondA, sameSecondB], "repeated text edits within one second preserve reversions")
++        archive.exclude(key)
++        archive.capture(edit, key: key, retentionDays: 30)
++        CheckCore.require(archive.historyForTesting(key).isEmpty, "TTL exclusion purges revisions and blocks future captures")
++
++        var db: OpaquePointer?
++        CheckCore.require(sqlite3_open(root.appendingPathComponent("SwiftgramAyu/messages.sqlite3").path, &db) == SQLITE_OK, "history persisted database")
++        CheckCore.require(sqlite3_exec(db, "UPDATE revisions SET observed=1 WHERE account='88'", nil, nil, nil) == SQLITE_OK, "expiry fixture")
++        sqlite3_close(db)
++        archive.pruneHistoryForTesting(account: "88", days: 30)
++        CheckCore.require(archive.historyForTesting(otherAccount).isEmpty, "revision expiry is persisted")
++        CheckCore.require(archive.historyForTesting(otherChat) == [edit], "expiry respects accounts")
++        archive.clearHistoryForTesting(account: "77")
++        CheckCore.require(archive.historyForTesting(otherChat).isEmpty, "clear account history")
++
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b08149067f8a2c2a0eb3b2fb6c0fd46148e6c28
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -0,0 +1,64 @@
++import Foundation
++#if os(Linux)
++import Glibc
++#else
++import Darwin
++#endif
++
++struct CheckCore {
++    static func require(_ condition: @autoclosure () -> Bool, _ label: String) {
++        guard condition() else { fatalError("FAILED: " + label) }
++    }
++}
++
++@main struct NativeCoreChecks {
++    static func main() throws {
++        let root = FileManager.default.temporaryDirectory.appendingPathComponent("swiftgram-native-tests-" + UUID().uuidString)
++        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
++        setenv("SGA_TEST_DIRECTORY", root.path, 1)
++        defer { try? FileManager.default.removeItem(at: root) }
++        let suite = "app.swiftgram.functions.tests.\(ProcessInfo.processInfo.processIdentifier)"
++        let defaults = UserDefaults(suiteName: suite)!
++        defaults.removePersistentDomain(forName: suite)
++        defer { defaults.removePersistentDomain(forName: suite) }
++        // Fixtures use the old suite keys and Codable shape.
++        defaults.set(Data(#"{"default":{"ghostEnabled":true,"hideRead":true,"saveEditHistory":true},"88":{"ghostEnabled":false}}"#.utf8), forKey: "profiles")
++        CheckCore.require(AddonSettings.shared.profile("77").ghostEnabled, "legacy default profile")
++        CheckCore.require(!AddonSettings.shared.profile("88").ghostEnabled, "legacy account override")
++        CheckCore.require(AdditionalPrivacy.suppress(.read, account: "77", chat: "user:42"), "hide reads")
++        CheckCore.require(!AdditionalPrivacy.suppress(.read, account: "88", chat: "user:42"), "privacy account isolation")
++        var profile = AddonSettings.shared.profile("77")
++        profile.ghostExceptions = ["user:42"]
++        try AddonSettings.shared.save(profile, account: "77")
++        CheckCore.require(!AdditionalPrivacy.suppress(.read, account: "77", chat: "user:42"), "chat exception")
++        CheckCore.require(AdditionalPrivacy.suppress(.online, account: "77", chat: "user:42"), "online applies to account")
++        CheckCore.require(!AdditionalPrivacy.suppress(.cancel, account: "77"), "cancel is transmitted")
++        try HistoryChecks.run(root: root)
++        let key = MessageKey(account: "77", chat: "user:42", id: 1)
++        let other = MessageKey(account: "77", chat: "channel:42", id: 1)
++        MessageArchive.shared.observe(key)
++        CheckCore.require(MessageArchive.shared.retain(key), "typed retention persists deletion")
++        CheckCore.require(!MessageArchive.shared.retain(other), "typed retention never collides across chats")
++        MessageArchive.shared.exclude(key)
++        CheckCore.require(!MessageArchive.shared.retain(key), "TTL exclusion overrides retention")
++        var rule = FilterRule(); rule.pattern = "spam"; rule.chats = ["user:42"]
++        profile.filters = [rule]; profile.filtersEnabled = true
++        let filters = CompiledFilters()
++        CheckCore.require(filters.matches(text: "SPAM", chat: "user:42", authors: [], profile: profile, account: "77"), "legacy filter semantics")
++        CheckCore.require(!filters.matches(text: "spam", chat: "channel:42", authors: [], profile: profile, account: "77"), "filter chat namespace")
++        rule.mode = "regex"; rule.pattern = "["
++        do { try rule.validate(); fatalError("invalid regex accepted") } catch { }
++        let premiumSuite = "app.swiftgram.native-premium.tests.\(ProcessInfo.processInfo.processIdentifier)"
++        let premiumDefaults = UserDefaults(suiteName: premiumSuite)!
++        premiumDefaults.removePersistentDomain(forName: premiumSuite)
++        defer { premiumDefaults.removePersistentDomain(forName: premiumSuite) }
++        let legacy: [String: [String: Data]] = ["77": ["serverUser": Data([1, 2]), "badge": Data([3, 4])]]
++        premiumDefaults.set(try JSONEncoder().encode(legacy), forKey: "localPremiumState")
++        CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "77") == Data([3, 4]), "legacy badge imported")
++        AdditionalLocalProfileState.shared.select(badge: Data([0]), account: "77")
++        let saved = try JSONDecoder().decode([String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
++        CheckCore.require(saved["77"]?["serverUser"] == Data([1, 2]), "badge changes preserve legacy server snapshot")
++        CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "88") == nil, "badge account isolation")
++        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, local badge storage")
++    }
++}

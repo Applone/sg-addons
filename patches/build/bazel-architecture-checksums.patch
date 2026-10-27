@@ -1,0 +1,33 @@
+Subject: bazel architecture checksums
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
+
+diff --git a/build-system/Make/BuildEnvironment.py b/build-system/Make/BuildEnvironment.py
+index 2cb64aae7be55f6d62e98e49936ffdc37c5807d1..c0852fd7a53e9a390e59ee09b4f9320824a87c45 100644
+--- a/build-system/Make/BuildEnvironment.py
++++ b/build-system/Make/BuildEnvironment.py
+@@ -160,7 +160,8 @@ class BuildEnvironmentVersions:
+             else:
+                 bazel_version, bazel_version_sha256 = configuration_dict['bazel'].split(':')
+                 self.bazel_version = bazel_version
+-                self.bazel_version_sha256 = bazel_version_sha256
++                self.bazel_version_sha256 = configuration_dict.get('bazel_sha256_by_arch', {}).get(
++                    'darwin-arm64' if is_apple_silicon() else 'darwin-x86_64', bazel_version_sha256)
+             if configuration_dict['xcode'] is None:
+                 raise Exception('Missing xcode version in {}'.format(configuration_path))
+             else:
+diff --git a/versions.json b/versions.json
+index 4c035216a61def2355b0730e69071fca65a03635..9d8088f615948c6658ef118b699f549b47212051 100644
+--- a/versions.json
++++ b/versions.json
+@@ -3,5 +3,9 @@
+     "xcode": "26.6",
+     "deploy_xcode": "26.2",
+     "bazel": "9.2.0:dd466352a3e4d3581b8898740ee1ff208866ccbe25f8d367c5dcb950219587e6",
+-    "macos": "26"
++    "macos": "26",
++    "bazel_sha256_by_arch": {
++        "darwin-arm64": "dd466352a3e4d3581b8898740ee1ff208866ccbe25f8d367c5dcb950219587e6",
++        "darwin-x86_64": "14c9bcb01303b38192e0e2895051c1bcf19bf89d7e416f5aeeeb48b6b624cfbf"
++    }
+ }

@@ -1,0 +1,554 @@
+Subject: shared app storage
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
+
+diff --git a/Swiftgram/SGAppGroupIdentifier/BUILD b/Swiftgram/SGAppGroupIdentifier/BUILD
+index cc3e13985c6657cc9569ba3f6f451d0c062b6d9c..ab5fc7e01ac60a9ec3a90cc92145185a5943d445 100644
+--- a/Swiftgram/SGAppGroupIdentifier/BUILD
++++ b/Swiftgram/SGAppGroupIdentifier/BUILD
+@@ -10,6 +10,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier/SignedEntitlements:SGSignedEntitlements",
+     ],
+     visibility = [
+         "//visibility:public",
+diff --git a/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/BUILD b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/BUILD
+new file mode 100644
+index 0000000000000000000000000000000000000000..2cae5d6d74980508162eb9924e02ab6aa1e2d522
+--- /dev/null
++++ b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/BUILD
+@@ -0,0 +1,10 @@
++load("@rules_cc//cc:objc_library.bzl", "objc_library")
++objc_library(
++    name = "SGSignedEntitlements",
++    srcs = ["SGSignedEntitlements.m"],
++    hdrs = ["SGSignedEntitlements.h"],
++    module_name = "SGSignedEntitlements",
++    enable_modules = True,
++    sdk_frameworks = ["Foundation", "Security"],
++    visibility = ["//visibility:public"],
++)
+diff --git a/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9ce49749d2c639feea94ae92d48d517f2ef0109
+--- /dev/null
++++ b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h
+@@ -0,0 +1,5 @@
++#import <Foundation/Foundation.h>
++NS_ASSUME_NONNULL_BEGIN
++NSArray<NSString *> *SGAdditionalSignedGroups(void);
++BOOL SGAdditionalCloudKitAuthorized(void);
++NS_ASSUME_NONNULL_END
+diff --git a/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.m b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.m
+new file mode 100644
+index 0000000000000000000000000000000000000000..46b46e838f398cc47fff724a282dd51832a459ec
+--- /dev/null
++++ b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.m
+@@ -0,0 +1,25 @@
++#import "SGSignedEntitlements.h"
++#import <Security/Security.h>
++#import <dlfcn.h>
++static id SGCEntitlement(NSString *name) {
++    typedef CFTypeRef (*CreateTask)(CFAllocatorRef);
++    typedef CFTypeRef (*CopyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *);
++    CreateTask create = (CreateTask)dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
++    CopyEntitlement copy = (CopyEntitlement)dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
++    if (!create || !copy) return nil;
++    CFTypeRef task = create(NULL);
++    if (!task) return nil;
++    id value = CFBridgingRelease(copy(task, (__bridge CFStringRef)name, NULL));
++    CFRelease(task); return value;
++}
++NSArray<NSString *> *SGAdditionalSignedGroups(void) {
++    id value = SGCEntitlement(@"com.apple.security.application-groups");
++    if (![value isKindOfClass:NSArray.class]) return @[];
++    for (id item in value) if (![item isKindOfClass:NSString.class] || ![item length] || [item containsString:@"*"]) return @[];
++    return value;
++}
++BOOL SGAdditionalCloudKitAuthorized(void) {
++    id services = SGCEntitlement(@"com.apple.developer.icloud-services");
++    id containers = SGCEntitlement(@"com.apple.developer.icloud-container-identifiers");
++    return [services isKindOfClass:NSArray.class] && [services containsObject:@"CloudKit"] && [containers isKindOfClass:NSArray.class] && [containers count] > 0;
++}
+diff --git a/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift b/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift
+index 90859ac8046909f5e898e8d3f3dcfd1732a37dca..d8872daf75b1d40cfbab1e9da1d8f7f472a346b3 100644
+--- a/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift
++++ b/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift
+@@ -21,11 +21,9 @@ public func sgBaseBundleIdentifier() -> String {
+ }
+ 
+ public func sgAppGroupIdentifier() -> String {
+-    let result: String = "group.\(sgBaseBundleIdentifier())"
+-    
+-    #if DEBUG
+-    print("APP_GROUP_IDENTIFIER: \(result)")
+-    #endif
+-    
+-    return result
++    SGSharedStorage.resolution.group ?? "group.\(sgBaseBundleIdentifier())"
+ }
++
++public func sgSharedContainerURL() -> URL? { SGSharedStorage.resolution.url }
++
++public func sgSharedStorageStatus() -> String { SGSharedStorage.resolution.status }
+diff --git a/Swiftgram/SGAppGroupIdentifier/Sources/SGSharedStorage.swift b/Swiftgram/SGAppGroupIdentifier/Sources/SGSharedStorage.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..7096bdc8ed642553fae6fbc74841233fba0ea6be
+--- /dev/null
++++ b/Swiftgram/SGAppGroupIdentifier/Sources/SGSharedStorage.swift
+@@ -0,0 +1,87 @@
++import Foundation
++import Darwin
++import SGSignedEntitlements
++
++private struct StorageFailure: Error { let message: String }
++
++enum SGSharedStorage {
++    struct Resolution { let group: String?; let url: URL?; let status: String }
++    static let resolution: Resolution = resolve()
++
++    private static func resolve() -> Resolution {
++        let manager = FileManager.default
++        let extensionProcess = Bundle.main.bundleURL.pathExtension == "appex"
++        let expected = "group.\(sgBaseBundleIdentifier())"
++        let requested = Bundle.main.object(forInfoDictionaryKey: "SwiftgramSharedAppGroup") as? String
++        let signed = SGAdditionalSignedGroups()
++        let candidates = requested.map { signed.contains($0) ? [$0] : [] } ?? (signed.contains(expected) ? [expected] : signed.sorted())
++        for group in candidates {
++            guard let container = manager.containerURL(forSecurityApplicationGroupIdentifier: group) else { continue }
++            do {
++                let url = try prepare(container: container, extensionProcess: extensionProcess)
++                return publish(Resolution(group: group, url: url, status: "App Group sharing ready"))
++            } catch {
++                if extensionProcess { return publish(Resolution(group: group, url: nil, status: "Open Swiftgram once to initialize shared storage, or check signing and storage access.")) }
++                // A failed migration must not publish an empty replacement account store.
++                return fallback(group: group)
++            }
++        }
++        if extensionProcess { return publish(Resolution(group: nil, url: nil, status: "Swiftgram and its extensions require the same signed App Group. Check Feather signing settings.")) }
++        return fallback(group: nil)
++    }
++    private static func publish(_ result: Resolution) -> Resolution {
++        UserDefaults.standard.set(result.status, forKey: "SwiftgramAddonStorageStatus")
++        return result
++    }
++    private static func legacy() throws -> URL {
++        try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
++            .appendingPathComponent("SwiftgramStartupFix/GroupContainer", isDirectory: true)
++    }
++    private static func fallback(group: String?) -> Resolution {
++        do {
++            let path = try legacy()
++            try FileManager.default.createDirectory(at: path, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
++            return publish(Resolution(group: group, url: path, status: "Private fallback only; sharing requires a common signed App Group."))
++        } catch { return publish(Resolution(group: group, url: nil, status: "Account storage could not be opened.")) }
++    }
++    private static func prepare(container: URL, extensionProcess: Bool) throws -> URL {
++        let manager = FileManager.default
++        let descriptor = open(container.appendingPathComponent(".swiftgram-addon-migration.lock").path, O_CREAT | O_RDWR, 0o600)
++        guard descriptor >= 0 else { throw StorageFailure(message: "Migration lock unavailable") }
++        defer { close(descriptor) }
++        var locked = false
++        for _ in 0..<100 {
++            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 { locked = true; break }
++            usleep(50_000)
++        }
++        guard locked else { throw StorageFailure(message: "Migration busy") }
++        defer { flock(descriptor, LOCK_UN) }
++        if manager.fileExists(atPath: container.appendingPathComponent("telegram-data").path) { return container }
++        let destination = container.appendingPathComponent("SwiftgramSharedStorage", isDirectory: true)
++        if manager.fileExists(atPath: destination.path) { return destination }
++        guard !extensionProcess else { throw StorageFailure(message: "Main app initialization required") }
++        let source = try legacy()
++        let staging = container.appendingPathComponent(".swiftgram-migrate-" + UUID().uuidString, isDirectory: true)
++        var published = false
++        defer { if !published { try? manager.removeItem(at: staging) } }
++        if manager.fileExists(atPath: source.path) {
++            try manager.copyItem(at: source, to: staging)
++            var enumerationError: Error?
++            guard let files = manager.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], errorHandler: { _, error in enumerationError = error; return false }) else { throw StorageFailure(message: "Migration verification unavailable") }
++            for case let file as URL in files {
++                let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
++                guard values.isSymbolicLink != true else { throw StorageFailure(message: "Unexpected symbolic link in storage") }
++                if values.isRegularFile == true {
++                    let relative = String(file.path.dropFirst(source.path.count + 1))
++                    guard manager.contentsEqual(atPath: file.path, andPath: staging.appendingPathComponent(relative).path) else { throw StorageFailure(message: "Storage copy verification failed") }
++                }
++            }
++            if let error = enumerationError { throw error }
++        } else {
++            try manager.createDirectory(at: staging, withIntermediateDirectories: true, attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
++        }
++        try manager.moveItem(at: staging, to: destination)
++        published = true
++        return destination
++    }
++}
+diff --git a/Swiftgram/SGDBReset/Sources/File.swift b/Swiftgram/SGDBReset/Sources/File.swift
+index 42e661040dc561759b8dcfeee6e0e57632aefe6e..6aae48e2660cf3c5d15c376682ad16c00133f891 100644
+--- a/Swiftgram/SGDBReset/Sources/File.swift
++++ b/Swiftgram/SGDBReset/Sources/File.swift
+@@ -7,7 +7,7 @@ private let dbResetKey = "sg_db_reset"
+ private let dbHardResetKey = "sg_db_hard_reset"
+ 
+ private func sgDefaultDataPath() -> String? {
+-    guard let appGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: sgAppGroupIdentifier()) else {
++    guard let appGroupUrl = sgSharedContainerURL() else {
+         return nil
+     }
+     return (appGroupUrl.path as NSString).appendingPathComponent("telegram-data")
+diff --git a/Telegram/BUILD b/Telegram/BUILD
+index e90d2c8617f60ad3dd999eb39d39d4eba02da24e..ebe01b2f693d93f247670fb20fccc15cb089b132 100644
+--- a/Telegram/BUILD
++++ b/Telegram/BUILD
+@@ -244,6 +244,7 @@ swift_library(
+         "-serialize-debugging-options",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/AsyncDisplayKit:AsyncDisplayKit",
+         "//submodules/AppBundle:AppBundle",
+         "//submodules/ObjCRuntimeUtils:ObjCRuntimeUtils",
+@@ -405,6 +406,7 @@ swift_library(
+         ":GeneratedPresentationStrings/Resources/PresentationStrings.data",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI:TelegramUI",
+         "//third-party/boringssl:crypto",
+     ],
+@@ -1055,6 +1057,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI",
+         "//submodules/PasscodeCore",
+         "//submodules/TelegramUI/Components/ShareExtensionContext"
+@@ -1145,6 +1148,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI:TelegramUI",
+         "//submodules/PasscodeCore",
+         ":NotificationContentExtensionLink",
+@@ -1246,6 +1250,7 @@ swift_library(
+         ":WidgetAssets",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/BuildConfig:BuildConfig",
+         "//submodules/WidgetItems:WidgetItems_iOS14",
+         "//submodules/WidgetItemsUtils:WidgetItemsUtils",
+@@ -1390,6 +1395,7 @@ swift_library(
+         ":IntentsAssets"
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramApi:TelegramApi",
+@@ -1410,6 +1416,7 @@ swift_library(
+         "SiriIntentsTests/**/*.swift",
+     ]),
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         ":IntentsExtensionLib",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
+@@ -1568,6 +1575,7 @@ swift_library(
+         ":SGActionRequestHandlerScript"
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/UrlEscaping:UrlEscaping"
+     ],
+ )
+@@ -1664,6 +1672,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI:TelegramUI",
+         "//submodules/TelegramVoip:TelegramVoip",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+diff --git a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
+index 6482ba9bf218f12379039c8de28bd424e89737f6..e965e0c1343da3b1b42b48fb08597209258800c1 100644
+--- a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
++++ b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ import Foundation
+ import ReplayKit
+ import CoreVideo
+@@ -322,8 +323,8 @@ private final class EmbeddedBroadcastUploadImpl: BroadcastUploadImpl {
+ 
+         let baseAppBundleId = String(appBundleIdentifier[..<lastDotRange.lowerBound])
+ 
+-        let appGroupName = "group.\(baseAppBundleId)"
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let appGroupName = sgAppGroupIdentifier()
++        let maybeAppGroupUrl = sgSharedContainerURL()
+ 
+         guard let appGroupUrl = maybeAppGroupUrl else {
+             self.finishWithError()
+diff --git a/Telegram/NotificationContent/NotificationViewController.swift b/Telegram/NotificationContent/NotificationViewController.swift
+index be6efb0ab6837ee7f7d4a0ef9da6d07c5a064e41..e0e8ae2fba5a6502fcac2fd7671737af6c6027c1 100644
+--- a/Telegram/NotificationContent/NotificationViewController.swift
++++ b/Telegram/NotificationContent/NotificationViewController.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ import UIKit
+ import PasscodeCore
+ import UserNotifications
+@@ -25,9 +26,9 @@ class NotificationViewController: UIViewController, UNNotificationContentExtensi
+             
+             let languagesCategory = "ios"
+             
+-            let appGroupName = "group.\(baseAppBundleId)"
++            let appGroupName = sgAppGroupIdentifier()
+             try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .appExtension))
+-            let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++            let maybeAppGroupUrl = sgSharedContainerURL()
+             
+             guard let appGroupUrl = maybeAppGroupUrl else {
+                 return
+diff --git a/Telegram/NotificationService/Sources/NotificationService.swift b/Telegram/NotificationService/Sources/NotificationService.swift
+index 9b28ddba98ce271986b858ad3b0f70f87d7e4f15..596a479c0ae4a2b5f8d02927945608279a9a4a59 100644
+--- a/Telegram/NotificationService/Sources/NotificationService.swift
++++ b/Telegram/NotificationService/Sources/NotificationService.swift
+@@ -853,9 +853,9 @@ private final class NotificationServiceHandler {
+         let apiHash: String = buildConfig.apiHash
+         let languagesCategory = "ios"
+ 
+-        let appGroupName = "group.\(baseAppBundleId)"
++        let appGroupName = sgAppGroupIdentifier()
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .appExtension))
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let maybeAppGroupUrl = sgSharedContainerURL()
+ 
+         guard let appGroupUrl = maybeAppGroupUrl else {
+             return nil
+diff --git a/Telegram/Share/ShareRootController.swift b/Telegram/Share/ShareRootController.swift
+index 6a29189e813ddfa80cbffb4806f9accda9d91920..840bc9bcef04b26e65cab1acc73adabf8e1f3e73 100644
+--- a/Telegram/Share/ShareRootController.swift
++++ b/Telegram/Share/ShareRootController.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ import UIKit
+ import PasscodeCore
+ import TelegramUI
+@@ -35,11 +36,16 @@ class ShareRootController: UIViewController {
+             
+             let languagesCategory = "ios"
+             
+-            let appGroupName = "group.\(baseAppBundleId)"
++            let appGroupName = sgAppGroupIdentifier()
+             try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .appExtension))
+-            let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++            let maybeAppGroupUrl = sgSharedContainerURL()
+             
+             guard let appGroupUrl = maybeAppGroupUrl else {
++                let label = UILabel()
++                label.text = sgSharedStorageStatus(); label.numberOfLines = 0; label.textAlignment = .center
++                label.font = UIFont.preferredFont(forTextStyle: .body); label.adjustsFontForContentSizeCategory = true
++                label.translatesAutoresizingMaskIntoConstraints = false; self.view.addSubview(label)
++                NSLayoutConstraint.activate([label.leadingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.leadingAnchor, constant: 24), label.trailingAnchor.constraint(equalTo: self.view.safeAreaLayoutGuide.trailingAnchor, constant: -24), label.centerYAnchor.constraint(equalTo: self.view.centerYAnchor)])
+                 return
+             }
+             
+diff --git a/Telegram/SiriIntents/IntentHandler.swift b/Telegram/SiriIntents/IntentHandler.swift
+index ad4a6f4455b5f1ea877647ae3aa8a3bc6e48743c..41f3e3fb96632db5002445888a41ebf7dc389b56 100644
+--- a/Telegram/SiriIntents/IntentHandler.swift
++++ b/Telegram/SiriIntents/IntentHandler.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ import Foundation
+ import PasscodeCore
+ import Intents
+@@ -145,9 +146,9 @@ class DefaultIntentHandler: INExtension, INSendMessageIntentHandling, INSearchFo
+         let apiHash: String = buildConfig.apiHash
+         let languagesCategory = "ios"
+         
+-        let appGroupName = "group.\(baseAppBundleId)"
++        let appGroupName = sgAppGroupIdentifier()
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .appExtension))
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let maybeAppGroupUrl = sgSharedContainerURL()
+         
+         guard let appGroupUrl = maybeAppGroupUrl else {
+             return
+@@ -986,8 +987,8 @@ private final class WidgetIntentHandler {
+         
+         let baseAppBundleId = String(appBundleIdentifier[..<lastDotRange.lowerBound])
+         
+-        let appGroupName = "group.\(baseAppBundleId)"
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let appGroupName = sgAppGroupIdentifier()
++        let maybeAppGroupUrl = sgSharedContainerURL()
+         
+         guard let appGroupUrl = maybeAppGroupUrl else {
+             return
+diff --git a/Telegram/WidgetKitWidget/TodayViewController.swift b/Telegram/WidgetKitWidget/TodayViewController.swift
+index 118ae440a3036e31342f166fb03bf2f4e6514332..9422a5ffa32ac9815cd1141ce3f745c289734d2f 100644
+--- a/Telegram/WidgetKitWidget/TodayViewController.swift
++++ b/Telegram/WidgetKitWidget/TodayViewController.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ #if arch(arm64) || arch(x86_64)
+ 
+ import UIKit
+@@ -82,9 +83,9 @@ private func getCommonTimeline(friends: [Friend]?, in context: TimelineProviderC
+     
+     let baseAppBundleId = String(appBundleIdentifier[..<lastDotRange.lowerBound])
+     
+-    let appGroupName = "group.\(baseAppBundleId)"
++    let appGroupName = sgAppGroupIdentifier()
+     try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .appExtension))
+-    let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++    let maybeAppGroupUrl = sgSharedContainerURL()
+     
+     guard let appGroupUrl = maybeAppGroupUrl else {
+         completion(Timeline(entries: [SimpleEntry(date: entryDate, contents: .recent)], policy: .atEnd))
+diff --git a/submodules/BuildConfig/BUILD b/submodules/BuildConfig/BUILD
+index 849501f346a027b7c8cffb572787b5d8ac095c85..07e504820aa879e0490b11d31b1af95e9e2b0844 100644
+--- a/submodules/BuildConfig/BUILD
++++ b/submodules/BuildConfig/BUILD
+@@ -41,6 +41,7 @@ objc_library(
+         "PublicHeaders",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier/SignedEntitlements:SGSignedEntitlements",
+     ],
+     visibility = ["//visibility:public"],
+ )
+diff --git a/submodules/BuildConfig/Sources/BuildConfig.m b/submodules/BuildConfig/Sources/BuildConfig.m
+index 923d02a705a8708c4d13bc09f8f059188b232919..04084a33f8391f04bedb28169660c94d9f0c8f9d 100644
+--- a/submodules/BuildConfig/Sources/BuildConfig.m
++++ b/submodules/BuildConfig/Sources/BuildConfig.m
+@@ -1,4 +1,5 @@
+ #import <BuildConfig/BuildConfig.h>
++@import SGSignedEntitlements;
+ 
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -198,7 +199,7 @@ API_AVAILABLE(ios(10))
+ }
+ 
+ - (bool)isICloudEnabled {
+-    return APP_CONFIG_IS_ICLOUD_ENABLED;
++    return APP_CONFIG_IS_ICLOUD_ENABLED && SGAdditionalCloudKitAuthorized();
+ }
+ 
+ - (bool)isSiriEnabled {
+diff --git a/submodules/DebugSettingsUI/BUILD b/submodules/DebugSettingsUI/BUILD
+index 5e0efe5e281cdf48bb83a20efca690e3f20bfecf..f586deb32a84b523cce42092d05ef6fd636b3d07 100644
+--- a/submodules/DebugSettingsUI/BUILD
++++ b/submodules/DebugSettingsUI/BUILD
+@@ -1,6 +1,7 @@
+ load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
+ 
+ sgdeps = [
++    "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+     "//Swiftgram/SGDebugUI:SGDebugUI",
+     "//Swiftgram/SGLogging:SGLogging",
+     "//Swiftgram/SGLoggingComposer:SGLoggingComposer",
+diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
+index 4b2dfae37a3f7de768fc7c8b45c6b73b47c43607..f841dd4f10da89dd4633d1e3b935576f4c1b171b 100644
+--- a/submodules/DebugSettingsUI/Sources/DebugController.swift
++++ b/submodules/DebugSettingsUI/Sources/DebugController.swift
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ // MARK: Swiftgram
+ import SGLogging
+ import SGLoggingComposer
+@@ -1995,7 +1996,7 @@ public func debugController(sharedContext: SharedAccountContext, context: Accoun
+     })
+     
+     let appGroupName = "group.\(Bundle.main.bundleIdentifier!)"
+-    let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++    let maybeAppGroupUrl = sgSharedContainerURL()
+     
+     var hasLegacyAppData = false
+     if let appGroupUrl = maybeAppGroupUrl {
+diff --git a/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift b/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
+index eb3292b0dc3580463bf9167cbcb887eba2083b85..ddd41c34b41eb2b65026aa64b12825023e7ba173 100644
+--- a/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
++++ b/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
+@@ -26,6 +26,7 @@ private class DocumentPickerViewController: UIDocumentPickerViewController {
+ 
+ private final class LegacyICloudFileController: LegacyController, UIDocumentPickerDelegate {
+     let completion: ([URL]) -> Void
++    var stageImports = true
+     
+     init(presentation: LegacyControllerPresentation, theme: PresentationTheme?, completion: @escaping ([URL]) -> Void) {
+         self.completion = completion
+@@ -42,11 +43,43 @@ private final class LegacyICloudFileController: LegacyController, UIDocumentPick
+     }
+     
+     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+-        self.completion(urls)
++        finish(controller, urls: urls)
+     }
+-    
++
+     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentAt url: URL) {
+-        self.completion([url])
++        finish(controller, urls: [url])
++    }
++
++    private func finish(_ controller: UIDocumentPickerViewController, urls: [URL]) {
++        guard stageImports else { completion(urls); return }
++        do {
++            let staged = try urls.map { url -> URL in
++                let access = url.startAccessingSecurityScopedResource()
++                defer { if access { url.stopAccessingSecurityScopedResource() } }
++                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("SwiftgramDocumentImports").appendingPathComponent(UUID().uuidString)
++                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++                let destination = directory.appendingPathComponent(url.lastPathComponent)
++                var coordinatedError: NSError?
++                var copyError: Error?
++                NSFileCoordinator().coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinatedError) { readable in
++                    do { try FileManager.default.copyItem(at: readable, to: destination) } catch { copyError = error }
++                }
++                if let error = coordinatedError { throw error }
++                if let error = copyError { throw error }
++                return destination
++            }
++            completion(staged)
++        } catch {
++            completion([])
++            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
++                guard let root = controller.view.window?.rootViewController ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }.first(where: { $0.isKeyWindow })?.rootViewController else { return }
++                var presenter = root
++                while let next = presenter.presentedViewController, !next.isBeingDismissed { presenter = next }
++                let alert = UIAlertController(title: "Could not import file", message: "Check that the file provider is available and try again. " + error.localizedDescription, preferredStyle: .alert)
++                alert.addAction(UIAlertAction(title: "OK", style: .default))
++                presenter.present(alert, animated: true)
++            }
++        }
+     }
+ }
+ 
+@@ -74,6 +107,7 @@ public func legacyICloudFilePicker(theme: PresentationTheme, mode: LegacyICloudF
+         dismissImpl?()
+         completion(urls)
+     })
++    if case .export = mode { legacyController.stageImports = false }
+     legacyController.statusBar.statusBarStyle = .Black
+     
+     let controller: DocumentPickerViewController
+@@ -101,7 +135,9 @@ public func legacyICloudFilePicker(theme: PresentationTheme, mode: LegacyICloudF
+             if let window = legacyController.view.window {
+                 controller.popoverPresentationController?.sourceView = window
+                 controller.popoverPresentationController?.sourceRect = CGRect(origin: CGPoint(x: window.bounds.width / 2.0, y: window.bounds.size.height - 1.0), size: CGSize(width: 1.0, height: 1.0))
+-                window.rootViewController?.present(controller, animated: true)
++                var presenter = window.rootViewController
++                while let next = presenter?.presentedViewController, !next.isBeingDismissed { presenter = next }
++                presenter?.present(controller, animated: true)
+                 legacyController.presentationCompleted = nil
+             }
+         }

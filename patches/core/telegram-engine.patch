@@ -1,0 +1,718 @@
+Subject: telegram engine
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
+
+diff --git a/submodules/Postbox/Sources/MutableBasicPeerView.swift b/submodules/Postbox/Sources/MutableBasicPeerView.swift
+index 0236960e1dc7516b730bab6f06167c9acb346d87..e35f90c4abe22d37e930003897c6948d36e6975a 100644
+--- a/submodules/Postbox/Sources/MutableBasicPeerView.swift
++++ b/submodules/Postbox/Sources/MutableBasicPeerView.swift
+@@ -58,6 +58,12 @@ public final class BasicPeerView: PostboxView {
+     public let isContact: Bool
+     public let groupId: PeerGroupId?
+     
++    public func withUpdatedPeer(_ peer: Peer) -> BasicPeerView {
++        BasicPeerView(peer: peer, notificationSettings: notificationSettings, isContact: isContact, groupId: groupId)
++    }
++    private init(peer: Peer, notificationSettings: PeerNotificationSettings?, isContact: Bool, groupId: PeerGroupId?) {
++        self.peer = peer; self.notificationSettings = notificationSettings; self.isContact = isContact; self.groupId = groupId
++    }
+     init(_ view: MutableBasicPeerView) {
+         self.peer = view.peer
+         self.notificationSettings = view.notificationSettings
+diff --git a/submodules/Postbox/Sources/PeerView.swift b/submodules/Postbox/Sources/PeerView.swift
+index 33e7bcafeee341260ec36e57d210883d0ad8069a..3d4ebbe8bea97492715ce4b3d679299d653bd75e 100644
+--- a/submodules/Postbox/Sources/PeerView.swift
++++ b/submodules/Postbox/Sources/PeerView.swift
+@@ -424,6 +424,13 @@ public final class PeerView: PostboxView {
+     public let memberStoryStats: [PeerId: PeerStoryStats]
+     public let associatedCachedData: [PeerId: CachedPeerData]
+     
++    public func withUpdatedPeers(_ peers: [PeerId: Peer]) -> PeerView { PeerView(copying: self, peers: peers) }
++    private init(copying view: PeerView, peers: [PeerId: Peer]) {
++        self.peerId = view.peerId; self.cachedData = view.cachedData; self.notificationSettings = view.notificationSettings
++        self.peers = peers; self.peerPresences = view.peerPresences; self.messages = view.messages; self.media = view.media
++        self.peerIsContact = view.peerIsContact; self.groupId = view.groupId; self.storyStats = view.storyStats
++        self.memberStoryStats = view.memberStoryStats; self.associatedCachedData = view.associatedCachedData
++    }
+     init(_ mutableView: MutablePeerView) {
+         self.peerId = mutableView.peerId
+         self.cachedData = mutableView.cachedData
+diff --git a/submodules/Postbox/Sources/Postbox.swift b/submodules/Postbox/Sources/Postbox.swift
+index 4c9ddcb0d6731114fc72ed96cca399ea7db3c2eb..95054e7146636c69de4a7e1d63c8ae94c87d89c5 100644
+--- a/submodules/Postbox/Sources/Postbox.swift
++++ b/submodules/Postbox/Sources/Postbox.swift
+@@ -43,6 +43,11 @@ public final class Transaction {
+         self.postbox?.keychainTable.set(key, value: value)
+     }
+     
++    public func setMessageProcessor(_ processor: @escaping (StoreMessage) -> StoreMessage?) {
++        assert(self.queue.isCurrent())
++        self.postbox?.messageProcessor = processor
++    }
++
+     public func addMessages(_ messages: [StoreMessage], location: AddMessagesLocation) -> [Int64: MessageId] {
+         assert(!self.disposed)
+         if let postbox = self.postbox {
+@@ -1602,6 +1607,7 @@ public func openPostbox(basePath: String, seedConfiguration: SeedConfiguration,
+ }
+ 
+ final class PostboxImpl {
++    var messageProcessor: ((StoreMessage) -> StoreMessage?)?
+     public let queue: Queue
+     public let seedConfiguration: SeedConfiguration
+     private let basePath: String
+@@ -2192,6 +2198,7 @@ final class PostboxImpl {
+     }
+     
+     fileprivate func addMessages(transaction: Transaction, messages: [StoreMessage], location: AddMessagesLocation) -> [Int64: MessageId] {
++        let messages = self.messageProcessor.map { processor in messages.compactMap(processor) } ?? messages
+         var addedMessagesByPeerId: [PeerId: [StoreMessage]] = [:]
+         let addResult = self.messageHistoryTable.addMessages(messages: messages, operationsByPeerId: &self.currentOperationsByPeerId, updatedMedia: &self.currentUpdatedMedia, unsentMessageOperations: &currentUnsentOperations, updatedPeerReadStateOperations: &self.currentUpdatedSynchronizeReadStateOperations, globalTagsOperations: &self.currentGlobalTagsOperations, pendingActionsOperations: &self.currentPendingMessageActionsOperations, updatedMessageActionsSummaries: &self.currentUpdatedMessageActionsSummaries, updatedMessageTagSummaries: &self.currentUpdatedMessageTagSummaries, invalidateMessageTagSummaries: &self.currentInvalidateMessageTagSummaries, localTagsOperations: &self.currentLocalTagsOperations, timestampBasedMessageAttributesOperations: &self.currentTimestampBasedMessageAttributesOperations, processMessages: { messagesByPeerId in
+             addedMessagesByPeerId = messagesByPeerId
+@@ -3079,7 +3086,15 @@ final class PostboxImpl {
+     fileprivate func updateMessage(transaction: Transaction, id: MessageId, update: (Message) -> PostboxUpdateMessage) {
+         if let index = self.messageHistoryIndexTable.getIndex(id), let intermediateMessage = self.messageHistoryTable.getMessage(index) {
+             let message = self.renderIntermediateMessage(intermediateMessage)
+-            if case let .update(updatedMessage) = update(message) {
++            if case let .update(proposedMessage) = update(message) {
++                let updatedMessage: StoreMessage
++                if let processor = self.messageProcessor {
++                    guard let processed = processor(proposedMessage) else {
++                        transaction.deleteMessages([id], forEachMedia: nil)
++                        return
++                    }
++                    updatedMessage = processed
++                } else { updatedMessage = proposedMessage }
+                 self.messageHistoryTable.updateMessage(id, message: updatedMessage, operationsByPeerId: &self.currentOperationsByPeerId, updatedMedia: &self.currentUpdatedMedia, unsentMessageOperations: &self.currentUnsentOperations, updatedPeerReadStateOperations: &self.currentUpdatedSynchronizeReadStateOperations, globalTagsOperations: &self.currentGlobalTagsOperations, pendingActionsOperations: &self.currentPendingMessageActionsOperations, updatedMessageActionsSummaries: &self.currentUpdatedMessageActionsSummaries, updatedMessageTagSummaries: &self.currentUpdatedMessageTagSummaries, invalidateMessageTagSummaries: &self.currentInvalidateMessageTagSummaries, localTagsOperations: &self.currentLocalTagsOperations, timestampBasedMessageAttributesOperations: &self.currentTimestampBasedMessageAttributesOperations)
+                 
+                 if let bag = self.installedStoreOrUpdateMessageActionsByPeerId[id.peerId] {
+diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
+index 81a7963de5ff13abea27f2468d65c952ff37d6f8..8eace30fa21b2a31287b574bcd8330ebaeabbf72 100644
+--- a/submodules/TelegramCore/BUILD
++++ b/submodules/TelegramCore/BUILD
+@@ -3,6 +3,7 @@ load("@build_bazel_rules_apple//apple:ios.bzl", "ios_unit_test")
+ load("@build_bazel_rules_apple//apple/testing/default_runner:ios_test_runner.bzl", "ios_test_runner")
+ 
+ sgdeps = [
++    "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
+     "//Swiftgram/SGGTranslate:SGGTranslate",
+     "//Swiftgram/SGSimpleSettings:SGSimpleSettings",
+     "//Swiftgram/SGWebSettingsScheme:SGWebSettingsScheme",
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index 817bd239f9539293ffcac84f6f925c2f2dc1f260..5f39aa239aedc7c3879126b4681382cdf4667097 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1,3 +1,4 @@
++import SGAdditionalCore
+ import Foundation
+ import Postbox
+ import SwiftSignalKit
+@@ -1284,6 +1285,16 @@ public class Account {
+         self.network = network
+         self.networkArguments = networkArguments
+         self.peerId = peerId
++        if !supplementary {
++            network.additionalAccountId = additionalAccountKey(peerId)
++            let processor = AdditionalMessageProcessor(account: peerId)
++            let _ = postbox.transaction { transaction -> Bool in
++                transaction.setMessageProcessor { processor.process($0) }
++                return additionalRestoreLegacyProfile(transaction: transaction, account: peerId)
++            }.start(next: { restored in
++                if restored { AdditionalLocalProfileState.shared.didRestoreLegacyProfile(account: additionalAccountKey(peerId)) }
++            })
++        }
+         
+         self.auxiliaryMethods = auxiliaryMethods
+         self.supplementary = supplementary
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..46c6c552271e08cc877826956e1f82d212a0e7f5
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
+@@ -0,0 +1,86 @@
++import Foundation
++import Postbox
++import SwiftSignalKit
++import TelegramApi
++import SGAdditionalCore
++
++func additionalPresentationChanges() -> Signal<Void, NoError> {
++    Signal { subscriber in
++        subscriber.putNext(())
++        let token = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil) { _ in subscriber.putNext(()) }
++        return ActionDisposable { NotificationCenter.default.removeObserver(token) }
++    }
++}
++
++private final class AdditionalBadgeExpiration {
++    static let shared = AdditionalBadgeExpiration()
++    private var deadlines: [String: Int32] = [:]
++    func schedule(account: String, until: Int32) {
++        DispatchQueue.main.async {
++            guard self.deadlines[account] != until else { return }
++            self.deadlines[account] = until
++            let delay = max(0, TimeInterval(until) - Date().timeIntervalSince1970)
++            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
++                guard self.deadlines[account] == until else { return }
++                self.deadlines.removeValue(forKey: account)
++                NotificationCenter.default.post(name: Notification.Name("SGASettingsDidChange"), object: nil)
++            }
++        }
++    }
++}
++
++public func additionalPresentationPeer(_ peer: Peer, account: PeerId) -> Peer {
++    guard peer.id == account, let user = peer as? TelegramUser,
++          AddonSettings.shared.profile(additionalAccountKey(account)).localPremium else { return peer }
++    // This copy is used only in view signals. Transactions and server subscription checks use the raw peer.
++    var flags = user.flags; flags.insert(.isPremium)
++    var result = user.withUpdatedFlags(flags)
++    if !user.flags.contains(.isPremium), let bytes = AdditionalLocalProfileState.shared.badge(account: additionalAccountKey(account)), !bytes.isEmpty,
++       let status = Api.parse(Buffer(data: bytes)) as? Api.EmojiStatus {
++        var badge = PeerEmojiStatus(apiStatus: status)
++        if let until = badge?.expirationDate {
++            if TimeInterval(until) <= Date().timeIntervalSince1970 { badge = nil }
++            else { AdditionalBadgeExpiration.shared.schedule(account: additionalAccountKey(account), until: until) }
++        }
++        result = result.withUpdatedEmojiStatus(badge)
++    }
++    return result
++}
++
++func additionalPresentationView(_ view: PostboxView, account: PeerId) -> PostboxView {
++    if let view = view as? BasicPeerView, let peer = view.peer {
++        return view.withUpdatedPeer(additionalPresentationPeer(peer, account: account))
++    }
++    if let view = view as? PeerView, let peer = view.peers[account] {
++        var peers = view.peers; peers[account] = additionalPresentationPeer(peer, account: account)
++        return view.withUpdatedPeers(peers)
++    }
++    return view
++}
++
++func additionalSelectBadgeIfLocal(account: Account, badge: Api.EmojiStatus, media: [Media]) -> Signal<Bool, NoError> {
++    account.postbox.transaction { transaction in
++        guard AddonSettings.shared.profile(additionalAccountKey(account.peerId)).localPremium,
++              let user = transaction.getPeer(account.peerId) as? TelegramUser,
++              !user.flags.contains(.isPremium) else { return false }
++        for file in media { transaction.storeMediaIfNotPresent(media: file) }
++        let buffer = Buffer(); badge.serialize(buffer, true)
++        AdditionalLocalProfileState.shared.select(badge: buffer.makeData(), account: additionalAccountKey(account.peerId))
++        return true
++    }
++}
++
++/// Older injected builds persisted their presentation flags into Postbox. Restore just those fields once.
++func additionalRestoreLegacyProfile(transaction: Transaction, account: PeerId) -> Bool {
++    let key = additionalAccountKey(account)
++    guard AdditionalLocalProfileState.shared.legacyProfileNeedsRestoration(account: key),
++          let data = AdditionalLocalProfileState.shared.legacyServerUser(account: key), !data.isEmpty,
++          let apiUser = Api.parse(Buffer(data: data)) as? Api.User,
++          let current = transaction.getPeer(account) as? TelegramUser else { return false }
++    let server = TelegramUser(user: apiUser)
++    guard server.id == account else { return false }
++    var flags = current.flags
++    if server.flags.contains(.isPremium) { flags.insert(.isPremium) } else { flags.remove(.isPremium) }
++    updatePeersCustom(transaction: transaction, peers: [current.withUpdatedFlags(flags).withUpdatedEmojiStatus(server.emojiStatus)], update: { _, updated in updated })
++    return true
++}
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..65814070885454d135f60ae4879d55d2a6a5f006
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -0,0 +1,130 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++
++public func additionalAccountKey(_ id: PeerId) -> String { String(id.id._internalGetInt64Value()) }
++
++public func additionalChatKey(_ id: PeerId) -> String? {
++    let prefix: String
++    switch id.namespace {
++    case Namespaces.Peer.CloudUser: prefix = "user"
++    case Namespaces.Peer.CloudGroup: prefix = "chat"
++    case Namespaces.Peer.CloudChannel: prefix = "channel"
++    default: return nil
++    }
++    return "\(prefix):\(id.id._internalGetInt64Value())"
++}
++
++public func additionalMessageKey(account: PeerId, id: MessageId) -> MessageKey? {
++    guard id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(id.peerId) else { return nil }
++    return MessageKey(account: additionalAccountKey(account), chat: chat, id: Int64(id.id))
++}
++
++public func additionalCanArchive(attributes: [MessageAttribute], media: [Media]) -> Bool {
++    !attributes.contains { $0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute }
++        && !media.contains { $0 is TelegramMediaAction }
++}
++
++public func additionalRevision(text: String, timestamp: Int32, attributes: [MessageAttribute]) -> MessageRevision {
++    let entities = (attributes.first { $0 is TextEntitiesMessageAttribute } as? TextEntitiesMessageAttribute)?.entities ?? []
++    return MessageRevision(text: text, entities: entities.map(additionalRevisionEntity), messageDate: Int64(timestamp),
++        editDate: (attributes.first { $0 is EditedMessageAttribute } as? EditedMessageAttribute).map { Int64($0.date) })
++}
++
++private func additionalRevisionEntity(_ entity: MessageTextEntity) -> RevisionEntity {
++    let kind: String
++    var value: String?
++    switch entity.type {
++    case .Bold: kind = "Bold"
++    case .Italic: kind = "Italic"
++    case .Code: kind = "Code"
++    case let .Pre(language): kind = "Pre"; value = language
++    case .Underline: kind = "Underline"
++    case .Strikethrough: kind = "Strike"
++    case .Spoiler: kind = "Spoiler"
++    case .Url: kind = "Url"
++    case let .TextUrl(url): kind = "TextUrl"; value = url
++    case let .TextMention(peerId): kind = "MentionName"; value = String(peerId.id._internalGetInt64Value())
++    case let .CustomEmoji(_, fileId): kind = "CustomEmoji"; value = String(fileId)
++    case let .BlockQuote(collapsed): kind = "Blockquote"; value = collapsed ? "1" : "0"
++    case .Mention: kind = "Mention"
++    case .Hashtag: kind = "Hashtag"
++    case .BotCommand: kind = "BotCommand"
++    case .Email: kind = "Email"
++    case .PhoneNumber: kind = "Phone"
++    case .BankCard: kind = "BankCard"
++    default: kind = "Unknown"
++    }
++    return RevisionEntity(kind: "messageEntity" + kind, offset: entity.range.lowerBound, length: entity.range.count, value: value)
++}
++
++public func additionalTextEntities(_ revision: MessageRevision) -> [MessageTextEntity] {
++    revision.entities.compactMap { entity in
++        guard entity.offset >= 0, entity.length > 0, entity.offset <= revision.text.utf16.count,
++              entity.length <= revision.text.utf16.count - entity.offset else { return nil }
++        let type: MessageTextEntityType
++        switch entity.kind {
++        case "messageEntityBold": type = .Bold
++        case "messageEntityItalic": type = .Italic
++        case "messageEntityCode": type = .Code
++        case "messageEntityPre": type = .Pre(language: entity.value)
++        case "messageEntityUnderline": type = .Underline
++        case "messageEntityStrike": type = .Strikethrough
++        case "messageEntitySpoiler": type = .Spoiler
++        case "messageEntityUrl": type = .Url
++        case "messageEntityTextUrl": type = .TextUrl(url: entity.value ?? "")
++        case "messageEntityBlockquote": type = .BlockQuote(isCollapsed: entity.value == "1")
++        case "messageEntityMention": type = .Mention
++        case "messageEntityHashtag": type = .Hashtag
++        case "messageEntityBotCommand": type = .BotCommand
++        case "messageEntityEmail": type = .Email
++        case "messageEntityPhone": type = .PhoneNumber
++        case "messageEntityBankCard": type = .BankCard
++        case "messageEntityCustomEmoji":
++            guard let id = entity.value.flatMap(Int64.init) else { return nil }
++            type = .CustomEmoji(stickerPack: nil, fileId: id)
++        case "messageEntityMentionName":
++            guard let id = entity.value.flatMap(Int64.init) else { return nil }
++            type = .TextMention(peerId: PeerId(namespace: Namespaces.Peer.CloudUser, id: PeerId.Id._internalFromInt64Value(id)))
++        default: return nil
++        }
++        return MessageTextEntity(range: entity.offset ..< entity.offset + entity.length, type: type)
++    }
++}
++
++/// One processor per authorized account, installed before state synchronization starts.
++final class AdditionalMessageProcessor {
++    let account: PeerId
++    private let filters = CompiledFilters()
++    init(account: PeerId) { self.account = account }
++    func process(_ message: StoreMessage) -> StoreMessage? {
++        guard AddonSettings.shared.anyEnabled(), case let .Id(id) = message.id,
++              let key = additionalMessageKey(account: account, id: id) else { return message }
++        let profile = AddonSettings.shared.profile(key.account)
++        let allowed = additionalCanArchive(attributes: message.attributes, media: message.media)
++        if !allowed, profile.saveDeleted || profile.saveEditHistory { MessageArchive.shared.exclude(key) }
++        if allowed {
++            if profile.saveDeleted { MessageArchive.shared.observe(key) }
++            if profile.saveEditHistory {
++                MessageArchive.shared.capture(additionalRevision(text: message.text, timestamp: message.timestamp, attributes: message.attributes), key: key, retentionDays: profile.retentionDays)
++            }
++            if profile.saveDeleted || profile.saveEditHistory { MessageArchive.shared.synchronize() }
++        }
++        if profile.filtersEnabled, message.flags.contains(.Incoming) {
++            var authors = [additionalChatKey(message.authorId ?? id.peerId)].compactMap { $0 }
++            if let original = message.forwardInfo?.authorId, let value = additionalChatKey(original) { authors.append(value) }
++            for attribute in message.attributes {
++                if let bot = (attribute as? InlineBotMessageAttribute)?.peerId, let value = additionalChatKey(bot) { authors.append(value) }
++            }
++            if filters.matches(text: message.text, chat: key.chat, authors: authors, profile: profile, account: key.account) { return nil }
++        }
++        return message
++    }
++}
++
++func additionalRetainDeleted(account: PeerId, id: MessageId, transaction: Transaction) -> Bool {
++    guard AddonSettings.shared.anyRetentionEnabled(), let key = additionalMessageKey(account: account, id: id),
++          AddonSettings.shared.profile(key.account).saveDeleted, let message = transaction.getMessage(id),
++          additionalCanArchive(attributes: message.attributes, media: message.media) else { return false }
++    return MessageArchive.shared.retain(key)
++}
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPrivacy.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPrivacy.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc6853463ea7a8f9698a969e55ebed35ffdda4f3
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPrivacy.swift
+@@ -0,0 +1,10 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++
++extension Network {
++    func suppressAdditional(_ action: AdditionalPrivacyAction, peerId: PeerId? = nil) -> Bool {
++        guard let account = additionalAccountId else { return false }
++        return AdditionalPrivacy.suppress(action, account: account, chat: peerId.flatMap(additionalChatKey))
++    }
++}
+diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
+index 2d5153e3207fde655b7a7579c6912afc5f8033ee..e8f3012ff53f7f3647de1fbaeae0ba073ceb228c 100644
+--- a/submodules/TelegramCore/Sources/Network/Network.swift
++++ b/submodules/TelegramCore/Sources/Network/Network.swift
+@@ -845,6 +845,9 @@ private final class NetworkSpeedLimitedEventState {
+ }
+ 
+ public final class Network: NSObject {
++    // Set once by the authorized main-app Account before its services start.
++    var additionalAccountId: String?
++
+     public let encryptionProvider: EncryptionProvider
+     
+     private let queue: Queue
+diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+index ba4569edf66daa77074562b747a5baf623fd7e13..5ec271bacc182023a869a866d6b3ec699a633746 100644
+--- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
++++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
+@@ -4596,7 +4596,11 @@ func replayFinalState(
+                 upsertEphemeralReplacement(transaction: transaction, anchorMessageId: anchorMessageId, message: message)
+             case let .DeleteEphemeralMessages(peerId, ids):
+                 deleteEphemeralMessages(transaction: transaction, peerId: peerId, ids: ids)
+-            case let .DeleteMessagesWithGlobalIds(ids):
++            case let .DeleteMessagesWithGlobalIds(originalIds):
++                let retained = Set(transaction.messageIdsForGlobalIds(originalIds).filter {
++                    additionalRetainDeleted(account: accountPeerId, id: $0, transaction: transaction)
++                }.map { $0.id })
++                let ids = originalIds.filter { !retained.contains($0) }
+                 var resourceIds: [MediaResourceId] = []
+                 transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
+                     addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
+@@ -4605,7 +4609,8 @@ func replayFinalState(
+                     let _ = mediaBox.removeCachedResources(Array(Set(resourceIds)), force: true).start()
+                 }
+                 deletedMessageIds.append(contentsOf: ids.map { .global($0) })
+-            case let .DeleteMessages(ids):
++            case let .DeleteMessages(originalIds):
++                let ids = originalIds.filter { !additionalRetainDeleted(account: accountPeerId, id: $0, transaction: transaction) }
+                 _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
+                     addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
+                 })
+diff --git a/submodules/TelegramCore/Sources/State/AccountViewTracker.swift b/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
+index f13c7f6b9a99de22467f760986bc974240064d70..7ee830cd41409ff1bddae7c2968932f6f8eea1cf 100644
+--- a/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
++++ b/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
+@@ -861,6 +861,7 @@ public final class AccountViewTracker {
+                     
+                     if let account = self.account {
+                         let signal = (account.postbox.transaction { transaction -> Signal<Void, NoError> in
++                            if account.network.suppressAdditional(.read, peerId: peerId) { return .complete() }
+                             if let peer = transaction.getPeer(peerId), let inputPeer = apiInputPeer(peer) {
+                                 return account.network.request(Api.functions.messages.getMessagesReactions(peer: inputPeer, id: messageIds.map { $0.id }))
+                                 |> map(Optional.init)
+@@ -2341,7 +2342,11 @@ public final class AccountViewTracker {
+     
+     public func peerView(_ peerId: PeerId, updateData: Bool = false) -> Signal<PeerView, NoError> {
+         if let account = self.account {
+-            return wrappedPeerViewSignal(peerId: peerId, signal: account.postbox.peerView(id: peerId), updateData: updateData)
++            if account.supplementary { return wrappedPeerViewSignal(peerId: peerId, signal: account.postbox.peerView(id: peerId), updateData: updateData) }
++            return combineLatest(wrappedPeerViewSignal(peerId: peerId, signal: account.postbox.peerView(id: peerId), updateData: updateData), additionalPresentationChanges())
++            |> map { view, _ in
++                additionalPresentationView(view, account: account.peerId) as! PeerView
++            }
+         } else {
+             return .never()
+         }
+diff --git a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
+index 8c8a4fa31d0871a078ffe796c1e9db2bf72e07fc..104c7ad94c14d2ac945d2a85c773f3b0fb95830f 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedAccountPresence.swift
+@@ -42,7 +42,8 @@ private final class AccountPresenceManagerImpl {
+         self.onlineTimer?.invalidate()
+     }
+     
+-    private func updatePresence(_ isOnline: Bool) {
++    private func updatePresence(_ requestedOnline: Bool) {
++        let isOnline = requestedOnline && !self.network.suppressAdditional(.online)
+         let request: Signal<Api.Bool, MTRpcError>
+         if isOnline {
+             let timer = SignalKitTimer(timeout: 30.0, repeat: false, completion: { [weak self] in
+diff --git a/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift b/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift
+index b5326767dfd714ac3a6b37bc63b29ee9e5ee6bc9..6094a23010846a61556d910e145bf2656128db95 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift
+@@ -252,6 +252,7 @@ func managedReadReactionOrPollVoteActions(postbox: Postbox, network: Network, st
+ }
+ 
+ private func synchronizeConsumeMessageContents(transaction: Transaction, postbox: Postbox, network: Network, stateManager: AccountStateManager, id: MessageId) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.read, peerId: id.peerId) { return .complete() }
+     if id.peerId.namespace == Namespaces.Peer.CloudUser || id.peerId.namespace == Namespaces.Peer.CloudGroup {
+         return network.request(Api.functions.messages.readMessageContents(id: [id.id]))
+             |> map(Optional.init)
+@@ -321,6 +322,7 @@ private func synchronizeConsumeMessageContents(transaction: Transaction, postbox
+ }
+ 
+ private func synchronizeReadMessageReactionsOrPollVotes(transaction: Transaction, postbox: Postbox, network: Network, stateManager: AccountStateManager, id: MessageId) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.read, peerId: id.peerId) { return .complete() }
+     if id.peerId.namespace == Namespaces.Peer.CloudUser || id.peerId.namespace == Namespaces.Peer.CloudGroup {
+         return network.request(Api.functions.messages.readMessageContents(id: [id.id]))
+         |> map(Optional.init)
+diff --git a/submodules/TelegramCore/Sources/State/ManagedLocalInputActivities.swift b/submodules/TelegramCore/Sources/State/ManagedLocalInputActivities.swift
+index 7acc37a1eaab154d1c1bad14a04c5def600bbfcf..fc88f01a535f8f39b2fdcd525704e01d3f10c1e8 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedLocalInputActivities.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedLocalInputActivities.swift
+@@ -142,6 +142,14 @@ private func actionFromActivity(_ activity: PeerInputActivity?) -> Api.SendMessa
+ }
+ 
+ private func requestActivity(postbox: Postbox, network: Network, accountPeerId: PeerId, peerId: PeerId, threadId: Int64?, activity: PeerInputActivity?) -> Signal<Void, NoError> {
++    if let activity {
++        let uploading: Bool
++        switch activity {
++        case .uploadingFile, .uploadingPhoto, .uploadingVideo, .uploadingInstantVideo: uploading = true
++        default: uploading = false
++        }
++        if network.suppressAdditional(uploading ? .upload : .typing, peerId: peerId) { return .complete() }
++    }
+     return postbox.transaction { transaction -> Signal<Void, NoError> in
+         if let peer = transaction.getPeer(peerId) {
+             if peerId == accountPeerId {
+diff --git a/submodules/TelegramCore/Sources/State/ManagedSynchronizeConsumeMessageContentsOperations.swift b/submodules/TelegramCore/Sources/State/ManagedSynchronizeConsumeMessageContentsOperations.swift
+index f6df475fe6f8026274a0b5acd6fce53222edf72c..d16cc7b18f6a7563d87101c3602fd555d522c042 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedSynchronizeConsumeMessageContentsOperations.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedSynchronizeConsumeMessageContentsOperations.swift
+@@ -110,6 +110,7 @@ func managedSynchronizeConsumeMessageContentOperations(postbox: Postbox, network
+ }
+ 
+ private func synchronizeConsumeMessageContents(transaction: Transaction, network: Network, stateManager: AccountStateManager, peerId: PeerId, operation: SynchronizeConsumeMessageContentsOperation) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.read, peerId: peerId) { return .complete() }
+     if peerId.namespace == Namespaces.Peer.CloudUser || peerId.namespace == Namespaces.Peer.CloudGroup {
+         return network.request(Api.functions.messages.readMessageContents(id: operation.messageIds.map { $0.id }))
+         |> map(Optional.init)
+diff --git a/submodules/TelegramCore/Sources/State/ManagedSynchronizeMarkAllUnseenPersonalMessagesOperations.swift b/submodules/TelegramCore/Sources/State/ManagedSynchronizeMarkAllUnseenPersonalMessagesOperations.swift
+index 0e7be2ad28f2c62e0b7f539f37f96bab728d34e4..9fa49e3aeed51a66fdac60240f48d9c5a5bec0f4 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedSynchronizeMarkAllUnseenPersonalMessagesOperations.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedSynchronizeMarkAllUnseenPersonalMessagesOperations.swift
+@@ -117,6 +117,7 @@ private enum GetUnseenIdsError {
+ }
+ 
+ private func synchronizeMarkAllUnseen(transaction: Transaction, postbox: Postbox, network: Network, stateManager: AccountStateManager, peerId: PeerId, operation: SynchronizeMarkAllUnseenPersonalMessagesOperation) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.read, peerId: peerId) { return .complete() }
+     guard let inputPeer = transaction.getPeer(peerId).flatMap(apiInputPeer) else {
+         return .complete()
+     }
+@@ -284,6 +285,7 @@ func managedSynchronizeMarkAllUnseenReactionsOperations(postbox: Postbox, networ
+ }
+ 
+ private func synchronizeMarkAllUnseenReactions(transaction: Transaction, postbox: Postbox, network: Network, stateManager: AccountStateManager, peerId: PeerId, operation: SynchronizeMarkAllUnseenReactionsOperation) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.read, peerId: peerId) { return .complete() }
+     guard let peer = transaction.getPeer(peerId) else {
+         return .complete()
+     }
+@@ -380,6 +382,7 @@ func managedSynchronizeMarkAllUnseenPollVotesOperations(postbox: Postbox, networ
+ }
+ 
+ private func synchronizeMarkAllUnseenPollVotes(transaction: Transaction, postbox: Postbox, network: Network, stateManager: AccountStateManager, peerId: PeerId, operation: SynchronizeMarkAllUnseenReactionsOperation) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.read, peerId: peerId) { return .complete() }
+     guard let peer = transaction.getPeer(peerId) else {
+         return .complete()
+     }
+diff --git a/submodules/TelegramCore/Sources/State/ManagedSynchronizeViewStoriesOperations.swift b/submodules/TelegramCore/Sources/State/ManagedSynchronizeViewStoriesOperations.swift
+index bebd6915afa87476f72368bcd2e3a18e3bf1de95..9f2108e137cdaaf707a01bd4811802b3671cebaf 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedSynchronizeViewStoriesOperations.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedSynchronizeViewStoriesOperations.swift
+@@ -119,6 +119,7 @@ func managedSynchronizeViewStoriesOperations(postbox: Postbox, network: Network,
+ }
+ 
+ private func pushStoriesAreSeen(postbox: Postbox, network: Network, stateManager: AccountStateManager, peer: Peer, operation: SynchronizeViewStoriesOperation) -> Signal<Void, NoError> {
++    if network.suppressAdditional(.story, peerId: peer.id) { return .complete() }
+     guard let inputPeer = apiInputPeer(peer) else {
+         return .complete()
+     }
+diff --git a/submodules/TelegramCore/Sources/State/SynchronizePeerReadState.swift b/submodules/TelegramCore/Sources/State/SynchronizePeerReadState.swift
+index 1b8617d22aa920705324bb9930aedbe3034cc14f..12da894ea5981ffff404ac07284f2634e54a0884 100644
+--- a/submodules/TelegramCore/Sources/State/SynchronizePeerReadState.swift
++++ b/submodules/TelegramCore/Sources/State/SynchronizePeerReadState.swift
+@@ -247,6 +247,7 @@ private func validatePeerReadState(network: Network, postbox: Postbox, stateMana
+ }
+ 
+ private func pushPeerReadState(network: Network, postbox: Postbox, stateManager: AccountStateManager, peerId: PeerId, readState: PeerReadState) -> Signal<PeerReadState, PeerReadStateValidationError> {
++    if network.suppressAdditional(.read, peerId: peerId) { return .single(readState) }
+     if peerId.namespace == Namespaces.Peer.SecretChat {
+         // Decide whether a request is needed before looking the peer up: inputSecretChat goes
+         // through loadedPeerWithId, which never emits when the peer row is missing and fails
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift b/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
+index e655c31404bc71e74cd4070293551d07153366c7..b8c2429eb811814b657de53a6f9eb53aa6108fb2 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
+@@ -150,6 +150,15 @@ public extension TelegramEngine {
+         }
+         
+         public func setEmojiStatus(file: TelegramMediaFile?, expirationDate: Int32?) -> Signal<Never, NoError> {
++            let status: Api.EmojiStatus = file.map { .emojiStatus(.init(flags: expirationDate == nil ? 0 : 1, documentId: $0.fileId.id, until: expirationDate)) } ?? .emojiStatusEmpty
++            return additionalSelectBadgeIfLocal(account: self.account, badge: status, media: file.map { [$0 as Media] } ?? [])
++            |> mapToSignal { local -> Signal<Never, NoError> in
++                if local { return .complete() }
++                return self.setServerEmojiStatus(file: file, expirationDate: expirationDate)
++            }
++        }
++
++        private func setServerEmojiStatus(file: TelegramMediaFile?, expirationDate: Int32?) -> Signal<Never, NoError> {
+             let peerId = self.account.peerId
+             
+             let remoteApply = self.account.network.request(Api.functions.account.updateEmojiStatus(emojiStatus: file.flatMap({ file in
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift b/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift
+index 856855dd9d1f254da5dc6968054b22b853250add..5f9b86b04ba804d7e4ea5861dc9f297c1ff57a30 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift
+@@ -29,7 +29,7 @@ extension PostboxViewDataItem {
+     }
+ 
+     func _extract(data: TelegramEngine.EngineData, views: [PostboxViewKey: PostboxView]) -> Any {
+-        return self.extract(view: views[self.key]!)
++        return self.extract(view: data.additionalFunctionsEnabled ? additionalPresentationView(views[self.key]!, account: data.accountPeerId) : views[self.key]!)
+     }
+ }
+ 
+@@ -132,10 +132,12 @@ public extension TelegramEngine {
+         }
+ 
+         let accountPeerId: PeerId
++        let additionalFunctionsEnabled: Bool
+         private let postbox: Postbox
+ 
+-        public init(accountPeerId: PeerId, postbox: Postbox) {
++        public init(accountPeerId: PeerId, postbox: Postbox, additionalFunctionsEnabled: Bool = false) {
+             self.accountPeerId = accountPeerId
++            self.additionalFunctionsEnabled = additionalFunctionsEnabled
+             self.postbox = postbox
+         }
+ 
+@@ -146,8 +148,8 @@ public extension TelegramEngine {
+                     keys.insert(key)
+                 }
+             }
+-            return self.postbox.combinedView(keys: Array(keys))
+-            |> map { views -> [Any] in
++            return combineLatest(self.postbox.combinedView(keys: Array(keys)), self.additionalFunctionsEnabled ? additionalPresentationChanges() : .single(()))
++            |> map { views, _ -> [Any] in
+                 var results: [Any] = []
+ 
+                 for item in items {
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift
+index 44c3aee5c5f24421ba887a7ef84e854068c518ad..c519dea432f0050d0e0fc990faf687c7a295750e 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/ApplyMaxReadIndexInteractively.swift
+@@ -210,11 +210,15 @@ func _internal_toggleForumThreadUnreadMarkInteractively(transaction: Transaction
+             
+             if peer.isForum {
+                 if let inputPeer = apiInputPeer(peer) {
+-                    let _ = network.request(Api.functions.messages.readDiscussion(peer: inputPeer, msgId: Int32(clamping: threadId), readMaxId: messageIndex.id.id)).start()
++                    if !network.suppressAdditional(.read, peerId: peerId) {
++                        let _ = network.request(Api.functions.messages.readDiscussion(peer: inputPeer, msgId: Int32(clamping: threadId), readMaxId: messageIndex.id.id)).start()
++                    }
+                 }
+             } else if peer.isMonoForum {
+                 if let inputPeer = apiInputPeer(peer), let subPeer = transaction.getPeer(PeerId(threadId)).flatMap(apiInputPeer) {
+-                    let _ = network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeer, maxId: messageIndex.id.id)).start()
++                    if !network.suppressAdditional(.read, peerId: peerId) {
++                        let _ = network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeer, maxId: messageIndex.id.id)).start()
++                    }
+                 }
+             }
+         }
+@@ -246,11 +250,15 @@ func _internal_markForumThreadAsReadInteractively(transaction: Transaction, netw
+         
+         if peer.isForum {
+             if let inputPeer = apiInputPeer(peer) {
+-                let _ = network.request(Api.functions.messages.readDiscussion(peer: inputPeer, msgId: Int32(clamping: threadId), readMaxId: messageIndex.id.id)).start()
++                if !network.suppressAdditional(.read, peerId: peerId) {
++                    let _ = network.request(Api.functions.messages.readDiscussion(peer: inputPeer, msgId: Int32(clamping: threadId), readMaxId: messageIndex.id.id)).start()
++                }
+             }
+         } else if peer.isMonoForum {
+             if let inputPeer = apiInputPeer(peer), let subPeer = transaction.getPeer(PeerId(threadId)).flatMap(apiInputPeer) {
+-                let _ = network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeer, maxId: messageIndex.id.id)).start()
++                if !network.suppressAdditional(.read, peerId: peerId) {
++                    let _ = network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeer, maxId: messageIndex.id.id)).start()
++                }
+             }
+         }
+     }
+@@ -288,11 +296,15 @@ func _internal_togglePeerUnreadMarkInteractively(transaction: Transaction, netwo
+                 
+                 if peer.isForum {
+                     if let inputPeer = apiInputPeer(peer) {
+-                        let _ = network.request(Api.functions.messages.readDiscussion(peer: inputPeer, msgId: Int32(clamping: item.threadId), readMaxId: messageIndex.id.id)).start()
++                        if !network.suppressAdditional(.read, peerId: peerId) {
++                            let _ = network.request(Api.functions.messages.readDiscussion(peer: inputPeer, msgId: Int32(clamping: item.threadId), readMaxId: messageIndex.id.id)).start()
++                        }
+                     }
+                 } else if peer.isMonoForum {
+                     if let inputPeer = apiInputPeer(peer), let subPeer = transaction.getPeer(PeerId(item.threadId)).flatMap(apiInputPeer) {
+-                        let _ = network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeer, maxId: messageIndex.id.id)).start()
++                        if !network.suppressAdditional(.read, peerId: peerId) {
++                            let _ = network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeer, maxId: messageIndex.id.id)).start()
++                        }
+                     }
+                 }
+             }
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/MarkAllChatsAsRead.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/MarkAllChatsAsRead.swift
+index 7d2937cd81cfd7b2fae3b5d6e959a874b9703455..205a854f4d487e3156225f6d1f5d302fc1c24d67 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/MarkAllChatsAsRead.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/MarkAllChatsAsRead.swift
+@@ -23,6 +23,7 @@ func _internal_markAllChatsAsRead(postbox: Postbox, network: Network, stateManag
+                     case let .dialogPeer(dialogPeerData):
+                         let peer = dialogPeerData.peer
+                         let peerId = peer.peerId
++                        if network.suppressAdditional(.read, peerId: peerId) { continue }
+                         if peerId.namespace == Namespaces.Peer.CloudChannel {
+                             if let inputChannel = transaction.getPeer(peerId).flatMap(apiInputChannel) {
+                                 signals.append(network.request(Api.functions.channels.readHistory(channel: inputChannel, maxId: Int32.max - 1))
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/ReplyThreadHistory.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/ReplyThreadHistory.swift
+index 965080edfef38ed07423bd30c92feff6bd3eadcb..df135e50380ec0a48c29d63c610c8276472c1340 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/ReplyThreadHistory.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/ReplyThreadHistory.swift
+@@ -477,6 +477,7 @@ private class ReplyThreadHistoryContextImpl {
+                 }
+             }
+ 
++            if strongSelf.account.network.suppressAdditional(.read, peerId: peerId) { return }
+             if let subPeerId {
+                 let signal = strongSelf.account.network.request(Api.functions.messages.readSavedHistory(parentPeer: inputPeer, peer: subPeerId, maxId: messageIndex.id.id))
+                 |> `catch` { _ -> Signal<Api.Bool, NoError> in
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/Stories.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/Stories.swift
+index fc104f5fb905819df5bdd013e42756fd4a00c4f4..05b109375818a6ca759b0d284e7fb687747848c1 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/Stories.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/Stories.swift
+@@ -2071,6 +2071,7 @@ func _internal_deleteStories(account: Account, peerId: PeerId, ids: [Int32]) ->
+ }
+ 
+ func _internal_markStoryAsSeen(account: Account, peerId: PeerId, id: Int32, asPinned: Bool) -> Signal<Never, NoError> {
++    if asPinned, account.network.suppressAdditional(.story, peerId: peerId) { return .complete() }
+     if asPinned {
+         return account.postbox.transaction { transaction -> Api.InputPeer? in
+             return transaction.getPeer(peerId).flatMap(apiInputPeer)
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/TelegramEngine.swift b/submodules/TelegramCore/Sources/TelegramEngine/TelegramEngine.swift
+index 87a41773cb02aeaa924130fadd0a289484d933e0..d4ab0a08ae4ede16e6ebcb0c0615c523a4fbc5d7 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/TelegramEngine.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/TelegramEngine.swift
+@@ -74,7 +74,7 @@ public final class TelegramEngine {
+     }()
+ 
+     public lazy var data: EngineData = {
+-        return EngineData(accountPeerId: self.account.peerId, postbox: self.account.postbox)
++        return EngineData(accountPeerId: self.account.peerId, postbox: self.account.postbox, additionalFunctionsEnabled: !self.account.supplementary)
+     }()
+ 
+     public lazy var orderedLists: OrderedLists = {
