@@ -3,3 +3,4 @@ core/shared-app-storage.patch
 core/telegram-engine.patch
 ui/additional-functions.patch
 build/bazel-architecture-checksums.patch
+build/unsigned-device-builds.patch

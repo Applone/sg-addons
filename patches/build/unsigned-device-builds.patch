@@ -1,0 +1,83 @@
+Subject: Support unsigned device builds without provisioning profiles
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 855be8f2fd9906791445391e2d9c7c5dd193fe9f..38b95c8d2afd40a3ab789a94c4b40c180678b3af 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -180,9 +180,12 @@ local_path_override(
+ )
+ 
+ bazel_dep(name = "rules_apple", repo_name = "build_bazel_rules_apple")
+-local_path_override(
++git_override(
+     module_name = "rules_apple",
+-    path = "./build-system/bazel-rules/rules_apple",
++    commit = "485016eb5b0948cc17307064e7977a6d68e94046",
++    patch_strip = 1,
++    patches = ["//build-system:rules_apple_unsigned.patch"],
++    remote = "https://github.com/ali-fareed/rules_apple.git",
+ )
+ 
+ bazel_dep(name = "rules_swift", repo_name = "build_bazel_rules_swift")
+diff --git a/build-system/BUILD b/build-system/BUILD
+index 43d4c19eab9bfa42c4e4524a3ec2d2fa39279000..9f5750428f4bd90ddda03db358b5c3e91f573d40 100644
+--- a/build-system/BUILD
++++ b/build-system/BUILD
+@@ -22,4 +22,5 @@ config_setting(
+ 
+ exports_files([
+     "GenerateStrings/GenerateStrings.py",
++    "rules_apple_unsigned.patch",
+ ])
+diff --git a/build-system/Make/Make.py b/build-system/Make/Make.py
+index 74e2d05b49984e1956854924f92d3a83170025a6..894ddfc5decf002d10aee900d98202d6a4fb4fda 100644
+--- a/build-system/Make/Make.py
++++ b/build-system/Make/Make.py
+@@ -313,7 +313,10 @@ class BazelCommandLine:
+             combined_arguments += ['--spawn_strategy=sandboxed']
+ 
+         if self.disable_provisioning_profiles:
+-            combined_arguments += ['--//Telegram:disableProvisioningProfiles']
++            combined_arguments += [
++                '--//Telegram:disableProvisioningProfiles',
++                '--features=disable_legacy_signing',
++            ]
+ 
+         combined_arguments += self.common_args
+         combined_arguments += self.common_build_args
+@@ -421,7 +424,10 @@ class BazelCommandLine:
+             combined_arguments += ['--spawn_strategy=sandboxed']
+ 
+         if self.disable_provisioning_profiles:
+-            combined_arguments += ['--//Telegram:disableProvisioningProfiles']
++            combined_arguments += [
++                '--//Telegram:disableProvisioningProfiles',
++                '--features=disable_legacy_signing',
++            ]
+ 
+         combined_arguments += self.common_args
+         combined_arguments += self.common_build_args
+diff --git a/build-system/rules_apple_unsigned.patch b/build-system/rules_apple_unsigned.patch
+new file mode 100644
+index 0000000000000000000000000000000000000000..84cfd0b91e33f37196d071366e4835998a84dc71
+--- /dev/null
++++ b/build-system/rules_apple_unsigned.patch
+@@ -0,0 +1,17 @@
++diff --git a/apple/internal/ios_rules.bzl b/apple/internal/ios_rules.bzl
++--- a/apple/internal/ios_rules.bzl
+++++ b/apple/internal/ios_rules.bzl
++@@ -452,4 +452,5 @@
++-    if platform_prerequisites.platform.is_device:
+++    if (platform_prerequisites.platform.is_device and
+++        "disable_legacy_signing" not in features):
++         processor_partials.append(
++             partials.provisioning_profile_partial(
++                 actions = actions,
++@@ -1433,4 +1434,5 @@
++-    if platform_prerequisites.platform.is_device:
+++    if (platform_prerequisites.platform.is_device and
+++        "disable_legacy_signing" not in features):
++         processor_partials.append(
++             partials.provisioning_profile_partial(
++                 actions = actions,
