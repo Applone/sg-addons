@@ -1,0 +1,58 @@
+Subject: Remove unused bindings after shared storage migration
+
+diff --git a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
+index e965e0c1343da3b1b42b48fb08597209258800c1..7589fd1f23f6a9648889c3721e2dafe8ce8c2f74 100644
+--- a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
++++ b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
+@@ -316,14 +316,11 @@ private final class EmbeddedBroadcastUploadImpl: BroadcastUploadImpl {
+     }
+ 
+     override public func broadcastStarted(withSetupInfo setupInfo: [String : NSObject]?) {
+-        guard let appBundleIdentifier = Bundle.main.bundleIdentifier, let lastDotRange = appBundleIdentifier.range(of: ".", options: [.backwards]) else {
++        guard let appBundleIdentifier = Bundle.main.bundleIdentifier, appBundleIdentifier.range(of: ".", options: [.backwards]) != nil else {
+             self.finishWithError()
+             return
+         }
+ 
+-        let baseAppBundleId = String(appBundleIdentifier[..<lastDotRange.lowerBound])
+-
+-        let appGroupName = sgAppGroupIdentifier()
+         let maybeAppGroupUrl = sgSharedContainerURL()
+ 
+         guard let appGroupUrl = maybeAppGroupUrl else {
+diff --git a/Telegram/SiriIntents/IntentHandler.swift b/Telegram/SiriIntents/IntentHandler.swift
+index 41f3e3fb96632db5002445888a41ebf7dc389b56..5064979fd1bce41b0023064388384889fcdde620 100644
+--- a/Telegram/SiriIntents/IntentHandler.swift
++++ b/Telegram/SiriIntents/IntentHandler.swift
+@@ -987,7 +987,6 @@ private final class WidgetIntentHandler {
+         
+         let baseAppBundleId = String(appBundleIdentifier[..<lastDotRange.lowerBound])
+         
+-        let appGroupName = sgAppGroupIdentifier()
+         let maybeAppGroupUrl = sgSharedContainerURL()
+         
+         guard let appGroupUrl = maybeAppGroupUrl else {
+diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
+index f841dd4f10da89dd4633d1e3b935576f4c1b171b..e12f5ef38db8dc42ba4c9f0f33382482911ec7f4 100644
+--- a/submodules/DebugSettingsUI/Sources/DebugController.swift
++++ b/submodules/DebugSettingsUI/Sources/DebugController.swift
+@@ -1995,7 +1995,6 @@ public func debugController(sharedContext: SharedAccountContext, context: Accoun
+         return getNavigationControllerImpl?()
+     })
+     
+-    let appGroupName = "group.\(Bundle.main.bundleIdentifier!)"
+     let maybeAppGroupUrl = sgSharedContainerURL()
+     
+     var hasLegacyAppData = false
+diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
+index c56b082f1ca56e8eb3b2eda2739fff45991c32db..ad7e3f327d2cd11ed16ae0a1b057524f6660ac95 100644
+--- a/submodules/TelegramUI/Sources/AppDelegate.swift
++++ b/submodules/TelegramUI/Sources/AppDelegate.swift
+@@ -326,7 +326,6 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+             return existingSession
+         }
+         
+-        let baseAppBundleId = Bundle.main.bundleIdentifier!
+         let appGroupName = sgAppGroupIdentifier()
+ 
+         let configuration = URLSessionConfiguration.background(withIdentifier: identifier)

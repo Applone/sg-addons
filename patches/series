@@ -5,3 +5,4 @@ ui/additional-functions.patch
 build/bazel-architecture-checksums.patch
 build/unsigned-device-builds.patch
 build/objc-entitlement-header.patch
+build/shared-storage-bindings.patch
