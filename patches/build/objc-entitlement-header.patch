@@ -1,0 +1,13 @@
+Subject: Include signed entitlement declarations in Objective-C consumers
+
+diff --git a/submodules/BuildConfig/Sources/BuildConfig.m b/submodules/BuildConfig/Sources/BuildConfig.m
+index 04084a33f8391f04bedb28169660c94d9f0c8f9d..16db05fe434c0ab4f0d51e962b8f058223e5816e 100644
+--- a/submodules/BuildConfig/Sources/BuildConfig.m
++++ b/submodules/BuildConfig/Sources/BuildConfig.m
+@@ -1,5 +1,5 @@
+ #import <BuildConfig/BuildConfig.h>
+-@import SGSignedEntitlements;
++#import "Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h"
+ 
+ #include <errno.h>
+ #include <fcntl.h>
