@@ -8,8 +8,10 @@ and patched in `patches/series` order when preparing a build.
 
 - Ghost mode: hide read receipts, story views, online status, typing, and upload
   activity, with chat exceptions.
-- Local edit history and deleted-message retention. Only observed messages are
-  captured; secret and expiring messages are excluded.
+- Local message history and deleted-message retention. Only observed messages
+  are captured; secret and expiring messages are excluded. The Message history
+  action appears on edited messages while history capture is enabled for the
+  account, and uses the chat's theme and wallpaper.
 - Message filters with per-account settings and JSON import/export.
 - Local profile options and badge customization.
 

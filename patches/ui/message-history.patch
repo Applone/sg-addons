@@ -1,0 +1,268 @@
+Subject: Use native chat presentation and restrict message history to edited messages
+
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index d9eb4b23d1df4cd2b03fdd217206b3fe850778d1..450955d58a5610f7485edc0b61146654a18473b9 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -300,7 +300,6 @@
+ "Additional.Diagnostics" = "Diagnostics";
+ "Additional.ClearAllNotice" = "Delete saved revisions for all accounts?";
+ "Additional.ClearAccountNotice" = "Delete saved revisions for this account?";
+-"Additional.EditHistory" = "Edit history";
+ "Additional.Latest" = "Latest locally saved version";
+ "Additional.EmptyHistory" = "No versions saved on this device. Earlier edits cannot be recovered.";
+ "Additional.Add" = "Add";
+@@ -327,6 +326,6 @@
+ "Additional.hideUpload" = "Hide upload activity";
+ "Additional.saveDeleted" = "Keep deleted messages";
+ "Additional.dimDeleted" = "Dim deleted messages";
+-"Additional.saveEditHistory" = "Save edit history";
++"Additional.saveEditHistory" = "Save message history";
+ "Additional.filtersEnabled" = "Enable filters";
+ "Additional.localPremium" = "Local Premium";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index 9812bb0ffaae9ed58553ec0adb6b31000f8b22f4..3144ea073d0f1d2c0b756922b428f896345c0650 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -295,7 +295,6 @@
+ "Additional.Diagnostics" = "Диагностика";
+ "Additional.ClearAllNotice" = "Удалить сохранённые версии для всех аккаунтов?";
+ "Additional.ClearAccountNotice" = "Удалить сохранённые версии для этого аккаунта?";
+-"Additional.EditHistory" = "История изменений";
+ "Additional.Latest" = "Последняя сохранённая на устройстве версия";
+ "Additional.EmptyHistory" = "На устройстве нет сохранённых версий. Более ранние изменения восстановить нельзя.";
+ "Additional.Add" = "Добавить";
+@@ -322,6 +321,6 @@
+ "Additional.hideUpload" = "Скрывать загрузку файлов";
+ "Additional.saveDeleted" = "Сохранять удалённые сообщения";
+ "Additional.dimDeleted" = "Затемнять удалённые сообщения";
+-"Additional.saveEditHistory" = "Сохранять историю изменений";
++"Additional.saveEditHistory" = "Сохранять историю сообщений";
+ "Additional.filtersEnabled" = "Включить фильтры";
+ "Additional.localPremium" = "Локальный Premium";
+diff --git a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+index 61c43788d69d60af866bf99a3dd3684ae23644f2..92143bd71cce467e7dd8dff6e260ffeb4ef3a8f7 100644
+--- a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
++++ b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+@@ -20,6 +20,8 @@ final class AdditionalHistoryController: ViewController {
+     private let context: AccountContext
+     private let original: Message
+     private let key: MessageKey
++    private let historyPresentationData: (initial: PresentationData, signal: Signal<PresentationData, NoError>)
++    private var presentationData: PresentationData
+     private let messages = Promise<([Message], Int32, Bool)>()
+     private var history: ChatHistoryListNodeImpl?
+     private var background: WallpaperBackgroundNode?
+@@ -27,11 +29,13 @@ final class AdditionalHistoryController: ViewController {
+     private var presentationDisposable: Disposable?
+     private var latestVersion: Int64?
+ 
+-    init(context: AccountContext, message: Message, key: MessageKey) {
++    init(context: AccountContext, message: Message, key: MessageKey, updatedPresentationData: (initial: PresentationData, signal: Signal<PresentationData, NoError>)) {
+         self.context = context; self.original = message; self.key = key
+-        let data = context.sharedContext.currentPresentationData.with { $0 }
++        self.historyPresentationData = updatedPresentationData
++        self.presentationData = updatedPresentationData.initial
++        let data = updatedPresentationData.initial
+         super.init(navigationBarPresentationData: NavigationBarPresentationData(presentationData: data, style: .glass))
+-        self.title = i18n("Additional.EditHistory", data.strings.baseLanguageCode)
++        self.title = i18n("Additional.History", data.strings.baseLanguageCode)
+         self.navigationItem.backBarButtonItem = UIBarButtonItem(title: data.strings.Common_Back, style: .plain, target: nil, action: nil)
+         self.ready.set(.single(true))
+     }
+@@ -40,13 +44,12 @@ final class AdditionalHistoryController: ViewController {
+ 
+     override func loadDisplayNode() {
+         self.displayNode = ASDisplayNode()
+-        let data = context.sharedContext.currentPresentationData.with { $0 }
+         let background = createWallpaperBackgroundNode(context: context, forChatDisplay: true)
+         self.background = background
+         displayNode.addSubnode(background)
+         let interaction = historyInteraction(context: context, backgroundNode: background) { [weak self] message in
+             guard let self else { return }
+-            let current = self.context.sharedContext.currentPresentationData.with { $0 }
++            let current = self.presentationData
+             let sheet = ActionSheetController(presentationData: current)
+             sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Conversation_ContextMenuCopy, color: .accent, action: { [weak sheet] in
+                 UIPasteboard.general.string = message.text; sheet?.dismissAnimated()
+@@ -54,10 +57,10 @@ final class AdditionalHistoryController: ViewController {
+             self.present(sheet, in: .window(.root))
+         }
+         interaction.canReadHistory = false
+-        let history = ChatHistoryListNodeImpl(context: context, updatedPresentationData: (data, context.sharedContext.presentationData), systemStyle: .glass,
++        let history = ChatHistoryListNodeImpl(context: context, updatedPresentationData: historyPresentationData, systemStyle: .glass,
+             chatLocation: .peer(id: original.id.peerId), chatLocationContextHolder: Atomic(value: nil), adMessagesContext: nil, tag: nil,
+             source: .custom(messages: messages.get(), messageId: nil, quote: nil, isSavedMusic: false, canReorder: false, richMessageId: nil, loadMore: nil),
+-            subject: nil, controllerInteraction: interaction, selectedMessages: .single(nil), mode: .bubbles, isChatPreview: true, messageTransitionNode: { nil })
++            subject: nil, controllerInteraction: interaction, selectedMessages: .single(nil), mode: .bubbles, rotated: true, isChatPreview: true, messageTransitionNode: { nil })
+         history.canReadHistory.set(Signal<Bool, NoError>.single(false))
+         history.enableUnreadAlignment = false
+         self.history = history
+@@ -66,9 +69,12 @@ final class AdditionalHistoryController: ViewController {
+         notice.adjustsFontForContentSizeCategory = true
+         notice.font = UIFont.preferredFont(forTextStyle: .footnote)
+         notice.isAccessibilityElement = true
++        notice.layer.cornerRadius = 12
++        notice.clipsToBounds = true
+         displayNode.view.addSubview(notice)
+-        presentationDisposable = (context.sharedContext.presentationData |> deliverOnMainQueue).start(next: { [weak self] data in
++        presentationDisposable = (historyPresentationData.signal |> deliverOnMainQueue).start(next: { [weak self] data in
+             self?.apply(data)
++            self?.requestLayout(transition: .immediate)
+         })
+         MessageArchive.shared.history(key) { [weak self] revisions in
+             guard let self else { return }
+@@ -82,16 +88,18 @@ final class AdditionalHistoryController: ViewController {
+                     associatedMessages: SimpleDictionary(), associatedMessageIds: [], associatedMedia: [:], associatedThreadInfo: nil, associatedStories: [:])
+             }
+             self.messages.set(.single((Array(result.reversed()), 0, false)))
+-            self.apply(self.context.sharedContext.currentPresentationData.with { $0 })
++            self.apply(self.presentationData)
+             self.requestLayout(transition: .immediate)
+         }
+-        apply(data)
++        apply(self.presentationData)
+     }
+ 
+     private func apply(_ data: PresentationData) {
++        self.presentationData = data
+         background?.update(wallpaper: data.chatWallpaper, animated: false)
+-        notice.textColor = data.theme.list.itemSecondaryTextColor
+-        notice.backgroundColor = data.theme.list.blocksBackgroundColor.withAlphaComponent(0.9)
++        let noticeColors = serviceMessageColorComponents(theme: data.theme, wallpaper: data.chatWallpaper)
++        notice.textColor = noticeColors.primaryText
++        notice.backgroundColor = noticeColors.fill
+         let lang = data.strings.baseLanguageCode
+         if let version = latestVersion {
+             let formatter = DateFormatter(); formatter.dateStyle = .medium; formatter.timeStyle = .medium
+@@ -99,7 +107,7 @@ final class AdditionalHistoryController: ViewController {
+         } else { notice.text = i18n("Additional.EmptyHistory", lang) }
+         self.navigationBar?.updatePresentationData(NavigationBarPresentationData(presentationData: data, style: .glass), transition: .immediate)
+         self.statusBar.statusBarStyle = data.theme.rootController.statusBarStyle.style
+-        self.title = i18n("Additional.EditHistory", lang)
++        self.title = i18n("Additional.History", lang)
+     }
+     override func containerLayoutUpdated(_ layout: ContainerViewLayout, transition: ContainedViewLayoutTransition) {
+         super.containerLayoutUpdated(layout, transition: transition)
+@@ -109,9 +117,11 @@ final class AdditionalHistoryController: ViewController {
+         let top = self.navigationLayout(layout: layout).navigationFrame.maxY
+         let height = notice.sizeThatFits(CGSize(width: max(1, layout.size.width - 32), height: .greatestFiniteMagnitude)).height + 16
+         notice.frame = CGRect(x: 16, y: top + 8, width: layout.size.width - 32, height: height)
+-        transition.updateFrame(node: history, frame: CGRect(origin: .zero, size: layout.size))
++        // Bubble rows are rotated inside the bottom-up list, so its insets are reversed too.
++        transition.updatePosition(node: history, position: CGPoint(x: layout.size.width / 2, y: layout.size.height / 2))
++        transition.updateBounds(node: history, bounds: CGRect(origin: .zero, size: layout.size))
+         history.updateLayout(transition: transition, updateSizeAndInsets: ListViewUpdateSizeAndInsets(size: layout.size,
+-            insets: UIEdgeInsets(top: top + height + 24, left: layout.safeInsets.left, bottom: layout.intrinsicInsets.bottom + 12, right: layout.safeInsets.right), duration: 0, curve: .Default(duration: nil)))
++            insets: UIEdgeInsets(top: layout.intrinsicInsets.bottom + 12, left: layout.safeInsets.right, bottom: top + height + 24, right: layout.safeInsets.left), duration: 0, curve: .Default(duration: nil)))
+     }
+ }
+ 
+diff --git a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift
+index 212a637502c8a0b6d6182d272ce99cd60fb3f779..01e5a179a8ea6f368411e83370cd00bdb27b1062 100644
+--- a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift
++++ b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenMessageContextMenu.swift
+@@ -50,7 +50,7 @@ extension ChatControllerImpl {
+ 
+             let _ = combineLatest(queue: .mainQueue(),
+                 self.context.engine.data.get(TelegramEngine.EngineData.Item.Peer.Peer(id: self.context.account.peerId)),
+-                contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: self.presentationInterfaceState, context: self.context, messages: updatedMessages, controllerInteraction: self.controllerInteraction, selectAll: selectAll, interfaceInteraction: self.interfaceInteraction, messageNode: node as? ChatMessageItemView),
++                contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: self.presentationInterfaceState, context: self.context, updatedPresentationData: self.updatedPresentationData, messages: updatedMessages, controllerInteraction: self.controllerInteraction, selectAll: selectAll, interfaceInteraction: self.interfaceInteraction, messageNode: node as? ChatMessageItemView),
+                 peerMessageAllowedReactions(context: self.context, message: topMessage, ignoreDefault: canBypassReactionRestrictions),
+                 peerMessageSelectedReactions(context: self.context, message: EngineMessage(topMessage)),
+                 topMessageReactions(context: self.context, message: topMessage, subPeerId: self.chatLocation.threadId.flatMap(EnginePeer.Id.init), ignoreDefault: canBypassReactionRestrictions),
+diff --git a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenPollContextMenu.swift b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenPollContextMenu.swift
+index 905080f01ced8253f5d0bd70dab9ad1e915de597..3b0955cdce64a814d56e30778756574065e6c673 100644
+--- a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenPollContextMenu.swift
++++ b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenPollContextMenu.swift
+@@ -49,7 +49,7 @@ extension ChatControllerImpl {
+ 
+         let _ = combineLatest(
+             queue: Queue.mainQueue(),
+-            contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: self.presentationInterfaceState, context: self.context, messages: [message], controllerInteraction: self.controllerInteraction, selectAll: false, interfaceInteraction: self.interfaceInteraction, messageNode: messageItemView),
++            contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: self.presentationInterfaceState, context: self.context, updatedPresentationData: self.updatedPresentationData, messages: [message], controllerInteraction: self.controllerInteraction, selectAll: false, interfaceInteraction: self.interfaceInteraction, messageNode: messageItemView),
+             addedByPeer
+         ).start(next: { [weak self] actions, addedByPeer in
+             guard let self else {
+diff --git a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenTodoContextMenu.swift b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenTodoContextMenu.swift
+index 363fd5a46a7aefecb3e9eedf08c51fa2abb99c30..2b27171ccf9f4d75777365ac48a5a89746a3fade 100644
+--- a/submodules/TelegramUI/Sources/Chat/ChatControllerOpenTodoContextMenu.swift
++++ b/submodules/TelegramUI/Sources/Chat/ChatControllerOpenTodoContextMenu.swift
+@@ -35,7 +35,7 @@ extension ChatControllerImpl {
+         }
+         let canEdit = canEditMessage(context: self.context, limitsConfiguration: self.context.currentLimitsConfiguration.with { EngineConfiguration.Limits($0) }, message: message)
+         
+-        let _ = (contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: self.presentationInterfaceState, context: self.context, messages: [message], controllerInteraction: self.controllerInteraction, selectAll: false, interfaceInteraction: self.interfaceInteraction, messageNode: params.messageNode as? ChatMessageItemView)
++        let _ = (contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: self.presentationInterfaceState, context: self.context, updatedPresentationData: self.updatedPresentationData, messages: [message], controllerInteraction: self.controllerInteraction, selectAll: false, interfaceInteraction: self.interfaceInteraction, messageNode: params.messageNode as? ChatMessageItemView)
+         |> deliverOnMainQueue).start(next: { [weak self] actions in
+             guard let self else {
+                 return
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 9626bd3d80937b9cd0c99a4cd057e59516361177..8383ea1b3a3d24119df114aaa06a8e5b11caa606 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -493,7 +493,7 @@ private func ephemeralReplacementContextMenuItems(chatPresentationInterfaceState
+     }
+ }
+ 
+-func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: ChatPresentationInterfaceState, context: AccountContext, messages: [EngineRawMessage], controllerInteraction: ChatControllerInteraction?, selectAll: Bool, interfaceInteraction: ChatPanelInterfaceInteraction?, readStats: MessageReadStats? = nil, messageNode: ChatMessageItemView? = nil) -> Signal<ContextController.Items, NoError> {
++func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState: ChatPresentationInterfaceState, context: AccountContext, updatedPresentationData: (initial: PresentationData, signal: Signal<PresentationData, NoError>), messages: [EngineRawMessage], controllerInteraction: ChatControllerInteraction?, selectAll: Bool, interfaceInteraction: ChatPanelInterfaceInteraction?, readStats: MessageReadStats? = nil, messageNode: ChatMessageItemView? = nil) -> Signal<ContextController.Items, NoError> {
+     guard let interfaceInteraction = interfaceInteraction, let controllerInteraction = controllerInteraction else {
+         return .single(ContextController.Items(content: .list([])))
+     }
+@@ -963,32 +963,12 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+         return (data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, messageViewsPrivacyTips, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer)
+     }
+     
+-    let additionalKey = additionalMessageKey(account: context.account.peerId, id: message.id)
+-    let additionalEligible = additionalKey != nil && additionalCanArchive(attributes: message.attributes, media: message.media)
+-    let revisionsSignal: Signal<[MessageRevision], NoError> = Signal { subscriber in
+-        if additionalEligible, let key = additionalKey {
+-            MessageArchive.shared.history(key) { revisions in subscriber.putNext(revisions); subscriber.putCompletion() }
+-        } else { subscriber.putNext([]); subscriber.putCompletion() }
+-        return EmptyDisposable
+-    }
+-    return combineLatest(dataSignal, revisionsSignal)
++    return dataSignal
+     |> deliverOnMainQueue
+-    |> map { [context] tuple, savedRevisions -> ContextController.Items in
+-        let (data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, _, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer) = tuple
++    |> map { [context] data, updatingMessageMedia, infoSummaryData, appConfig, isMessageRead, _, availableReactions, translationSettings, loggingSettings, notificationSoundList, accountPeer -> ContextController.Items in
+         let isPremium = accountPeer?.isPremium ?? false
+ 
+         var actions: [ContextMenuItem] = []
+-        if additionalEligible, let key = additionalKey,
+-           !savedRevisions.isEmpty || AddonSettings.shared.profile(key.account).saveEditHistory {
+-            actions.append(.action(ContextMenuActionItem(text: i18n("Additional.EditHistory", chatPresentationInterfaceState.strings.baseLanguageCode), icon: { theme in
+-                UIImage(systemName: "clock.arrow.circlepath")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)
+-            }, action: { controller, _ in
+-                controller?.dismiss(completion: {
+-                    controllerInteraction.navigationController()?.pushViewController(AdditionalHistoryController(context: context, message: message, key: key))
+-                })
+-            })))
+-        }
+-
+ 
+         if isSharedMediaPolls && messages.count == 1 {
+             actions.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.SharedMedia_ViewInChat, icon: { theme in
+@@ -2322,6 +2302,20 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+             return false
+         })
+ 
++        if isEdited,
++           let key = additionalMessageKey(account: context.account.peerId, id: message.id),
++           additionalCanArchive(attributes: message.attributes, media: message.media),
++           AddonSettings.shared.profile(key.account).saveEditHistory {
++            actions.append(.action(ContextMenuActionItem(text: i18n("Additional.History", chatPresentationInterfaceState.strings.baseLanguageCode), icon: { theme in
++                UIImage(systemName: "clock.arrow.circlepath")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)
++            }, action: { controller, _ in
++                controller?.dismiss(completion: {
++                    guard AddonSettings.shared.profile(key.account).saveEditHistory else { return }
++                    controllerInteraction.navigationController()?.pushViewController(AdditionalHistoryController(context: context, message: message, key: key, updatedPresentationData: updatedPresentationData))
++                })
++            })))
++        }
++
+         if canViewAuthor {
+             actions.insert(.custom(ChatMessageAuthorContextItem(context: context, message: message, action: { c, f, peer in
+                 c.dismiss(completion: {
