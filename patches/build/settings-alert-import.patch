@@ -1,0 +1,14 @@
+Subject: Import the context-based presentation alert API in additional settings
+
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+index 9c3d243116e18576f3cce412910aa05dc4ae2de2..a4f4355726997d56ec55e57816b0dc2da6e5051b 100644
+--- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+@@ -7,6 +7,7 @@ import SwiftSignalKit
+ import TelegramCore
+ import TelegramPresentationData
+ import ItemListUI
++import PresentationDataUtils
+ import AccountContext
+ import SGAdditionalCore
+ import SGStrings
