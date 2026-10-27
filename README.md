@@ -23,6 +23,19 @@ and patched in `patches/series` order when preparing a build.
 3. Download `sg-addons-unsigned-<run number>` from the run's **Artifacts** section.
    It contains the IPA, dSYMs, and source provenance.
 
+Pushing any tag automatically starts the same build. After a successful tag
+build, the workflow publishes a GitHub Release for that tag with only
+`Swiftgram.ipa` and `Swiftgram.DSYMs.zip` as assets, plus automatically generated
+release notes. Manual runs on a tag also publish a
+release; manual runs on a branch only upload the Actions artifact.
+
+For example, to publish a version from the current commit:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
 The workflow fetches pinned sources and submodules, applies patches, runs core
 tests, and builds on macOS with the upstream Xcode version. Pushes and pull
 requests run lint, patch verification, and core tests automatically.

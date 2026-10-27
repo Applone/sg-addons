@@ -1,6 +1,9 @@
 name: Build unsigned IPA
 
 on:
+  push:
+    tags:
+      - '**'
   workflow_dispatch:
 
 permissions:
@@ -12,6 +15,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.event.deleted != true
     runs-on: macos-26
     timeout-minutes: 360
     env:
@@ -72,3 +76,28 @@ jobs:
           path: build/artifacts/
           if-no-files-found: error
           retention-days: 14
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: sg-addons-unsigned-${{ github.run_number }}
+          path: artifacts
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RELEASE_TAG" \
+            artifacts/Swiftgram.ipa \
+            artifacts/Swiftgram.DSYMs.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "$RELEASE_TAG" \
+            --generate-notes \
+            --notes 'Unsigned iOS build. Sign the IPA before installing it on a device.'
