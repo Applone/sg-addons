@@ -13,6 +13,10 @@ and patched in `patches/series` order when preparing a build.
   action appears on edited messages while history capture is enabled for the
   account, and uses the chat's theme and wallpaper.
 - Message filters with per-account settings and JSON import/export.
+- Telegram ad blocking: hide sponsored messages and search ads, including cached
+  and queued ads, without Premium. Enable **Block Telegram ads** under Swiftgram
+  settings → **Additional functions** → **Telegram ads** for all accounts or an
+  individual account. Changes take effect without restarting; off by default.
 - Local profile options and badge customization.
 
 ## Build in CI

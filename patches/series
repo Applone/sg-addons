@@ -10,3 +10,5 @@ build/conditional-closures.patch
 build/settings-alert-import.patch
 build/history-ui-compatibility.patch
 ui/message-history.patch
+core/telegram-ads.patch
+ui/telegram-ads.patch

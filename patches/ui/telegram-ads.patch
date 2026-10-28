@@ -1,0 +1,133 @@
+Subject: Telegram ad-blocking settings and presentation
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index e2bc8959ee3b78da774166098cec991297635258..7e537511f5af54d4d5d7d762f37d7a973a23ecaf 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -28,7 +28,7 @@ import UndoUI
+ 
+ private enum SGControllerSection: Int32, SGItemListSection {
+     case search
+-    case additionalAccount, additionalGhost, additionalHistory, additionalFilters, additionalPremium, additionalAbout
++    case additionalAccount, additionalGhost, additionalHistory, additionalFilters, additionalAds, additionalPremium, additionalAbout
+     case trending
+     case content
+     case tabs
+@@ -58,6 +58,7 @@ private enum SGBoolSetting: String {
+     case additionalDimDeleted
+     case additionalSaveEditHistory
+     case additionalFiltersEnabled
++    case additionalBlockAds
+     case additionalLocalPremium
+ 
+     case hidePhoneInSettings
+@@ -195,6 +196,9 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.header(id: id.count, section: .additionalFilters, text: text("Filters"), badge: nil))
+     entries.append(.toggle(id: id.count, section: .additionalFilters, settingName: .additionalFiltersEnabled, value: profile.filtersEnabled, text: text("filtersEnabled"), enabled: true))
+     entries.append(.disclosure(id: id.count, section: .additionalFilters, link: .additionalFilters, text: text("EditFilters")))
++    entries.append(.header(id: id.count, section: .additionalAds, text: text("Ads"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalAds, settingName: .additionalBlockAds, value: profile.blockAds, text: text("blockAds"), enabled: true))
++    entries.append(.notice(id: id.count, section: .additionalAds, text: text("AdsNotice")))
+     entries.append(.header(id: id.count, section: .additionalPremium, text: text("Premium"), badge: nil))
+     entries.append(.toggle(id: id.count, section: .additionalPremium, settingName: .additionalLocalPremium, value: profile.localPremium, text: text("localPremium"), enabled: true))
+     entries.append(.notice(id: id.count, section: .additionalPremium, text: text("PremiumNotice")))
+@@ -422,7 +426,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+             return
+         }
+         switch setting {
+-        case .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalLocalPremium: break
++        case .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalBlockAds, .additionalLocalPremium: break
+         case .hidePhoneInSettings:
+             SGSimpleSettings.shared.hidePhoneInSettings = value
+             askForRestart?()
+@@ -895,6 +899,7 @@ private extension SGBoolSetting {
+         case .additionalDimDeleted: return \AddonProfile.dimDeleted
+         case .additionalSaveEditHistory: return \AddonProfile.saveEditHistory
+         case .additionalFiltersEnabled: return \AddonProfile.filtersEnabled
++        case .additionalBlockAds: return \AddonProfile.blockAds
+         case .additionalLocalPremium: return \AddonProfile.localPremium
+         default: return nil
+         }
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index 450955d58a5610f7485edc0b61146654a18473b9..304ceacfeaee26b6dcc52f5f0480289b2db189f8 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -329,3 +329,6 @@
+ "Additional.saveEditHistory" = "Save message history";
+ "Additional.filtersEnabled" = "Enable filters";
+ "Additional.localPremium" = "Local Premium";
++"Additional.Ads" = "Telegram ads";
++"Additional.blockAds" = "Block Telegram ads";
++"Additional.AdsNotice" = "Hide sponsored messages and search ads in this client. No Telegram Premium subscription is required.";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index 3144ea073d0f1d2c0b756922b428f896345c0650..b2e581ab04b311bc720cc94deb0edb22e5d4f1e5 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -324,3 +324,6 @@
+ "Additional.saveEditHistory" = "Сохранять историю сообщений";
+ "Additional.filtersEnabled" = "Включить фильтры";
+ "Additional.localPremium" = "Локальный Premium";
++"Additional.Ads" = "Реклама Telegram";
++"Additional.blockAds" = "Блокировать рекламу Telegram";
++"Additional.AdsNotice" = "Скрывать рекламные сообщения и рекламу в поиске в этом клиенте. Подписка Telegram Premium не требуется.";
+diff --git a/submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift b/submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift
+index 92cdbd62025d2b010445521f6b9fd2e624cb9f3f..af45b45d8cac17422a3fa9ac800c3f30bf4fc303 100644
+--- a/submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift
++++ b/submodules/ChatListUI/Sources/ChatListSearchListPaneNode.swift
+@@ -3006,7 +3006,8 @@ final class ChatListSearchListPaneNode: ASDisplayNode, ChatListSearchPaneNode {
+                 resolvedMessage,
+                 fixedRecentlySearchedPeers,
+                 foundThreads,
+-                adsHiddenPromise.get()
++                combineLatest(adsHiddenPromise.get(), additionalAdsBlockingChanges(account: context.account.peerId))
++                |> map { hidden, blocked in hidden || blocked }
+             )
+             |> map { accountPeer, foundLocalPeers, foundRemotePeers, foundRemoteMessages, foundPublicMessages, presentationData, searchState, selectionState, resolvedMessage, recentPeers, allAndFoundThreads, adsHidden -> ([ChatListSearchEntry], Bool, String?)? in
+                 let isSearching = foundRemotePeers.3 || foundRemoteMessages.1 || foundPublicMessages.1
+@@ -3025,7 +3026,7 @@ final class ChatListSearchListPaneNode: ASDisplayNode, ChatListSearchPaneNode {
+                     recentPeers = []
+                 }
+ 
+-                let _ = currentRemotePeers.swap((foundRemotePeers.0, foundRemotePeers.1, foundRemotePeers.2))
++                let _ = currentRemotePeers.swap((foundRemotePeers.0, foundRemotePeers.1, additionalAdsBlocked(account: context.account.peerId) ? [] : foundRemotePeers.2))
+ 
+                 let filteredPeer: (EnginePeer, EnginePeer) -> Bool = { peer, accountPeer in
+                     if excludedPeerIds.contains(peer.id) {
+diff --git a/submodules/TelegramUI/Sources/ChatHistoryListNode.swift b/submodules/TelegramUI/Sources/ChatHistoryListNode.swift
+index b36571fd9bf1250b19740ea47ef5ce2a96a80218..ef76b8624ffb2d39d0f13909ead1be76dbfcb910 100644
+--- a/submodules/TelegramUI/Sources/ChatHistoryListNode.swift
++++ b/submodules/TelegramUI/Sources/ChatHistoryListNode.swift
+@@ -1466,11 +1466,22 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+     }
+     
+     private func beginAdMessageManagement(adMessages: Signal<(interPostInterval: Int32?, messages: [Message], startDelay: Int32?, betweenDelay: Int32?), NoError>) {
+-        self.adMessagesDisposable = (adMessages
++        self.adMessagesDisposable = (combineLatest(adMessages, additionalAdsBlockingChanges(account: self.context.account.peerId))
++        |> map { ads, blocked in blocked ? (nil, [], nil, nil) : ads }
+         |> deliverOnMainQueue).startStrict(next: { [weak self] interPostInterval, messages, _, _ in
+             guard let self else {
+                 return
+             }
++            if additionalAdsBlocked(account: self.context.account.peerId) {
++                self.pendingDynamicAdMessages.removeAll()
++                self.pendingDynamicAdMessageInterval = nil
++                self.remainingDynamicAdMessageInterval = nil
++                self.remainingDynamicAdMessageDistance = nil
++                self.preloadAdPeerName = nil
++                self.preloadAdPeerDisposable.set(nil)
++                self.allAdMessages = (nil, [], self.allAdMessages.version + 1)
++                return
++            }
+             
+             if let interPostInterval = interPostInterval {
+                 self.pendingDynamicAdMessages = messages
+@@ -2993,7 +3004,7 @@ public final class ChatHistoryListNodeImpl: ASDisplayNode, ChatHistoryNode, Chat
+     }
+     
+     private func maybeInsertPendingAdMessage(historyView: ChatHistoryView, toLaterRange: (Int, Int), toEarlierRange: (Int, Int)) {
+-        if self.pendingDynamicAdMessages.isEmpty {
++        if additionalAdsBlocked(account: self.context.account.peerId) || self.pendingDynamicAdMessages.isEmpty {
+             return
+         }
+         

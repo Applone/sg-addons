@@ -1,0 +1,337 @@
+Subject: Telegram ad blocking
+Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
+
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Ads.swift b/Swiftgram/SGAdditionalCore/Sources/Ads.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..0bde3ac6fd85baeb32a78dd4abfcbc920f4c89aa
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/Ads.swift
+@@ -0,0 +1,5 @@
++public enum AdditionalAds {
++    public static func suppress(account: String) -> Bool {
++        return AddonSettings.shared.profile(account).blockAds
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Settings.swift b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+index 1472f7142b85b821b0e2fdc5f2a00164659a6272..b6ad1aa23486e19a8542a4dbf09c69fcc5961800 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/Settings.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+@@ -68,11 +68,12 @@ public struct AddonProfile: Codable {
+     public var filters: [FilterRule] = []
+     public var saveEditHistory = false
+     public var localPremium = false
++    public var blockAds = false
+ 
+     public init() {}
+     private enum CodingKeys: String, CodingKey {
+         case ghostEnabled, hideRead, hideStories, hideOnline, hideTyping, hideUpload
+-        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium, saveEditHistory
++        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium, saveEditHistory, blockAds
+     }
+     public init(from decoder: Decoder) throws {
+         let values = try decoder.container(keyedBy: CodingKeys.self)
+@@ -90,6 +91,7 @@ public struct AddonProfile: Codable {
+         filters = try values.decodeIfPresent([FilterRule].self, forKey: .filters) ?? []
+         saveEditHistory = try values.decodeIfPresent(Bool.self, forKey: .saveEditHistory) ?? false
+         localPremium = try values.decodeIfPresent(Bool.self, forKey: .localPremium) ?? false
++        blockAds = try values.decodeIfPresent(Bool.self, forKey: .blockAds) ?? false
+         try validate()
+     }
+ 
+@@ -128,7 +130,7 @@ public final class AddonSettings {
+         updateEnabled()
+     }
+     private func updateEnabled() {
+-        enabled = profiles.values.contains { $0.ghostEnabled || $0.saveDeleted || $0.filtersEnabled || $0.localPremium || $0.saveEditHistory }
++        enabled = profiles.values.contains { $0.ghostEnabled || $0.saveDeleted || $0.filtersEnabled || $0.localPremium || $0.saveEditHistory || $0.blockAds }
+         retaining = profiles.values.contains(where: \.saveDeleted)
+     }
+     public func anyEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return enabled }
+diff --git a/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift b/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..9a88ad8af40516362c7f78bfa239e38e0b26f841
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift
+@@ -0,0 +1,57 @@
++import Foundation
++
++enum AdsChecks {
++    static func run(defaults: UserDefaults) throws {
++        CheckCore.require(!AddonProfile().blockAds, "ad blocking is opt-in")
++        let legacy = try JSONDecoder().decode(AddonProfile.self, from: Data(#"{"ghostEnabled":true,"localPremium":true}"#.utf8))
++        CheckCore.require(legacy.ghostEnabled && legacy.localPremium && !legacy.blockAds, "legacy profiles preserve settings without enabling ad blocking")
++        let empty = try JSONDecoder().decode(AddonProfile.self, from: Data("{}".utf8))
++        CheckCore.require(!empty.blockAds, "missing ad-blocking setting uses the default")
++        do {
++            _ = try JSONDecoder().decode(AddonProfile.self, from: Data(#"{"blockAds":"true"}"#.utf8))
++            fatalError("invalid ad-blocking setting accepted")
++        } catch { }
++
++        var blocked = AddonProfile()
++        blocked.blockAds = true
++        let decoded = try JSONDecoder().decode(AddonProfile.self, from: JSONEncoder().encode(blocked))
++        CheckCore.require(decoded.blockAds, "ad-blocking setting survives Codable round trip")
++
++        let settings = AddonSettings.shared
++        let originalDefault = settings.profile(nil)
++        let originalAccounts = settings.accounts().map { ($0, settings.profile($0)) }
++        defer {
++            try? settings.save(AddonProfile(), account: "99101")
++            try? settings.save(AddonProfile(), account: "99102")
++            try? settings.save(originalDefault, account: nil)
++            for (account, profile) in originalAccounts { try? settings.save(profile, account: account) }
++        }
++        for (account, _) in originalAccounts { try settings.save(AddonProfile(), account: account) }
++        try settings.save(AddonProfile(), account: nil)
++        CheckCore.require(!settings.anyEnabled(), "all addon features disabled")
++        CheckCore.require(!AdditionalAds.suppress(account: "99101"), "ads remain available when blocking is disabled")
++
++        try settings.save(blocked, account: nil)
++        CheckCore.require(AdditionalAds.suppress(account: "99101"), "ad blocking inherits the default profile")
++        CheckCore.require(settings.anyEnabled(), "ad blocking alone enables the addon")
++        CheckCore.require(!settings.anyHistoryEnabled() && !settings.anyRetentionEnabled(), "ad blocking does not enable message archiving")
++        try settings.save(AddonProfile(), account: "99102")
++        CheckCore.require(!AdditionalAds.suppress(account: "99102"), "account override can allow ads")
++
++        try settings.save(AddonProfile(), account: nil)
++        CheckCore.require(!AdditionalAds.suppress(account: "99101"), "disabling default ad blocking takes effect immediately")
++        try settings.save(blocked, account: "99101")
++        CheckCore.require(AdditionalAds.suppress(account: "99101"), "account override can block ads")
++        CheckCore.require(!AdditionalAds.suppress(account: "99102"), "ad blocking is isolated between accounts")
++        CheckCore.require(settings.anyEnabled(), "account-only ad blocking enables the addon")
++        let persisted = try JSONDecoder().decode([String: AddonProfile].self, from: defaults.data(forKey: "profiles")!)
++        CheckCore.require(persisted["99101"]?.blockAds == true && persisted["99102"]?.blockAds == false, "ad-blocking overrides are persisted independently")
++
++        blocked.ghostEnabled = true
++        blocked.ghostExceptions = ["user:42"]
++        try settings.save(blocked, account: "99101")
++        CheckCore.require(AdditionalAds.suppress(account: "99101"), "ghost-mode exceptions do not disable ad blocking")
++        try settings.save(AddonProfile(), account: "99101")
++        CheckCore.require(!AdditionalAds.suppress(account: "99101") && !settings.anyEnabled(), "disabling ad blocking restores ads without restarting")
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+index 0b08149067f8a2c2a0eb3b2fb6c0fd46148e6c28..914ec27a5fa162021614d2529c9a5cbd493a7d07 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -33,6 +33,7 @@ struct CheckCore {
+         CheckCore.require(!AdditionalPrivacy.suppress(.read, account: "77", chat: "user:42"), "chat exception")
+         CheckCore.require(AdditionalPrivacy.suppress(.online, account: "77", chat: "user:42"), "online applies to account")
+         CheckCore.require(!AdditionalPrivacy.suppress(.cancel, account: "77"), "cancel is transmitted")
++        try AdsChecks.run(defaults: defaults)
+         try HistoryChecks.run(root: root)
+         let key = MessageKey(account: "77", chat: "user:42", id: 1)
+         let other = MessageKey(account: "77", chat: "channel:42", id: 1)
+@@ -59,6 +60,6 @@ struct CheckCore {
+         let saved = try JSONDecoder().decode([String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
+         CheckCore.require(saved["77"]?["serverUser"] == Data([1, 2]), "badge changes preserve legacy server snapshot")
+         CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "88") == nil, "badge account isolation")
+-        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, local badge storage")
++        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage")
+     }
+ }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..05bea6c096131a07250844d5ff3212ff3df23e88
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift
+@@ -0,0 +1,13 @@
++import Postbox
++import SwiftSignalKit
++import SGAdditionalCore
++
++public func additionalAdsBlocked(account: PeerId) -> Bool {
++    return AdditionalAds.suppress(account: additionalAccountKey(account))
++}
++
++public func additionalAdsBlockingChanges(account: PeerId) -> Signal<Bool, NoError> {
++    return additionalPresentationChanges()
++    |> map { additionalAdsBlocked(account: account) }
++    |> distinctUntilChanged
++}
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/AdMessages.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/AdMessages.swift
+index 8c48207f8a3e41f781f0671591113172dbe367e2..4adace8ee307d6d7d49c4883c829a3241f86559c 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/AdMessages.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/AdMessages.swift
+@@ -317,7 +317,7 @@ private class AdMessagesHistoryContextImpl {
+     private let peerId: EnginePeer.Id
+     private let messageId: EngineMessage.Id?
+ 
+-    private let maskAsSeenDisposables = DisposableDict<Data>()
++    private var maskAsSeenDisposables = DisposableDict<Data>()
+ 
+     struct CachedState: Codable, PostboxCoding {
+         enum CodingKeys: String, CodingKey {
+@@ -441,21 +441,29 @@ private class AdMessagesHistoryContextImpl {
+     }
+ 
+     private var isActivated: Bool = false
++    private var adsBlocked: Bool
+     private let disposable = MetaDisposable()
++    private let settingsDisposable = MetaDisposable()
+     
+     init(queue: Queue, account: Account, peerId: EnginePeer.Id, messageId: EngineMessage.Id?, activateManually: Bool) {
+         self.queue = queue
+         self.account = account
+         self.peerId = peerId
+         self.messageId = messageId
++        self.adsBlocked = additionalAdsBlocked(account: account.peerId)
+ 
+         self.stateValue = State(interPostInterval: nil, messages: [])
+ 
+-        if messageId == nil {
++        if self.adsBlocked {
++            self.clearAds()
++        } else if messageId == nil {
+             self.state.set(CachedState.getCached(postbox: account.postbox, peerId: peerId)
+             |> mapToSignal { cachedState -> Signal<State, NoError> in
+                 if let cachedState = cachedState, cachedState.timestamp >= Int32(Date().timeIntervalSince1970) - 5 * 60 {
+                     return account.postbox.transaction { transaction -> State in
++                        guard !additionalAdsBlocked(account: account.peerId) else {
++                            return State(interPostInterval: nil, messages: [])
++                        }
+                         return State(interPostInterval: cachedState.interPostInterval, messages: cachedState.messages.compactMap { message -> Message? in
+                             return message.toMessage(peerId: peerId, transaction: transaction)
+                         })
+@@ -466,21 +474,49 @@ private class AdMessagesHistoryContextImpl {
+             })
+         }
+ 
++        self.settingsDisposable.set((additionalAdsBlockingChanges(account: account.peerId)
++        |> deliverOn(queue)).start(next: { [weak self] blocked in
++            guard let self, self.adsBlocked != blocked else {
++                return
++            }
++            self.adsBlocked = blocked
++            if blocked {
++                self.clearAds()
++            } else if self.isActivated {
++                self.isActivated = false
++                self.activate()
++            }
++        }))
++
+         if !activateManually {
+             self.activate()
+         }
+     }
+     
+     deinit {
++        self.settingsDisposable.dispose()
+         self.disposable.dispose()
+         self.maskAsSeenDisposables.dispose()
+     }
++
++    private func clearAds() {
++        self.disposable.set(nil)
++        self.maskAsSeenDisposables.dispose()
++        self.maskAsSeenDisposables = DisposableDict<Data>()
++        let state = State(interPostInterval: nil, messages: [])
++        self.stateValue = state
++        self.state.set(.single(state))
++    }
+     
+     func activate() {
+         if self.isActivated {
+             return
+         }
+         self.isActivated = true
++        guard !additionalAdsBlocked(account: self.account.peerId) else {
++            self.clearAds()
++            return
++        }
+         
+         let peerId = self.peerId
+         let accountPeerId = self.account.peerId
+@@ -491,7 +527,7 @@ private class AdMessagesHistoryContextImpl {
+             return transaction.getPeer(peerId).flatMap(apiInputPeer)
+         }
+         |> mapToSignal { inputPeer -> Signal<(interPostInterval: Int32?, startDelay: Int32?, betweenDelay: Int32?, messages: [Message]), NoError> in
+-            guard let inputPeer else {
++            guard !additionalAdsBlocked(account: account.peerId), let inputPeer else {
+                 return .single((nil, nil, nil, []))
+             }
+             var flags: Int32 = 0
+@@ -509,6 +545,9 @@ private class AdMessagesHistoryContextImpl {
+                 }
+ 
+                 return account.postbox.transaction { transaction -> (interPostInterval: Int32?, startDelay: Int32?, betweenDelay: Int32?, messages: [Message]) in
++                    guard !additionalAdsBlocked(account: account.peerId) else {
++                        return (nil, nil, nil, [])
++                    }
+                     switch result {
+                     case let .sponsoredMessages(sponsoredMessagesData):
+                         let (postsBetween, startDelay, betweenDelay, messages, chats, users) = (sponsoredMessagesData.postsBetween, sponsoredMessagesData.startDelay, sponsoredMessagesData.betweenDelay, sponsoredMessagesData.messages, sponsoredMessagesData.chats, sponsoredMessagesData.users)
+@@ -585,11 +624,18 @@ private class AdMessagesHistoryContextImpl {
+             guard let strongSelf = self else {
+                 return
+             }
++            guard !additionalAdsBlocked(account: strongSelf.account.peerId) else {
++                strongSelf.clearAds()
++                return
++            }
+             strongSelf.stateValue = State(interPostInterval: interPostInterval, startDelay: startDelay, betweenDelay: betweenDelay, messages: messages)
+         }))
+     }
+ 
+     func markAsSeen(opaqueId: Data) {
++        guard !additionalAdsBlocked(account: self.account.peerId) else {
++            return
++        }
+         let signal: Signal<Never, NoError> = self.account.network.request(Api.functions.messages.viewSponsoredMessage(randomId: Buffer(data: opaqueId)))
+         |> `catch` { _ -> Signal<Api.Bool, NoError> in
+             return .single(.boolFalse)
+@@ -686,6 +732,9 @@ public class AdMessagesHistoryContext {
+ 
+ 
+ func _internal_markAdAction(account: Account, opaqueId: Data, media: Bool, fullscreen: Bool) {
++    guard !additionalAdsBlocked(account: account.peerId) else {
++        return
++    }
+     var flags: Int32 = 0
+     if media {
+         flags |= (1 << 0)
+@@ -702,6 +751,9 @@ func _internal_markAdAction(account: Account, opaqueId: Data, media: Bool, fulls
+ }
+ 
+ func _internal_markAdAsSeen(account: Account, opaqueId: Data) {
++    guard !additionalAdsBlocked(account: account.peerId) else {
++        return
++    }
+     let signal = account.network.request(Api.functions.messages.viewSponsoredMessage(randomId: Buffer(data: opaqueId)))
+     |> `catch` { _ -> Signal<Api.Bool, NoError> in
+         return .single(.boolFalse)
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Peers/AdPeers.swift b/submodules/TelegramCore/Sources/TelegramEngine/Peers/AdPeers.swift
+index 62f16197a80e694207e757265d757b7a9d597879..fd96a548d590670965cf40f7f760b2c4df64c506 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Peers/AdPeers.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Peers/AdPeers.swift
+@@ -39,6 +39,19 @@ public class AdPeer: Equatable {
+ }
+ 
+ func _internal_searchAdPeers(account: Account, query: String) -> Signal<[AdPeer], NoError> {
++    return additionalAdsBlockingChanges(account: account.peerId)
++    |> mapToSignal { blocked -> Signal<[AdPeer], NoError> in
++        if blocked {
++            return .single([])
++        }
++        return requestAdPeers(account: account, query: query)
++    }
++}
++
++private func requestAdPeers(account: Account, query: String) -> Signal<[AdPeer], NoError> {
++    guard !additionalAdsBlocked(account: account.peerId) else {
++        return .single([])
++    }
+     return account.network.request(Api.functions.contacts.getSponsoredPeers(q: query))
+     |> map(Optional.init)
+     |> `catch` { _ in
+@@ -49,6 +62,9 @@ func _internal_searchAdPeers(account: Account, query: String) -> Signal<[AdPeer]
+             return .single([])
+         }
+         return account.postbox.transaction { transaction -> [AdPeer] in
++            guard !additionalAdsBlocked(account: account.peerId) else {
++                return []
++            }
+             switch result {
+             case let .sponsoredPeers(sponsoredPeersData):
+                 let (peers, chats, users) = (sponsoredPeersData.peers, sponsoredPeersData.chats, sponsoredPeersData.users)
