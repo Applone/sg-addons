@@ -18,7 +18,7 @@ test-python source_dir="build/source":
     uv run --frozen ruff format --check --no-respect-gitignore "{{ source_dir }}/Swiftgram/SGPython" examples/plugins
     uv run --frozen mypy --strict "{{ source_dir }}/Swiftgram/SGPython/SDK" \
         "{{ source_dir }}/Swiftgram/SGPython/prepare_runtime.py" \
-        "{{ source_dir }}/Swiftgram/SGPython/Tests" examples/plugins/uppercase.py
+        "{{ source_dir }}/Swiftgram/SGPython/Tests" examples/plugins
     clang-format --dry-run --Werror "{{ source_dir }}/Swiftgram/SGPython/Bridge/SGPythonBridge.c" \
         "{{ source_dir }}/Swiftgram/SGPython/Bridge/SGPythonBridge.h"
     PYTHONPATH="{{ source_dir }}/Swiftgram/SGPython/SDK" uv run --frozen python -m unittest discover \

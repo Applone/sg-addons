@@ -1,5 +1,5 @@
 diff --git a/MODULE.bazel b/MODULE.bazel
-index 38b95c8d2afd40a3ab789a94c4b40c180678b3af..8834cc79609415b0ec7b3963e5c63e9af3ef2037 100644
+index 38b95c8d..8834cc79 100644
 --- a/MODULE.bazel
 +++ b/MODULE.bazel
 @@ -249,3 +249,6 @@ local_path_override(
@@ -10,7 +10,7 @@ index 38b95c8d2afd40a3ab789a94c4b40c180678b3af..8834cc79609415b0ec7b3963e5c63e9a
 +python_ios_repository = use_repo_rule("//Swiftgram/SGPython:python_repository.bzl", "python_ios_repository")
 +python_ios_repository(name = "swiftgram_python")
 diff --git a/Swiftgram/SGAdditionalCore/BUILD b/Swiftgram/SGAdditionalCore/BUILD
-index 994a2d3eb758ffd9b69c2e3d0145b736a9470095..7531d1f086a9fcbf4b076a6400b0d909efd6f805 100644
+index 994a2d3e..7531d1f0 100644
 --- a/Swiftgram/SGAdditionalCore/BUILD
 +++ b/Swiftgram/SGAdditionalCore/BUILD
 @@ -5,5 +5,6 @@ swift_library(
@@ -20,16 +20,404 @@ index 994a2d3eb758ffd9b69c2e3d0145b736a9470095..7531d1f086a9fcbf4b076a6400b0d909
 +    deps = ["//Swiftgram/SGPython:SGPythonBridge"],
      visibility = ["//visibility:public"],
  )
+diff --git a/Swiftgram/SGAdditionalCore/Sources/PluginActions.swift b/Swiftgram/SGAdditionalCore/Sources/PluginActions.swift
+new file mode 100644
+index 00000000..05a5ff26
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/PluginActions.swift
+@@ -0,0 +1,381 @@
++import Foundation
++
++public struct PluginTextEntity: Codable, Equatable {
++    public let kind: String
++    public let offset: Int
++    public let length: Int
++    public var value: String?
++
++    public init(kind: String, offset: Int, length: Int, value: String? = nil) {
++        self.kind = kind
++        self.offset = offset
++        self.length = length
++        self.value = value
++    }
++    public func validate(text: String) throws {
++        try pluginRequire(
++            ["Bold", "Italic", "Underline", "Strike", "Spoiler", "Code", "Pre", "TextUrl"].contains(kind),
++            "Unsupported text entity.")
++        let count = text.utf16.count
++        try pluginRequire(
++            offset >= 0 && length > 0 && offset <= count && length <= count - offset, "Invalid UTF-16 entity range.")
++        let units = Array(text.utf16)
++        for boundary in [offset, offset + length] where boundary > 0 && boundary < count {
++            try pluginRequire(!(0xDC00...0xDFFF).contains(units[boundary]), "Entity splits a surrogate pair.")
++        }
++        if kind == "TextUrl" { try pluginRequire(URL(string: value ?? "")?.scheme != nil, "Invalid entity URL.") }
++    }
++}
++
++public struct PluginAttachment: Codable, Equatable {
++    public let id: String
++    public let kind: String
++    public let filename: String?
++    public let mimeType: String?
++    public let size: Int64?
++    public init(id: String, kind: String, filename: String? = nil, mimeType: String? = nil, size: Int64? = nil) {
++        self.id = id
++        self.kind = kind
++        self.filename = filename
++        self.mimeType = mimeType
++        self.size = size
++    }
++}
++
++public struct PluginMessage: Codable, Equatable {
++    public let id: Int32?
++    public let sender: String?
++    public let timestamp: Int32?
++    public let replyTo: Int32?
++    public let threadID: Int64?
++    public let text: String
++    public let entities: [PluginTextEntity]
++    public let attachments: [PluginAttachment]
++    public init(
++        id: Int32?, sender: String?, timestamp: Int32?, replyTo: Int32? = nil, threadID: Int64? = nil, text: String,
++        entities: [PluginTextEntity] = [], attachments: [PluginAttachment] = []
++    ) {
++        self.id = id
++        self.sender = sender
++        self.timestamp = timestamp
++        self.replyTo = replyTo
++        self.threadID = threadID
++        self.text = text
++        self.entities = entities
++        self.attachments = attachments
++    }
++}
++
++public struct PluginAction: Codable {
++    public let id: String
++    public let operation: String
++    public var chat: String?
++    public var messageID: Int32?
++    public var text: String?
++    public var entities: [PluginTextEntity]?
++    public var replyTo: Int32?
++    public var threadID: Int64?
++    public var attachmentID: String?
++    public var path: String?
++    public var mediaKind: String?
++    public var targetID: String?
++
++    var permissions: Set<PluginPermission> {
++        switch operation {
++        case "getMessage": return [.readMessages]
++        case "sendMessage": return [.sendMessages]
++        case "editMessage": return [.editMessages]
++        case "downloadMedia": return [.readMessages, .downloadMedia]
++        case "sendMedia": return [.sendMessages, .sendMedia]
++        default: return []
++        }
++    }
++
++    func validate() throws {
++        try pluginRequire(id.count == 32 && id.allSatisfy(\.isHexDigit), "Invalid action ID.")
++        try pluginRequire(
++            ["getMessage", "sendMessage", "editMessage", "downloadMedia", "sendMedia", "cancel"].contains(operation),
++            "Unknown action.")
++        if operation == "cancel" {
++            try pluginRequire(
++                targetID?.count == 32 && targetID?.allSatisfy(\.isHexDigit) == true, "Invalid cancellation target.")
++            return
++        }
++        let parts = (chat ?? "").split(separator: ":")
++        try pluginRequire(
++            parts.count == 2 && ["user", "chat", "channel"].contains(String(parts[0]))
++                && Int64(parts[1]).map { $0 > 0 } == true, "Invalid cloud chat.")
++        if ["getMessage", "editMessage", "downloadMedia"].contains(operation) {
++            try pluginRequire((messageID ?? 0) > 0, "Invalid message ID.")
++        }
++        if let replyTo { try pluginRequire(replyTo > 0, "Invalid reply ID.") }
++        if let threadID { try pluginRequire(threadID > 0, "Invalid thread ID.") }
++        let content = text ?? ""
++        let limit = operation == "sendMedia" ? 1024 : 4096
++        try pluginRequire(content.utf16.count <= limit && (entities?.count ?? 0) <= 100, "Action text is too large.")
++        if operation == "sendMessage" { try pluginRequire(!content.isEmpty, "Message text is empty.") }
++        for entity in entities ?? [] { try entity.validate(text: content) }
++        if operation == "sendMedia" {
++            try pluginRequire(
++                ["photo", "video", "document"].contains(mediaKind ?? "") && path != nil, "Invalid media kind or path.")
++        }
++    }
++}
++
++public struct PluginActionResult: Codable {
++    public let id: String
++    public let status: String
++    public var error: String?
++    public var message: PluginMessage?
++    public var path: String?
++    public var messageIDs: [Int32]?
++    public var progress: Double?
++    public init(
++        id: String, status: String, error: String? = nil, message: PluginMessage? = nil, path: String? = nil,
++        messageIDs: [Int32]? = nil, progress: Double? = nil
++    ) {
++        self.id = id
++        self.status = status
++        self.error = error
++        self.message = message
++        self.path = path
++        self.messageIDs = messageIDs
++        self.progress = progress
++    }
++}
++
++/// Adapter cancellation is best effort once Telegram has accepted an outbox entry.
++public protocol PluginActionAdapter: AnyObject {
++    func execute(
++        _ action: PluginAction, directory: URL, progress: @escaping (Double) -> Void,
++        completion: @escaping (PluginActionResult) -> Void
++    ) -> () -> Void
++}
++
++final class PluginActionExecutor {
++    struct Owner: Equatable {
++        let plugin: String
++        let account: String
++        let generation: String
++    }
++    struct Task {
++        let nonce = UUID()
++        let owner: Owner
++        let action: PluginAction
++        let directory: URL
++        var cancel: (() -> Void)?
++        var started = false
++        var lastProgress = Date.distantPast
++        var lastActivity = Date()
++    }
++    let queue = DispatchQueue(label: "app.swiftgram.plugin.actions")
++    private var adapters: [String: PluginActionAdapter] = [:]
++    private var tasks: [String: Task] = [:]
++    private var order: [String] = []
++    private var writes: [String: [Date]] = [:]
++    var authorized: ((Owner) -> Bool)?
++    var deliver: ((Owner, PluginActionResult) -> Void)?
++
++    func register(account: String, adapter: PluginActionAdapter?) {
++        queue.async {
++            self.adapters[account] = adapter
++            if adapter == nil {
++                for (id, task) in self.tasks where task.owner.account == account {
++                    self.finish(id, status: "cancelled")
++                }
++            }
++            self.pump()
++        }
++    }
++
++    func cancel(owner: Owner) {
++        queue.async {
++            for (id, task) in self.tasks where task.owner == owner { self.finish(id, status: "cancelled") }
++        }
++    }
++
++    func submit(_ actions: [PluginAction], owner: Owner, directory: URL) {
++        queue.async {
++            guard self.authorized?(owner) == true else { return }
++            for action in actions {
++                if action.operation == "cancel" {
++                    if let target = action.targetID, self.tasks[target]?.owner == owner {
++                        self.finish(target, status: "cancelled")
++                    }
++                    self.deliver?(owner, PluginActionResult(id: action.id, status: "completed"))
++                    continue
++                }
++                guard self.tasks[action.id] == nil else { continue }
++                guard self.tasks.values.filter({ $0.owner == owner }).count < 32 else {
++                    self.deliver?(owner, PluginActionResult(id: action.id, status: "failed", error: "quotaExceeded"))
++                    continue
++                }
++                self.tasks[action.id] = Task(owner: owner, action: action, directory: directory)
++                self.order.append(action.id)
++            }
++            self.pump()
++        }
++    }
++
++    private func pump() {
++        for id in order {
++            guard var task = tasks[id], !task.started else { continue }
++            guard authorized?(task.owner) == true else {
++                finish(id, status: "cancelled")
++                continue
++            }
++            let media = ["sendMedia", "downloadMedia"].contains(task.action.operation)
++            if media
++                && tasks.values.filter({
++                    $0.owner == task.owner && $0.started
++                        && ["sendMedia", "downloadMedia"].contains($0.action.operation)
++                }).count >= 2
++            {
++                continue
++            }
++            guard let adapter = adapters[task.owner.account] else {
++                finish(id, status: "failed", error: "unavailableTarget")
++                continue
++            }
++            if ["sendMessage", "editMessage", "sendMedia"].contains(task.action.operation) {
++                let key = task.owner.plugin + ":" + task.owner.account
++                let recent = (writes[key] ?? []).filter { Date().timeIntervalSince($0) < 60 }
++                guard recent.count < 30 else {
++                    finish(id, status: "failed", error: "quotaExceeded")
++                    continue
++                }
++                writes[key] = recent + [Date()]
++            }
++            task.started = true
++            tasks[id] = task
++            let nonce = task.nonce
++            let cancel = adapter.execute(
++                task.action, directory: task.directory,
++                progress: { value in
++                    self.queue.async {
++                        guard var current = self.tasks[id], current.nonce == nonce else { return }
++                        current.lastActivity = Date()
++                        if Date().timeIntervalSince(current.lastProgress) >= 0.25 {
++                            current.lastProgress = Date()
++                            self.deliver?(
++                                current.owner,
++                                PluginActionResult(id: id, status: "progress", progress: min(1, max(0, value))))
++                        }
++                        self.tasks[id] = current
++                    }
++                },
++                completion: { result in
++                    self.queue.async {
++                        guard self.tasks[id]?.nonce == nonce else { return }
++                        if result.status == "accepted", let current = self.tasks[id],
++                            self.authorized?(current.owner) == true
++                        {
++                            self.deliver?(current.owner, result)
++                        } else {
++                            self.finish(id, result: result)
++                        }
++                        self.pump()
++                    }
++                })
++            tasks[id]?.cancel = cancel
++            queue.asyncAfter(deadline: .now() + (media ? 600 : 60)) {
++                guard self.tasks[id]?.nonce == nonce else { return }
++                self.finish(id, status: "failed", error: "timeout")
++                self.pump()
++            }
++            if media { checkStall(id, nonce: nonce) }
++        }
++        order.removeAll { tasks[$0] == nil }
++    }
++
++    private func checkStall(_ id: String, nonce: UUID) {
++        queue.asyncAfter(deadline: .now() + 60) {
++            guard let task = self.tasks[id], task.nonce == nonce else { return }
++            if Date().timeIntervalSince(task.lastActivity) >= 60 {
++                self.finish(id, status: "failed", error: "timeout")
++                self.pump()
++            } else {
++                self.checkStall(id, nonce: nonce)
++            }
++        }
++    }
++
++    private func finish(
++        _ id: String, status: String = "completed", error: String? = nil, result: PluginActionResult? = nil
++    ) {
++        guard let task = tasks.removeValue(forKey: id) else { return }
++        task.cancel?()
++        if authorized?(task.owner) == true {
++            deliver?(task.owner, result ?? PluginActionResult(id: id, status: status, error: error))
++        }
++    }
++}
++
++public enum PluginFiles {
++    private static let lock = NSLock()
++    public static let maximumFileSize: Int64 = 100 * 1024 * 1024
++    public static let maximumStorage: Int64 = 256 * 1024 * 1024
++
++    private static func usage(_ directory: URL) throws -> Int64 {
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        var total: Int64 = 0
++        guard
++            let entries = FileManager.default.enumerator(
++                at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey, .fileSizeKey])
++        else {
++            throw SettingsError.invalid("Cannot inspect plugin storage.")
++        }
++        for case let url as URL in entries {
++            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .fileSizeKey])
++            try pluginRequire(values.isSymbolicLink != true, "Symbolic links are unavailable in plugin storage.")
++            total += Int64(values.fileSize ?? 0)
++            try pluginRequire(total <= maximumStorage, "Plugin storage quota exceeded.")
++        }
++        return total
++    }
++
++    public static func snapshot(path: String, directory: URL) throws -> URL {
++        let root = directory.standardizedFileURL
++        let source = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : root.appendingPathComponent(path))
++            .standardizedFileURL
++        try pluginRequire(
++            source.path.hasPrefix(root.path + "/")
++                && source.resolvingSymlinksInPath().path == root.resolvingSymlinksInPath().path
++                    + String(source.path.dropFirst(root.path.count)),
++            "File is outside plugin storage.")
++        return try copy(source: source, directory: root, temporary: true)
++    }
++
++    public static func importDownload(source: URL, directory: URL) throws -> URL {
++        try copy(source: source, directory: directory, temporary: false)
++    }
++
++    private static func copy(source: URL, directory: URL, temporary: Bool) throws -> URL {
++        lock.lock()
++        defer { lock.unlock() }
++        let used = try usage(directory)
++        let values = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .isSymbolicLinkKey])
++        let size = Int64(values.fileSize ?? 0)
++        try pluginRequire(
++            values.isRegularFile == true && values.isSymbolicLink != true && size <= maximumFileSize
++                && used + size <= maximumStorage, "File quota exceeded.")
++        let output = directory.appendingPathComponent((temporary ? ".transfer-" : "download-") + UUID().uuidString)
++        _ = FileManager.default.createFile(atPath: output.path, contents: nil)
++        var complete = false
++        defer { if !complete { try? FileManager.default.removeItem(at: output) } }
++        let reader = try FileHandle(forReadingFrom: source)
++        let writer = try FileHandle(forWritingTo: output)
++        defer {
++            try? reader.close()
++            try? writer.close()
++        }
++        var copied: Int64 = 0
++        while let chunk = try reader.read(upToCount: 1024 * 1024), !chunk.isEmpty {
++            copied += Int64(chunk.count)
++            try pluginRequire(copied <= maximumFileSize && used + copied <= maximumStorage, "File grew beyond quota.")
++            try writer.write(contentsOf: chunk)
++        }
++        complete = true
++        return output
++    }
++}
 diff --git a/Swiftgram/SGAdditionalCore/Sources/PluginManifest.swift b/Swiftgram/SGAdditionalCore/Sources/PluginManifest.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..fc1cb6f42e745244412b19652baeac3366651258
+index 00000000..0d57804f
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Sources/PluginManifest.swift
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,256 @@
 +import Foundation
 +
 +public enum PluginPermission: String, Codable, CaseIterable {
 +    case incomingMessages, outgoingMessages, network, menus
++    case readMessages, sendMessages, editMessages, downloadMedia, sendMedia
 +}
 +
 +public enum PluginEventKind: String, Codable {
@@ -135,8 +523,28 @@ index 0000000000000000000000000000000000000000..fc1cb6f42e745244412b19652baeac33
 +    public let action: Action
 +}
 +
++public struct PluginDependency: Codable, Equatable {
++    public let name: String
++    public let version: String
++    public let filename: String
++    public let sha256: String
++    public let url: String
++    public let direct: Bool
++
++    public var pypiURL: URL? { URL(string: "https://pypi.org/project/" + name + "/" + version + "/") }
++}
++
++/// A review is bound to the source and the exact resolved artifacts in the manager.
++public struct PluginInstallation {
++    public let manifest: PluginManifest
++    public let dependencies: [PluginDependency]
++    let token: String
++}
++
 +public struct PluginManifest: Codable, Equatable {
 +    public var pythonSource: String
++    public var dependencies: [String]?
++    public var requiresPython: String?
 +    public let schemaVersion: Int
 +    public let id: String
 +    public let name: String
@@ -162,7 +570,7 @@ index 0000000000000000000000000000000000000000..fc1cb6f42e745244412b19652baeac33
 +        _ = try PluginVersion(version)
 +        try pluginRequire(
 +            (author?.utf8.count ?? 0) <= 120 && (description?.utf8.count ?? 0) <= 2048, "Plugin metadata is too long.")
-+        if let sdkVersion { try PluginVersion.check(sdkVersion, current: "1.0") }
++        if let sdkVersion { try PluginVersion.check(sdkVersion, current: "1.1") }
 +        if let appVersion { try PluginVersion.check(appVersion, current: hostVersion) }
 +        try pluginRequire(Set(permissions).count == permissions.count, "Duplicate permissions.")
 +        try pluginRequire(
@@ -263,10 +671,10 @@ index 0000000000000000000000000000000000000000..fc1cb6f42e745244412b19652baeac33
 +}
 diff --git a/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift b/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd71a01e16
+index 00000000..5b4c8422
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,625 @@
 +import Foundation
 +
 +public struct PluginEvent: Codable, Equatable {
@@ -276,6 +684,8 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +    public var chat: String?
 +    public var text: String
 +    public var error: String?
++    public var message: PluginMessage?
++    public var pluginOrigin: Bool?
 +
 +    public init(
 +        kind: PluginEventKind, name: String, account: String, chat: String? = nil,
@@ -292,6 +702,8 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +
 +public struct PluginRecord: Codable, Equatable {
 +    public let manifest: PluginManifest
++    public var environment: String?
++    public var dependencies: [PluginDependency]?
 +    public var enabledAccounts: Set<String>
 +    public var settings: [String: [String: PluginValue]]
 +    public var error: String?
@@ -338,6 +750,9 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +    }
 +
 +    private let lock = NSLock()
++    private let actions = PluginActionExecutor()
++    private var generations: [String: String] = [:]
++    private var loadReplies: [(PluginRecord, String, PythonPluginReply)] = []
 +    private let directory: URL
 +    private let file: URL
 +    private let recoveryFile: URL
@@ -353,6 +768,14 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        self.recoveryFile = directory.appendingPathComponent("recovery.json")
 +        self.pythonRecovery = directory.appendingPathComponent("python-invocation.json")
 +        self.hostVersion = hostVersion
++        actions.authorized = { [weak self] owner in
++            guard let self else { return false }
++            self.lock.lock()
++            defer { self.lock.unlock() }
++            return !self.document.safeMode && self.generations[owner.plugin + ":" + owner.account] == owner.generation
++                && self.document.records[owner.plugin]?.isEnabled(account: owner.account) == true
++        }
++        actions.deliver = { [weak self] owner, result in self?.receiveAction(owner, result: result) }
 +        do {
 +            #if os(iOS)
 +                let attributes: [FileAttributeKey: Any] = [
@@ -367,6 +790,13 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +            var resourceValues = URLResourceValues()
 +            resourceValues.isExcludedFromBackup = true
 +            try protectedDirectory.setResourceValues(resourceValues)
++            if let files = FileManager.default.enumerator(
++                at: directory.appendingPathComponent("data"), includingPropertiesForKeys: nil)
++            {
++                for case let temporary as URL in files where temporary.lastPathComponent.hasPrefix(".transfer-") {
++                    try? FileManager.default.removeItem(at: temporary)
++                }
++            }
 +            if FileManager.default.fileExists(atPath: file.path) {
 +                let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
 +                try pluginRequire(size <= 32 * 1024 * 1024, "Plugin registry exceeds 32 MB.")
@@ -374,9 +804,19 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +                try pluginRequire(stored.schemaVersion == 1 && stored.records.count <= 64, "Invalid plugin registry.")
 +                for (id, record) in stored.records {
 +                    try pluginRequire(id == record.manifest.id, "Plugin registry identity mismatch.")
++                    if let environment = record.environment {
++                        try pluginRequire(
++                            environment.count == 32 && environment.allSatisfy { $0.isHexDigit },
++                            "Invalid dependency environment ID.")
++                    }
 +                    // An application upgrade can make one plugin incompatible without losing the others.
 +                    var validated = record
-+                    do { try record.manifest.validate(hostVersion: hostVersion) } catch {
++                    do {
++                        try record.manifest.validate(hostVersion: hostVersion)
++                        try pluginRequire(
++                            record.manifest.requiresPython != nil,
++                            "Legacy plugin metadata. Import an updated PEP 723 plugin to review it again.")
++                    } catch {
 +                        validated.error = error.localizedDescription
 +                    }
 +                    for (account, values) in record.settings {
@@ -408,6 +848,48 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        }
 +    }
 +
++    public func registerActionAdapter(account: String, adapter: PluginActionAdapter?) {
++        actions.register(account: account, adapter: adapter)
++    }
++
++    private func actionDirectory(_ id: String, account: String) -> URL {
++        directory.appendingPathComponent("data").appendingPathComponent(id).appendingPathComponent(account)
++    }
++
++    private func acceptActions(_ reply: PythonPluginReply, record: PluginRecord, account: String, allowed: Bool) throws
++    {
++        let pending = reply.actions ?? []
++        try pluginRequire(
++            pending.count <= 32 && (allowed || pending.isEmpty), "Actions are unavailable in this callback.")
++        for action in pending {
++            try action.validate()
++            try pluginRequire(
++                action.permissions.isSubset(of: Set(record.manifest.permissions)), "Action permission denied.")
++        }
++        guard !pending.isEmpty else { return }
++        let key = record.manifest.id + ":" + account
++        if generations[key] == nil { generations[key] = UUID().uuidString }
++        let generation = generations[key]!
++        actions.submit(
++            pending, owner: .init(plugin: record.manifest.id, account: account, generation: generation),
++            directory: actionDirectory(record.manifest.id, account: account))
++    }
++
++    private func receiveAction(_ owner: PluginActionExecutor.Owner, result: PluginActionResult) {
++        lock.lock()
++        defer { lock.unlock() }
++        guard !document.safeMode, generations[owner.plugin + ":" + owner.account] == owner.generation,
++            let record = document.records[owner.plugin], record.isEnabled(account: owner.account)
++        else { return }
++        do {
++            let reply = try PythonPluginRuntime.shared.actionResult(
++                record, account: owner.account, result: result, marker: pythonRecovery)
++            try checkedPythonSettings(reply.settings ?? [:], record: record)
++            try acceptPythonSettings(reply.settings, id: owner.plugin, account: owner.account)
++            try acceptActions(reply, record: record, account: owner.account, allowed: result.status != "progress")
++        } catch { fail(owner.plugin, error: error) }
++    }
++
 +    public func records() -> [PluginRecord] {
 +        lock.lock()
 +        defer { lock.unlock() }
@@ -435,8 +917,33 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        return manifest
 +    }
 +
++    public func prepareInstallation(_ data: Data) throws -> PluginInstallation {
++        let manifest = try inspect(data)
++        return try PythonPluginRuntime.shared.prepare(manifest, directory: environments, marker: pythonRecovery)
++    }
++
++    public func discardInstallation(_ review: PluginInstallation) {
++        try? PythonPluginRuntime.shared.discard(review, marker: pythonRecovery)
++    }
++
++    private var environments: URL { directory.appendingPathComponent("environments", isDirectory: true) }
++
++    /// Convenience for dependency-free callers. Dependencies always require an explicit reviewed plan.
 +    @discardableResult public func install(_ data: Data) throws -> PluginManifest {
 +        let manifest = try inspect(data)
++        try pluginRequire((manifest.dependencies ?? []).isEmpty, "Review dependencies before installing this plugin.")
++        return try install(prepareInstallation(data))
++    }
++
++    @discardableResult public func install(_ review: PluginInstallation) throws -> PluginManifest {
++        let manifest = review.manifest
++        try manifest.validate(hostVersion: hostVersion)
++        let environment = try PythonPluginRuntime.shared.install(
++            review, directory: environments, marker: pythonRecovery)
++        var committed = false
++        defer {
++            if !committed { try? FileManager.default.removeItem(at: environments.appendingPathComponent(environment)) }
++        }
 +        lock.lock()
 +        defer { lock.unlock() }
 +        var next = document
@@ -444,7 +951,7 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        try pluginRequire(previous != nil || next.records.count < 64, "Maximum 64 installed plugins.")
 +        let gainedPermissions = !Set(manifest.permissions).isSubset(of: Set(previous?.manifest.permissions ?? []))
 +        var record = PluginRecord(
-+            manifest: manifest,
++            manifest: manifest, environment: environment, dependencies: review.dependencies,
 +            enabledAccounts: gainedPermissions ? [] : previous?.enabledAccounts ?? [], settings: [:], error: nil)
 +        // Keep compatible settings. Removed keys and changed types return to new defaults.
 +        for (account, values) in previous?.settings ?? [:] {
@@ -456,6 +963,10 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        }
 +        next.records[manifest.id] = record
 +        try commit(next)
++        committed = true
++        if let oldEnvironment = previous?.environment, oldEnvironment != environment {
++            try? FileManager.default.removeItem(at: environments.appendingPathComponent(oldEnvironment))
++        }
 +        return manifest
 +    }
 +
@@ -500,8 +1011,12 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        lock.lock()
 +        defer { lock.unlock() }
 +        var next = document
-+        next.records.removeValue(forKey: id)
++        let removed = next.records.removeValue(forKey: id)
 +        try commit(next)
++        try? FileManager.default.removeItem(at: directory.appendingPathComponent("data").appendingPathComponent(id))
++        if let environment = removed?.environment {
++            try? FileManager.default.removeItem(at: environments.appendingPathComponent(environment))
++        }
 +    }
 +
 +    public func setSafeMode(_ enabled: Bool) throws {
@@ -524,6 +1039,7 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +        try transitionPython(from: document, to: &empty)
 +        try persist(empty)
 +        document = empty
++        try? FileManager.default.removeItem(at: directory.appendingPathComponent("data"))
 +        corrupt = false
 +        failure = nil
 +        try clearRecovery()
@@ -556,8 +1072,10 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +            }
 +            guard let hook = hooks.first?.element else { continue }
 +            do {
++                var visible = current
++                if !record.manifest.permissions.contains(.readMessages) { visible.message = nil }
 +                let reply = try PythonPluginRuntime.shared.invoke(
-+                    record, event: current, callback: hook.callback, marker: pythonRecovery)
++                    record, event: visible, callback: hook.callback, marker: pythonRecovery)
 +                let strategy = reply.strategy ?? .default
 +                let replacementText = reply.text
 +                let replacementError = reply.error
@@ -579,6 +1097,10 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +                        current.kind == .postRequest ? replacementError != nil : replacementText != nil,
 +                        "Python modification returned no replacement value.")
 +                }
++                try acceptActions(
++                    reply, record: record, account: current.account,
++                    allowed: current.kind != .preRequest && current.kind != .postRequest && current.pluginOrigin != true
++                )
 +                switch strategy {
 +                case .default: continue
 +                case .cancel: return nil
@@ -626,12 +1148,15 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +            let menu = record.manifest.menus.first(where: { $0.id == item.menuID && $0.location == location })
 +        else { return nil }
 +        do {
++            var visible = event
++            if !record.manifest.permissions.contains(.readMessages) { visible.message = nil }
 +            let reply = try PythonPluginRuntime.shared.invoke(
-+                record, event: event, callback: menu.callback, menuID: menu.id, marker: pythonRecovery)
++                record, event: visible, callback: menu.callback, menuID: menu.id, marker: pythonRecovery)
 +            guard let text = reply.text, text.utf8.count <= 65536 else {
 +                throw SettingsError.invalid("Python menu returned invalid text.")
 +            }
 +            try acceptPythonSettings(reply.settings, id: item.pluginID, account: event.account)
++            try acceptActions(reply, record: record, account: event.account, allowed: event.pluginOrigin != true)
 +            return PluginMenuResult(action: menu.action, text: text)
 +        } catch {
 +            fail(item.pluginID, error: error)
@@ -660,6 +1185,7 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +    private func commit(_ proposed: Document) throws {
 +        try pluginRequire(!corrupt, "Plugin registry is damaged. Reset it before making changes.")
 +        var next = proposed
++        loadReplies = []
 +        // One atomic document covers sources, settings, and desired enablement. Memory changes last.
 +        try Data("{\"operation\":\"registry-change\"}".utf8).write(to: recoveryFile, options: .atomic)
 +        do {
@@ -674,6 +1200,16 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +            throw error
 +        }
 +        document = next
++        for (id, previous) in document.records {
++            for account in previous.enabledAccounts where previous.isEnabled(account: account) {
++                let key = id + ":" + account
++                if generations[key] == nil { generations[key] = UUID().uuidString }
++            }
++        }
++        for (record, account, reply) in loadReplies {
++            try acceptActions(reply, record: record, account: account, allowed: true)
++        }
++        loadReplies = []
 +        do {
 +            try clearRecovery()
 +            failure = nil
@@ -710,15 +1246,31 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +            for account in accounts.sorted() {
 +                let wasActive = !old.safeMode && previous?.isEnabled(account: account) == true
 +                let active = !next.safeMode && next.records[id]?.isEnabled(account: account) == true
-+                let changedSource = previous?.manifest.pythonSource != updated?.manifest.pythonSource
++                let changedSource =
++                    previous?.manifest.pythonSource != updated?.manifest.pythonSource
++                    || previous?.environment != updated?.environment
 +                if wasActive, !active || changedSource {
-+                    do { try PythonPluginRuntime.shared.unload(id, account: account, marker: pythonRecovery) } catch {
++                    let key = id + ":" + account
++                    if let generation = generations.removeValue(forKey: key) {
++                        actions.cancel(owner: .init(plugin: id, account: account, generation: generation))
++                    }
++                    do {
++                        try PythonPluginRuntime.shared.unload(previous!, account: account, marker: pythonRecovery)
++                    } catch {
 +                        next.records[id]?.error = error.localizedDescription
 +                    }
 +                }
 +                if active, var record = next.records[id], !wasActive || changedSource {
-+                    let values = try PythonPluginRuntime.shared.load(record, account: account, marker: pythonRecovery)
++                    let reply = try PythonPluginRuntime.shared.load(record, account: account, marker: pythonRecovery)
++                    let values = reply.settings ?? [:]
 +                    try checkedPythonSettings(values, record: record)
++                    for action in reply.actions ?? [] {
++                        try action.validate()
++                        try pluginRequire(
++                            action.permissions.isSubset(of: Set(record.manifest.permissions)),
++                            "Action permission denied.")
++                    }
++                    loadReplies.append((record, account, reply))
 +                    record.settings[account] = values
 +                    next.records[id] = record
 +                }
@@ -750,15 +1302,19 @@ index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd
 +}
 diff --git a/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift b/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f82d79a448
+index 00000000..59fda8c9
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
-@@ -0,0 +1,167 @@
+@@ -0,0 +1,290 @@
 +import Foundation
 +import SGPythonBridge
 +
 +struct PythonPluginReply: Decodable {
++    var actions: [PluginAction]?
 +    var manifest: PluginManifest?
++    var dependencies: [PluginDependency]?
++    var token: String?
++    var environment: String?
 +    var settings: [String: PluginValue]?
 +    var strategy: PluginStrategy?
 +    var text: String?
@@ -770,9 +1326,12 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +final class PythonPluginRuntime {
 +    static let shared = PythonPluginRuntime()
 +    private let worker = DispatchQueue(label: "app.swiftgram.python")
++    private let managerWorker = DispatchQueue(label: "app.swiftgram.python.packages")
++    private let initializer = DispatchQueue(label: "app.swiftgram.python.initialize")
 +    private let stateLock = NSLock()
 +    private var quarantined = false
 +    private var initialized = false
++    private var loadedScopes: Set<String> = []
 +
 +    private struct Request: Encodable {
 +        let operation: String
@@ -783,6 +1342,13 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +        var event: PluginEvent?
 +        var callback: String?
 +        var menuID: String?
++        var root: String?
++        var token: String?
++        var dependencyPath: String?
++        var dependencies: [PluginDependency]?
++        var scope: String?
++        var dataDirectory: String?
++        var actionResult: PluginActionResult?
 +    }
 +
 +    private struct Envelope: Decodable {
@@ -804,32 +1370,122 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +        return manifest
 +    }
 +
-+    func load(_ record: PluginRecord, account: String, marker: URL) throws -> [String: PluginValue] {
-+        try request(
-+            Request(
-+                operation: "load", id: record.manifest.id, account: account,
-+                source: record.manifest.pythonSource, settings: record.values(account: account)), marker: marker
-+        ).settings ?? [:]
++    func prepare(_ manifest: PluginManifest, directory: URL, marker: URL) throws -> PluginInstallation {
++        let reply = try request(
++            Request(operation: "resolve", source: manifest.pythonSource, root: directory.path), marker: marker)
++        guard let token = reply.token, let dependencies = reply.dependencies else {
++            throw SettingsError.invalid("Python returned no dependency review.")
++        }
++        return PluginInstallation(manifest: manifest, dependencies: dependencies, token: token)
 +    }
 +
-+    func unload(_ id: String, account: String, marker: URL) throws {
++    func install(_ review: PluginInstallation, directory: URL, marker: URL) throws -> String {
++        let reply = try request(
++            Request(
++                operation: "install", source: review.manifest.pythonSource, root: directory.path, token: review.token,
++                dependencies: review.dependencies), marker: marker)
++        guard let environment = reply.environment, reply.dependencies == review.dependencies,
++            environment.count == 32, environment.allSatisfy({ $0.isHexDigit })
++        else {
++            throw SettingsError.invalid("Invalid dependency installation result.")
++        }
++        return environment
++    }
++
++    func discard(_ review: PluginInstallation, marker: URL) throws {
++        _ = try request(Request(operation: "discard", token: review.token), marker: marker)
++    }
++
++    private func dependencyDirectory(_ record: PluginRecord, marker: URL) -> URL? {
++        record.environment.map {
++            marker.deletingLastPathComponent().appendingPathComponent("environments").appendingPathComponent($0)
++        }
++    }
++
++    private func scope(_ record: PluginRecord, account: String, marker: URL) -> String {
++        (dependencyDirectory(record, marker: marker)?.path ?? marker.path + "/" + record.manifest.id) + "/" + account
++    }
++
++    func load(_ record: PluginRecord, account: String, marker: URL) throws -> PythonPluginReply {
++        let inspected = try inspect(record.manifest.pythonSource, marker: marker)
++        try pluginRequire(inspected == record.manifest, "Stored plugin metadata changed. Import and review it again.")
++        try pluginRequire(
++            record.environment != nil || (record.manifest.dependencies ?? []).isEmpty,
++            "Plugin dependencies have no reviewed environment. Import it again.")
++        if let directory = dependencyDirectory(record, marker: marker) {
++            _ = try request(
++                Request(operation: "verify", dependencyPath: directory.path, dependencies: record.dependencies ?? []),
++                marker: marker)
++        }
++        let reply = try request(
++            Request(
++                operation: "load", id: record.manifest.id, account: account,
++                source: record.manifest.pythonSource, settings: record.values(account: account),
++                dependencyPath: dependencyDirectory(record, marker: marker)?.path,
++                scope: scope(record, account: account, marker: marker),
++                dataDirectory: try dataDirectory(record, account: account, marker: marker)), marker: marker
++        )
++        stateLock.lock()
++        loadedScopes.insert(scope(record, account: account, marker: marker))
++        stateLock.unlock()
++        return reply
++    }
++
++    private func dataDirectory(_ record: PluginRecord, account: String, marker: URL) throws -> String {
++        let directory = marker.deletingLastPathComponent().appendingPathComponent("data").appendingPathComponent(
++            record.manifest.id
++        ).appendingPathComponent(account)
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        return directory.path
++    }
++
++    func actionResult(_ record: PluginRecord, account: String, result: PluginActionResult, marker: URL) throws
++        -> PythonPluginReply
++    {
++        try request(
++            Request(
++                operation: result.status == "progress" ? "actionProgress" : "actionResult",
++                id: record.manifest.id, account: account, source: record.manifest.pythonSource,
++                settings: record.values(account: account),
++                dependencyPath: dependencyDirectory(record, marker: marker)?.path,
++                scope: scope(record, account: account, marker: marker),
++                dataDirectory: try dataDirectory(record, account: account, marker: marker), actionResult: result),
++            marker: marker)
++    }
++
++    func unload(_ record: PluginRecord, account: String, marker: URL) throws {
 +        stateLock.lock()
 +        let blocked = quarantined
 +        stateLock.unlock()
 +        if blocked { return }
-+        _ = try request(Request(operation: "unload", id: id, account: account), marker: marker)
++        stateLock.lock()
++        loadedScopes.remove(scope(record, account: account, marker: marker))
++        stateLock.unlock()
++        _ = try request(
++            Request(
++                operation: "unload", id: record.manifest.id, account: account,
++                scope: scope(record, account: account, marker: marker)), marker: marker)
 +    }
 +
 +    func invoke(
 +        _ record: PluginRecord, event: PluginEvent, callback: String, menuID: String? = nil,
 +        marker: URL
 +    ) throws -> PythonPluginReply {
-+        try request(
++        stateLock.lock()
++        let loaded = loadedScopes.contains(scope(record, account: event.account, marker: marker))
++        stateLock.unlock()
++        let bootstrap = loaded ? nil : try load(record, account: event.account, marker: marker)
++        var reply = try request(
 +            Request(
 +                operation: menuID == nil ? "hook" : "menu", id: record.manifest.id,
 +                account: event.account, source: record.manifest.pythonSource,
-+                settings: record.values(account: event.account),
-+                event: event, callback: callback, menuID: menuID), marker: marker)
++                settings: bootstrap?.settings ?? record.values(account: event.account),
++                event: event, callback: callback, menuID: menuID,
++                dependencyPath: dependencyDirectory(record, marker: marker)?.path,
++                scope: scope(record, account: event.account, marker: marker),
++                dataDirectory: try dataDirectory(record, account: event.account, marker: marker)), marker: marker)
++        reply.actions = (bootstrap?.actions ?? []) + (reply.actions ?? [])
++        return reply
 +    }
 +
 +    private func request(_ request: Request, marker: URL) throws -> PythonPluginReply {
@@ -840,7 +1496,8 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +        let payload = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
 +        let job = Job()
 +        let recovery = try JSONEncoder().encode(["id": request.id ?? "", "operation": request.operation])
-+        worker.async { [self] in
++        let queue = request.scope == nil ? managerWorker : worker
++        queue.async { [self] in
 +            job.lock.lock()
 +            let expired = job.expired
 +            job.lock.unlock()
@@ -849,26 +1506,34 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +                return
 +            }
 +            let result = Result { () throws -> PythonPluginReply in
-+                try recovery.write(to: marker, options: .atomic)
-+                if !initialized {
-+                    #if TESTING
-+                        let home = ProcessInfo.processInfo.environment["SGA_PYTHON_HOME"] ?? ""
-+                        let sdk = ProcessInfo.processInfo.environment["SGA_PYTHON_SDK"] ?? ""
-+                    #else
-+                        guard let home = Self.bundledResource("SwiftgramPython.bundle"),
-+                            let sdk = Self.bundledResource("SwiftgramPythonSDK.bundle")
-+                        else {
-+                            throw SettingsError.invalid("Bundled Python resources are unavailable.")
-+                        }
-+                    #endif
-+                    var error: UnsafeMutablePointer<CChar>?
-+                    let success = SGPythonInitialize(home, sdk, &error)
-+                    defer { SGPythonFree(error) }
-+                    try pluginRequire(success != 0, error.map { String(cString: $0) } ?? "Cannot initialize CPython.")
-+                    initialized = true
++                if request.scope != nil { try recovery.write(to: marker, options: .atomic) }
++                try initializer.sync {
++                    if !initialized {
++                        #if TESTING
++                            let home = ProcessInfo.processInfo.environment["SGA_PYTHON_HOME"] ?? ""
++                            let sdk = ProcessInfo.processInfo.environment["SGA_PYTHON_SDK"] ?? ""
++                        #else
++                            guard let home = Self.bundledResource("SwiftgramPython.bundle"),
++                                let sdk = Self.bundledResource("SwiftgramPythonSDK.bundle")
++                            else {
++                                throw SettingsError.invalid("Bundled Python resources are unavailable.")
++                            }
++                        #endif
++                        var error: UnsafeMutablePointer<CChar>?
++                        let success = SGPythonInitialize(home, sdk, &error)
++                        defer { SGPythonFree(error) }
++                        try pluginRequire(
++                            success != 0, error.map { String(cString: $0) } ?? "Cannot initialize CPython.")
++                        initialized = true
++                    }
 +                }
 +                var error: UnsafeMutablePointer<CChar>?
-+                let response = SGPythonCall(payload, &error)
++                let response: UnsafeMutablePointer<CChar>?
++                if let scope = request.scope {
++                    response = SGPythonCallIsolated(scope, payload, request.operation == "unload" ? 1 : 0, &error)
++                } else {
++                    response = SGPythonCall(payload, &error)
++                }
 +                defer {
 +                    SGPythonFree(response)
 +                    SGPythonFree(error)
@@ -885,23 +1550,33 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +            }
 +            job.lock.lock()
 +            if !job.expired {
-+                try? FileManager.default.removeItem(at: marker)
++                if request.scope != nil { try? FileManager.default.removeItem(at: marker) }
 +                job.result = result
 +            }
 +            job.lock.unlock()
 +            job.semaphore.signal()
 +        }
-+        let seconds: Double = (request.operation == "hook" || request.operation == "menu") ? 0.25 : 2.0
++        let seconds: Double
++        switch request.operation {
++        case "hook", "menu", "actionResult", "actionProgress": seconds = 0.25
++        case "resolve", "install": seconds = 120
++        case "verify": seconds = 10
++        default: seconds = 2
++        }
 +        if job.semaphore.wait(timeout: .now() + seconds) == .timedOut {
 +            job.lock.lock()
 +            job.expired = true
 +            job.lock.unlock()
-+            stateLock.lock()
-+            quarantined = true
-+            stateLock.unlock()
-+            // Keep recovery even if completion raced the caller's deadline.
-+            try? recovery.write(to: marker, options: .atomic)
-+            throw SettingsError.invalid("Python exceeded the host deadline. The interpreter is paused until restart.")
++            if request.scope != nil {
++                stateLock.lock()
++                quarantined = true
++                stateLock.unlock()
++                // Keep recovery even if completion raced the caller's deadline.
++                try? recovery.write(to: marker, options: .atomic)
++                throw SettingsError.invalid(
++                    "Python exceeded the host deadline. The interpreter is paused until restart.")
++            }
++            throw SettingsError.invalid("Dependency operation timed out. Please retry.")
 +        }
 +        job.lock.lock()
 +        let result = job.result
@@ -922,26 +1597,143 @@ index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f8
 +    }
 +}
 diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
-index cfe68b527df9988894a74e03018cb57c6e869a6b..fbb1b865636d25b7756ad21a3c26cff318543ffa 100644
+index cfe68b52..a7123460 100644
 --- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
 +++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
-@@ -60,7 +60,9 @@ struct CheckCore {
+@@ -60,7 +60,10 @@ struct CheckCore {
          let saved = try JSONDecoder().decode([String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
          CheckCore.require(saved["77"]?["serverUser"] == Data([1, 2]), "badge changes preserve legacy server snapshot")
          CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "88") == nil, "badge account isolation")
 +        try PluginChecks.run(root: root)
 +        try PythonPluginChecks.run(root: root)
++        try PluginActionChecks.run(root: root)
          try DisappearingChecks.run(root: root)
 -        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media")
 +        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media, plugins")
      }
  }
+diff --git a/Swiftgram/SGAdditionalCore/Tests/PluginActionChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PluginActionChecks.swift
+new file mode 100644
+index 00000000..7e281d4e
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/PluginActionChecks.swift
+@@ -0,0 +1,110 @@
++import Foundation
++
++enum PluginActionChecks {
++    static func run(root: URL) throws {
++        let action = try JSONDecoder().decode(
++            PluginAction.self,
++            from: Data(
++                """
++                {"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","operation":"sendMessage","chat":"user:42","text":"hello"}
++                """.utf8))
++        try action.validate()
++        CheckCore.require(action.permissions == [.sendMessages], "write action requires declared permission")
++        do {
++            try PluginTextEntity(kind: "Bold", offset: 1, length: 1).validate(text: "😀")
++            fatalError("Entity split surrogate pair")
++        } catch {}
++        try PluginTextEntity(kind: "Bold", offset: 0, length: 2).validate(text: "😀")
++        let directory = root.appendingPathComponent("plugin-data")
++        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
++        let source = directory.appendingPathComponent("file.txt")
++        try Data("snapshot".utf8).write(to: source)
++        let copy = try PluginFiles.snapshot(path: source.path, directory: directory)
++        try Data("changed".utf8).write(to: source)
++        let copied = try Data(contentsOf: copy)
++        CheckCore.require(copied == Data("snapshot".utf8), "upload snapshot is immutable relative to source")
++        do {
++            _ = try PluginFiles.snapshot(path: "../escape", directory: directory)
++            fatalError("Storage escape accepted")
++        } catch {}
++        let link = directory.appendingPathComponent("link")
++        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: source)
++        do {
++            _ = try PluginFiles.snapshot(path: link.path, directory: directory)
++            fatalError("Symbolic link accepted")
++        } catch {}
++        try FileManager.default.removeItem(at: link)
++        let executor = PluginActionExecutor()
++        let completed = DispatchSemaphore(value: 0)
++        let adapter = Adapter()
++        executor.authorized = { $0.generation == "current" }
++        executor.deliver = { _, result in
++            CheckCore.require(result.status == "completed", "native action result delivered")
++            completed.signal()
++        }
++        executor.register(account: "77", adapter: adapter)
++        executor.submit(
++            [action], owner: .init(plugin: "test", account: "77", generation: "current"), directory: directory)
++        CheckCore.require(completed.wait(timeout: .now() + 2) == .success, "queued adapter executes asynchronously")
++        executor.submit(
++            [action], owner: .init(plugin: "test", account: "77", generation: "retired"), directory: directory)
++        executor.queue.sync {}
++        CheckCore.require(adapter.calls == 1, "retired generation cannot execute")
++        try cancellation(root: root)
++    }
++
++    static func cancellation(root: URL) throws {
++        let action = try JSONDecoder().decode(
++            PluginAction.self,
++            from: Data(
++                """
++                {"id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","operation":"sendMessage","chat":"user:42","text":"hello"}
++                """.utf8))
++        let executor = PluginActionExecutor()
++        let adapter = HoldingAdapter()
++        let owner = PluginActionExecutor.Owner(plugin: "test", account: "77", generation: "current")
++        var results = 0
++        executor.authorized = { _ in true }
++        executor.deliver = { _, _ in results += 1 }
++        executor.register(account: "77", adapter: adapter)
++        executor.submit([action], owner: owner, directory: root)
++        executor.queue.sync {}
++        let first = executor.queue.sync { adapter.completions[0] }
++        executor.cancel(owner: owner)
++        executor.queue.sync {}
++        executor.submit([action], owner: owner, directory: root)
++        executor.queue.sync {}
++        first(.init(id: action.id, status: "completed"))
++        executor.queue.sync {}
++        CheckCore.require(executor.queue.sync { results } == 1, "late completion cannot finish reused action ID")
++        let second = executor.queue.sync { adapter.completions[1] }
++        second(.init(id: action.id, status: "completed"))
++        executor.queue.sync {}
++        CheckCore.require(executor.queue.sync { results } == 2, "replacement action completes once")
++        CheckCore.require(executor.queue.sync { adapter.cancellations } == 2, "cancellation disposes adapters")
++    }
++
++    private final class HoldingAdapter: PluginActionAdapter {
++        var completions: [(PluginActionResult) -> Void] = []
++        var cancellations = 0
++        func execute(
++            _ action: PluginAction, directory: URL, progress: @escaping (Double) -> Void,
++            completion: @escaping (PluginActionResult) -> Void
++        ) -> () -> Void {
++            completions.append(completion)
++            return { self.cancellations += 1 }
++        }
++    }
++
++    private final class Adapter: PluginActionAdapter {
++        var calls = 0
++        func execute(
++            _ action: PluginAction, directory: URL, progress: @escaping (Double) -> Void,
++            completion: @escaping (PluginActionResult) -> Void
++        ) -> () -> Void {
++            calls += 1
++            completion(.init(id: action.id, status: "completed"))
++            return {}
++        }
++    }
++}
 diff --git a/Swiftgram/SGAdditionalCore/Tests/PluginChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PluginChecks.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812e39dab8a
+index 00000000..e1b6f9c8
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Tests/PluginChecks.swift
-@@ -0,0 +1,310 @@
+@@ -0,0 +1,334 @@
 +import Foundation
 +
 +enum PluginChecks {
@@ -960,9 +1752,11 @@ index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812
 +        }
 +        return Data(
 +            """
-+            __id__ = \(literal(id))
-+            __name__ = \(literal(name))
-+            __version__ = \(literal(version))
++            # /// script
++            # id = \(literal(id))
++            # name = \(literal(name))
++            # version = \(literal(version))
++            # ///
 +            __permissions__ = \(permissions)
 +            __hooks__ = \(hooks)
 +            __settings__ = \(settings)
@@ -993,10 +1787,10 @@ index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812
 +        rejects("invalid UTF-8") { _ = try registry.inspect(Data([0xff])) }
 +        rejects("source-size limit") { _ = try registry.inspect(Data(repeating: 32, count: 256 * 1024 + 1)) }
 +        rejects("missing metadata") { _ = try registry.inspect(Data("print('not metadata')".utf8)) }
-+        for expression in [">=1", "<=1.0.0", "==1", ">0.9", "<1.1"] {
++        for expression in [">=1", "<=1.1.0", "==1.1", ">0.9", "<1.2"] {
 +            _ = try registry.inspect(source(metadata: "__sdk_version__ = '\(expression)'"))
 +        }
-+        for expression in [">1", "<1.0", ">=2", "1", "~=1", ">=1..0", ">=-1", ">=9999999", "=="] {
++        for expression in [">1.1", "<1.1", ">=2", "1", "~=1", ">=1..0", ">=-1", ">=9999999", "=="] {
 +            rejects("SDK constraint " + expression) {
 +                _ = try registry.inspect(source(metadata: "__sdk_version__ = '\(expression)'"))
 +            }
@@ -1015,7 +1809,23 @@ index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812
 +        rejects("declarative menu text") {
 +            _ = try registry.inspect(source(menus: "[{'id':'copy','text':'${text}'}]"))
 +        }
-+        try registry.install(source())
++        let declinedReview = try registry.prepareInstallation(source())
++        CheckCore.require(
++            registry.records().isEmpty && declinedReview.dependencies.isEmpty,
++            "dependency review is complete without installing the plugin")
++        registry.discardInstallation(declinedReview)
++        rejects("declined review") { try registry.install(declinedReview) }
++        CheckCore.require(registry.records().isEmpty, "declining preserves registry")
++        let approvedReview = try registry.prepareInstallation(source())
++        try registry.install(approvedReview)
++        rejects("reused installation review") { try registry.install(approvedReview) }
++        let initialEnvironment = registry.records()[0].environment!
++        let initialDirectory = directory.appendingPathComponent("environments").appendingPathComponent(
++            initialEnvironment)
++        CheckCore.require(
++            FileManager.default.fileExists(
++                atPath: initialDirectory.appendingPathComponent(".swiftgram-lock.json").path),
++            "installation persists an environment lock")
 +        CheckCore.require(registry.dispatch(event) == event, "installation does not enable Python")
 +        let stored = try Data(contentsOf: directory.appendingPathComponent("registry.json"))
 +        for input in [
@@ -1054,6 +1864,12 @@ index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812
 +            """
 +        try registry.install(source(hooks: overlapping, methods: methods))
 +        CheckCore.require(registry.dispatch(event)?.text == "xHBC", "highest priority callback runs once per plugin")
++        CheckCore.require(
++            registry.records().first { $0.manifest.id == "aa" }?.environment != initialEnvironment,
++            "update uses a fresh dependency environment")
++        CheckCore.require(
++            !FileManager.default.fileExists(atPath: initialDirectory.path),
++            "successful update removes retired environment")
 +        try registry.setEnabled("aa", account: "77", enabled: true)
 +        CheckCore.require(registry.dispatch(event)?.text == "xHBC", "repeated enable does not duplicate callbacks")
 +        let uppercase = PluginEvent(kind: .message, name: "Message", account: "77", text: "x")
@@ -1254,10 +2070,10 @@ index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812
 +}
 diff --git a/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..120e4a1087cb7e78127ac1e610289f9ef753f729
+index 00000000..bb430085
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,102 @@
 +import Foundation
 +
 +enum PythonPluginChecks {
@@ -1274,8 +2090,10 @@ index 0000000000000000000000000000000000000000..120e4a1087cb7e78127ac1e610289f9e
 +            registry.dispatch(send)?.text == "HELLO", "shipped Python example executes without dependencies")
 +        try registry.remove(uppercase.id)
 +        let source = """
-+            __id__ = "real-python"
-+            __name__ = "Real Python"
++            # /// script
++            # id = "real-python"
++            # name = "Real Python"
++            # ///
 +            __permissions__ = ["incomingMessages", "menus"]
 +            __hooks__ = [{"event": "message", "name": "message"}]
 +            __settings__ = [{"key": "counter", "title": "Counter", "defaultValue": 0}]
@@ -1333,13 +2151,15 @@ index 0000000000000000000000000000000000000000..120e4a1087cb7e78127ac1e610289f9e
 +                fatalError("Python dependency declaration accepted")
 +            } catch {
 +                CheckCore.require(
-+                    error.localizedDescription.contains("Third-party dependencies are unsupported"),
++                    error.localizedDescription.contains("PEP 723"),
 +                    "dependency error is explicit")
 +            }
 +        }
 +        let missing = """
-+            __id__ = "missing-import"
-+            __name__ = "Missing import"
++            # /// script
++            # id = "missing-import"
++            # name = "Missing import"
++            # ///
 +            import swiftgram_missing_third_party_package_987654321
 +            """
 +        try registry.install(Data(missing.utf8))
@@ -1358,7 +2178,7 @@ index 0000000000000000000000000000000000000000..120e4a1087cb7e78127ac1e610289f9e
 +}
 diff --git a/Swiftgram/SGPython/.gitignore b/Swiftgram/SGPython/.gitignore
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a60b85e148f80966a550e5ab6a762a907c69ca6
+index 00000000..7a60b85e
 --- /dev/null
 +++ b/Swiftgram/SGPython/.gitignore
 @@ -0,0 +1,2 @@
@@ -1366,10 +2186,10 @@ index 0000000000000000000000000000000000000000..7a60b85e148f80966a550e5ab6a762a9
 +*.pyc
 diff --git a/Swiftgram/SGPython/BUILD b/Swiftgram/SGPython/BUILD
 new file mode 100644
-index 0000000000000000000000000000000000000000..df21db236fd5f779e9a354676a41634f762dfe68
+index 00000000..7a3a266c
 --- /dev/null
 +++ b/Swiftgram/SGPython/BUILD
-@@ -0,0 +1,22 @@
+@@ -0,0 +1,27 @@
 +load("@rules_cc//cc:objc_library.bzl", "objc_library")
 +load("@build_bazel_rules_apple//apple:resources.bzl", "apple_resource_bundle")
 +
@@ -1378,7 +2198,12 @@ index 0000000000000000000000000000000000000000..df21db236fd5f779e9a354676a41634f
 +apple_resource_bundle(
 +    name = "SDK",
 +    bundle_name = "SwiftgramPythonSDK",
-+    resources = glob(["SDK/*.py"]),
++    resources = glob(["SDK/*.py"]) + [
++        "@swiftgram_python//:packaging.whl",
++        "@swiftgram_python//:resolvelib.whl",
++        "@swiftgram_python//:cacert.pem",
++        "@swiftgram_python//:certifi-LICENSE",
++    ],
 +    visibility = ["//visibility:public"],
 +)
 +
@@ -1394,10 +2219,10 @@ index 0000000000000000000000000000000000000000..df21db236fd5f779e9a354676a41634f
 +)
 diff --git a/Swiftgram/SGPython/Bridge/SGPythonBridge.c b/Swiftgram/SGPython/Bridge/SGPythonBridge.c
 new file mode 100644
-index 0000000000000000000000000000000000000000..53750522182d4f596eb1fd7a93e98c4e23c5402e
+index 00000000..250f3dd6
 --- /dev/null
 +++ b/Swiftgram/SGPython/Bridge/SGPythonBridge.c
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,202 @@
 +#include "SGPythonBridge.h"
 +#if __has_include(<Python/Python.h>)
 +#include <Python/Python.h>
@@ -1408,6 +2233,19 @@ index 0000000000000000000000000000000000000000..53750522182d4f596eb1fd7a93e98c4e
 +#include <string.h>
 +
 +static PyObject *handler;
++static PyThreadState *manager;
++static PyThreadState *plugin_host;
++static char **paths;
++static Py_ssize_t path_count;
++
++typedef struct Interpreter {
++  char *key;
++  PyThreadState *state;
++  PyObject *handler;
++  struct Interpreter *next;
++} Interpreter;
++
++static Interpreter *interpreters;
 +
 +static char *python_error(void) {
 +  PyObject *exception = PyErr_GetRaisedException();
@@ -1457,7 +2295,20 @@ index 0000000000000000000000000000000000000000..53750522182d4f596eb1fd7a93e98c4e
 +  int success = handler && PyCallable_Check(handler);
 +  if (!success)
 +    *error = python_error();
-+  (void)PyEval_SaveThread();
++  if (success) {
++    PyObject *search = PySys_GetObject("path");
++    path_count = PyList_Size(search);
++    paths = calloc((size_t)path_count, sizeof(char *));
++    if (!paths) {
++      *error = strdup("Cannot allocate Python paths");
++      success = 0;
++    } else {
++      for (Py_ssize_t i = 0; i < path_count; i++)
++        paths[i] = strdup(PyUnicode_AsUTF8(PyList_GetItem(search, i)));
++    }
++  }
++  plugin_host = PyThreadState_New(PyInterpreterState_Get());
++  manager = PyEval_SaveThread();
 +  return success;
 +}
 +
@@ -1466,50 +2317,610 @@ index 0000000000000000000000000000000000000000..53750522182d4f596eb1fd7a93e98c4e
 +    *error = strdup("CPython is not initialized");
 +    return NULL;
 +  }
-+  PyGILState_STATE gil = PyGILState_Ensure();
++  PyEval_RestoreThread(manager);
 +  PyObject *response = PyObject_CallFunction(handler, "s", request);
 +  const char *text = response ? PyUnicode_AsUTF8(response) : NULL;
 +  char *result = text ? strdup(text) : NULL;
 +  if (!result)
 +    *error = python_error();
 +  Py_XDECREF(response);
-+  PyGILState_Release(gil);
++  manager = PyEval_SaveThread();
++  return result;
++}
++
++// All calls are serialized by the native worker. Each plugin/account owns its
++// sys.modules and search path; no plugin object crosses an interpreter
++// boundary.
++char *SGPythonCallIsolated(const char *key, const char *request, int release,
++                           char **error) {
++  if (!handler) {
++    *error = strdup("CPython is not initialized");
++    return NULL;
++  }
++  PyEval_RestoreThread(plugin_host);
++  Interpreter **link = &interpreters;
++  while (*link && strcmp((*link)->key, key) != 0)
++    link = &(*link)->next;
++  Interpreter *entry = *link;
++  if (!entry && release) {
++    plugin_host = PyEval_SaveThread();
++    return strdup("{\"result\":{}}");
++  }
++  if (!entry) {
++    entry = calloc(1, sizeof(Interpreter));
++    if (!entry || !(entry->key = strdup(key))) {
++      free(entry);
++      *error = strdup("Cannot allocate plugin interpreter");
++      plugin_host = PyEval_SaveThread();
++      return NULL;
++    }
++    PyInterpreterConfig config = {
++        .use_main_obmalloc = 0,
++        .allow_fork = 0,
++        .allow_exec = 0,
++        .allow_threads = 0,
++        .allow_daemon_threads = 0,
++        .check_multi_interp_extensions = 1,
++        .gil = PyInterpreterConfig_SHARED_GIL,
++    };
++    PyStatus status = Py_NewInterpreterFromConfig(&entry->state, &config);
++    if (PyStatus_Exception(status)) {
++      *error =
++          strdup(status.err_msg ? status.err_msg : "Cannot create interpreter");
++      free(entry->key);
++      free(entry);
++      PyThreadState_Swap(plugin_host);
++      plugin_host = PyEval_SaveThread();
++      return NULL;
++    }
++    // New interpreters must not inherit manager tooling or another plugin's
++    // path.
++    PyObject *search = PyList_New(0);
++    for (Py_ssize_t i = 0; search && i < path_count; i++) {
++      PyObject *path = PyUnicode_FromString(paths[i]);
++      if (!path || PyList_Append(search, path) < 0) {
++        Py_XDECREF(path);
++        Py_CLEAR(search);
++        break;
++      }
++      Py_DECREF(path);
++    }
++    int configured = search ? PySys_SetObject("path", search) : -1;
++    Py_XDECREF(search);
++    PyObject *module =
++        configured == 0 ? PyImport_ImportModule("_swiftgram_runtime") : NULL;
++    if (module)
++      entry->handler = PyObject_GetAttrString(module, "handle");
++    Py_XDECREF(module);
++    if (!entry->handler || !PyCallable_Check(entry->handler)) {
++      *error = python_error();
++      Py_XDECREF(entry->handler);
++      Py_EndInterpreter(entry->state);
++      PyThreadState_Swap(plugin_host);
++      free(entry->key);
++      free(entry);
++      plugin_host = PyEval_SaveThread();
++      return NULL;
++    }
++    *link = entry;
++  } else {
++    PyThreadState_Swap(entry->state);
++  }
++  PyObject *response = PyObject_CallFunction(entry->handler, "s", request);
++  const char *text = response ? PyUnicode_AsUTF8(response) : NULL;
++  char *result = text ? strdup(text) : NULL;
++  if (!result)
++    *error = python_error();
++  Py_XDECREF(response);
++  if (release) {
++    Py_DECREF(entry->handler);
++    Py_EndInterpreter(entry->state);
++    *link = entry->next;
++    free(entry->key);
++    free(entry);
++  }
++  PyThreadState_Swap(plugin_host);
++  plugin_host = PyEval_SaveThread();
 +  return result;
 +}
 +
 +void SGPythonFree(char *value) { free(value); }
 diff --git a/Swiftgram/SGPython/Bridge/SGPythonBridge.h b/Swiftgram/SGPython/Bridge/SGPythonBridge.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6933d38796ee595933582606fb2bd4a6c1dbdf93
+index 00000000..67eb645d
 --- /dev/null
 +++ b/Swiftgram/SGPython/Bridge/SGPythonBridge.h
-@@ -0,0 +1,9 @@
+@@ -0,0 +1,11 @@
 +#ifndef SG_PYTHON_BRIDGE_H
 +#define SG_PYTHON_BRIDGE_H
 +
 +// Results are owned by the caller and released with SGPythonFree.
 +int SGPythonInitialize(const char *home, const char *sdk, char **error);
 +char *SGPythonCall(const char *request, char **error);
++char *SGPythonCallIsolated(const char *key, const char *request, int release,
++                           char **error);
 +void SGPythonFree(char *value);
 +
 +#endif
+diff --git a/Swiftgram/SGPython/SDK/_swiftgram_dependencies.py b/Swiftgram/SGPython/SDK/_swiftgram_dependencies.py
+new file mode 100644
+index 00000000..8732edb1
+--- /dev/null
++++ b/Swiftgram/SGPython/SDK/_swiftgram_dependencies.py
+@@ -0,0 +1,453 @@
++"""PyPI-only resolution and immutable wheel environments; never executes package code."""
++
++from __future__ import annotations
++
++import hashlib
++import io
++import json
++import re
++import shutil
++import ssl
++import sys
++import time
++import uuid
++import zipfile
++from collections.abc import Iterable, Iterator, Mapping, Sequence
++from dataclasses import dataclass, replace
++from email.parser import BytesParser
++from pathlib import Path, PurePosixPath
++from typing import Any, cast
++from urllib.parse import urlsplit
++from urllib.request import Request, urlopen
++
++from packaging.markers import default_environment
++from packaging.requirements import Requirement
++from packaging.specifiers import SpecifierSet
++from packaging.tags import Tag, parse_tag
++from packaging.utils import canonicalize_name, parse_wheel_filename
++from packaging.version import Version
++from resolvelib import BaseReporter, Resolver
++from resolvelib.providers import AbstractProvider
++from resolvelib.structs import RequirementInformation
++
++_bundle = Path(__file__).parent
++
++MAX_WHEEL = 32 * 1024 * 1024
++MAX_EXPANDED = 128 * 1024 * 1024
++MAX_PACKAGES = 64
++_plans: dict[str, Plan] = {}
++
++
++def environment() -> dict[str, str]:
++    """Use the embedded runtime's marker values, never the build machine's values."""
++    values = {key: str(value) for key, value in default_environment().items()}
++    if sys.platform == "ios":
++        values.update(sys_platform="ios", platform_system="iOS", os_name="posix")
++    return values
++
++
++def requirement(value: str) -> Requirement:
++    result = Requirement(value)
++    if result.url:
++        raise ValueError("Only named PyPI dependencies are supported; direct URLs are disabled")
++    return result
++
++
++def active(item: Requirement, extras: Iterable[str] = ("",)) -> bool:
++    return item.marker is None or any(
++        item.marker.evaluate({**environment(), "extra": extra}) for extra in extras
++    )
++
++
++def validate_script(dependencies: list[str], requires_python: str) -> None:
++    current = environment()["python_full_version"]
++    if not SpecifierSet(requires_python).contains(current, prereleases=True):
++        raise ValueError(f"Plugin requires Python {requires_python}; this runtime is {current}")
++    for value in dependencies:
++        requirement(value)
++
++
++def fetch(url: str, limit: int, *, index: bool = False) -> bytes:
++    allowed = "pypi.org" if index else "files.pythonhosted.org"
++    parsed = urlsplit(url)
++    if parsed.scheme != "https" or parsed.netloc != allowed:
++        raise ValueError("Package downloads must use the official PyPI HTTPS hosts")
++    certificates = _bundle / "cacert.pem"
++    if not certificates.exists():
++        import certifi
++
++        certificates = Path(certifi.where())
++    context = ssl.create_default_context(cafile=str(certificates))
++    request = Request(url, headers={"Accept": "application/vnd.pypi.simple.v1+json"})
++    with urlopen(request, timeout=15, context=context) as response:
++        if urlsplit(response.url).netloc != allowed:
++            raise ValueError("Unexpected package download redirect")
++        data = response.read(limit + 1)
++    if len(data) > limit:
++        raise ValueError("Package response exceeds its size limit")
++    return cast(bytes, data)
++
++
++def digest(data: bytes, expected: str) -> None:
++    if not re.fullmatch(r"[a-f0-9]{64}", expected) or hashlib.sha256(data).hexdigest() != expected:
++        raise ValueError("Package SHA-256 verification failed")
++
++
++@dataclass(frozen=True)
++class Candidate:
++    name: str
++    version: Version
++    filename: str
++    url: str
++    sha256: str
++    metadata_hash: str | None = None
++    extras: frozenset[str] = frozenset()
++
++    def display(self, direct: set[str]) -> dict[str, object]:
++        return {
++            "name": self.name,
++            "version": str(self.version),
++            "filename": self.filename,
++            "sha256": self.sha256,
++            "url": self.url,
++            "direct": self.name in direct,
++        }
++
++
++class Provider(AbstractProvider[Requirement, Candidate, str]):
++    def __init__(self) -> None:
++        self.projects: dict[str, list[Candidate]] = {}
++        self.metadata: dict[Candidate, bytes] = {}
++        self.downloads: dict[Candidate, bytes] = {}
++        self.started = time.monotonic()
++        self.downloaded = 0
++
++    def check_budget(self) -> None:
++        if time.monotonic() - self.started > 90:
++            raise ValueError(
++                "Dependency operation exceeded 90 seconds; retry with tighter constraints"
++            )
++
++    def read(self, url: str, limit: int, *, index: bool = False) -> bytes:
++        self.check_budget()
++        data = fetch(url, limit, index=index)
++        self.downloaded += len(data)
++        if self.downloaded > MAX_EXPANDED:
++            raise ValueError("Dependency download budget exceeds 128 MB")
++        return data
++
++    def identify(self, requirement_or_candidate: Requirement | Candidate) -> str:
++        return str(canonicalize_name(requirement_or_candidate.name))
++
++    def get_preference(
++        self,
++        identifier: str,
++        resolutions: Mapping[str, Candidate],
++        candidates: Mapping[str, Iterator[Candidate]],
++        information: Mapping[str, Iterator[RequirementInformation[Requirement, Candidate]]],
++        backtrack_causes: Sequence[RequirementInformation[Requirement, Candidate]],
++    ) -> str:
++        return identifier
++
++    def versions(self, name: str) -> list[Candidate]:
++        if name in self.projects:
++            return self.projects[name]
++        if len(self.projects) >= MAX_PACKAGES:
++            raise ValueError("Dependency graph exceeds 64 projects")
++        response = json.loads(self.read(f"https://pypi.org/simple/{name}/", MAX_WHEEL, index=True))
++        if str(response.get("meta", {}).get("api-version", "1.0")).split(".")[0] != "1":
++            raise ValueError("Unsupported PyPI index API version")
++        candidates: list[Candidate] = []
++        for file in response["files"]:
++            if file.get("yanked") or not file["filename"].endswith(".whl"):
++                continue
++            try:
++                project, version, _, tags = parse_wheel_filename(file["filename"])
++            except ValueError:
++                continue
++            if project != name or not any(
++                tag.abi == "none" and tag.platform == "any" and tag in self.tags() for tag in tags
++            ):
++                continue
++            if not SpecifierSet(file.get("requires-python") or "").contains(
++                environment()["python_full_version"], prereleases=True
++            ):
++                continue
++            core = file.get("core-metadata", file.get("dist-info-metadata"))
++            candidates.append(
++                Candidate(
++                    name,
++                    version,
++                    file["filename"],
++                    file["url"],
++                    file.get("hashes", {}).get("sha256", ""),
++                    core.get("sha256") if isinstance(core, dict) else None,
++                )
++            )
++        candidates.sort(key=lambda item: (item.version, item.filename), reverse=True)
++        self.projects[name] = candidates
++        return candidates
++
++    @staticmethod
++    def tags() -> set[Tag]:
++        major, minor = sys.version_info[:2]
++        return {Tag(f"py{major}", "none", "any")} | {
++            Tag(f"py{major}{value}", "none", "any") for value in range(minor + 1)
++        }
++
++    def find_matches(
++        self,
++        identifier: str,
++        requirements: Mapping[str, Iterator[Requirement]],
++        incompatibilities: Mapping[str, Iterator[Candidate]],
++    ) -> Iterable[Candidate]:
++        self.check_budget()
++        constraints = list(requirements[identifier])
++        excluded = set(incompatibilities[identifier])
++        extras = frozenset(
++            str(canonicalize_name(extra)) for item in constraints for extra in item.extras
++        )
++        for candidate in self.versions(identifier):
++            candidate = replace(candidate, extras=extras)
++            if candidate not in excluded and all(
++                self.is_satisfied_by(item, candidate) for item in constraints
++            ):
++                yield candidate
++
++    def is_satisfied_by(self, requirement: Requirement, candidate: Candidate) -> bool:
++        return (
++            self.identify(requirement) == candidate.name
++            and {str(canonicalize_name(extra)) for extra in requirement.extras} <= candidate.extras
++            and requirement.specifier.contains(candidate.version)
++        )
++
++    def wheel(self, candidate: Candidate) -> bytes:
++        base = replace(candidate, extras=frozenset())
++        if base not in self.downloads:
++            data = self.read(candidate.url, MAX_WHEEL)
++            digest(data, candidate.sha256)
++            self.downloads[base] = data
++        return self.downloads[base]
++
++    def core(self, candidate: Candidate) -> bytes:
++        base = replace(candidate, extras=frozenset())
++        if base not in self.metadata:
++            if candidate.metadata_hash:
++                data = self.read(candidate.url + ".metadata", 1024 * 1024)
++                digest(data, candidate.metadata_hash)
++            else:
++                data = wheel_metadata(self.wheel(candidate))
++            message = BytesParser().parsebytes(data)
++            if (
++                canonicalize_name(message["Name"] or "") != candidate.name
++                or Version(message["Version"] or "") != candidate.version
++            ):
++                raise ValueError("Wheel metadata identity does not match the selected package")
++            if not SpecifierSet(message["Requires-Python"] or "").contains(
++                environment()["python_full_version"], prereleases=True
++            ):
++                raise ValueError("Wheel metadata requires an incompatible Python version")
++            self.metadata[base] = data
++        return self.metadata[base]
++
++    def get_dependencies(self, candidate: Candidate) -> Iterable[Requirement]:
++        message = BytesParser().parsebytes(self.core(candidate))
++        available = {
++            str(canonicalize_name(extra)) for extra in message.get_all("Provides-Extra", [])
++        }
++        if not candidate.extras <= available:
++            raise ValueError(
++                f"Unknown extras for {candidate.name}: {sorted(candidate.extras - available)}"
++            )
++        for value in message.get_all("Requires-Dist", []):
++            item = requirement(value)
++            if active(item, ("", *candidate.extras)):
++                yield item
++
++
++def wheel_metadata(data: bytes) -> bytes:
++    with zipfile.ZipFile(io.BytesIO(data)) as archive:
++        files = [
++            item
++            for item in archive.infolist()
++            if item.filename.count("/") == 1 and item.filename.endswith(".dist-info/METADATA")
++        ]
++        if len(files) != 1 or files[0].file_size > 1024 * 1024:
++            raise ValueError("Wheel must contain exactly one bounded METADATA file")
++        return archive.read(files[0])
++
++
++def extract(data: bytes, destination: Path, occupied: set[str]) -> int:
++    total = 0
++    with zipfile.ZipFile(io.BytesIO(data)) as archive:
++        wheels = [
++            item
++            for item in archive.infolist()
++            if item.filename.count("/") == 1 and item.filename.endswith(".dist-info/WHEEL")
++        ]
++        if len(wheels) != 1 or wheels[0].file_size > 65536:
++            raise ValueError("Wheel must contain exactly one bounded WHEEL description")
++        wheel = BytesParser().parsebytes(archive.read(wheels[0]))
++        tags = {tag for value in wheel.get_all("Tag", []) for tag in parse_tag(value)}
++        if (
++            wheel["Root-Is-Purelib"] != "true"
++            or wheel["Wheel-Version"] != "1.0"
++            or not tags
++            or not tags <= Provider.tags()
++        ):
++            raise ValueError("Only compatible pure Python wheels are supported")
++        for item in archive.infolist():
++            path = PurePosixPath(item.filename)
++            mode = (item.external_attr >> 16) & 0o170000
++            if (
++                path.is_absolute()
++                or ".." in path.parts
++                or "\\" in item.filename
++                or mode not in (0, 0o100000, 0o040000)
++            ):
++                raise ValueError("Unsafe wheel member")
++            if item.is_dir():
++                continue
++            parts = list(path.parts)
++            if not parts:
++                raise ValueError("Empty wheel member")
++            if parts[0].endswith(".data"):
++                if len(parts) < 3 or parts[1] not in ("purelib", "platlib"):
++                    raise ValueError(
++                        "Wheel scripts, headers and external data are unsupported on iOS"
++                    )
++                parts = parts[2:]
++            top = parts[0].split(".")[0].casefold()
++            if top in sys.stdlib_module_names or top in {
++                "swiftgram",
++                "_swiftgram_runtime",
++                "_swiftgram_dependencies",
++                "sitecustomize",
++                "usercustomize",
++            }:
++                raise ValueError("Dependency attempts to replace the standard library or host SDK")
++            if parts[0].casefold().startswith(".swiftgram"):
++                raise ValueError("Reserved dependency lock path")
++            if path.suffix.lower() in {".pth", ".so", ".dylib", ".dll", ".pyd", ".fwork"}:
++                raise ValueError("Native extensions and .pth import hooks are unsupported")
++            relative = "/".join(parts)
++            collision = relative.casefold()
++            if collision in occupied:
++                raise ValueError(f"Dependency file collision: {relative}")
++            occupied.add(collision)
++            total += item.file_size
++            if total > MAX_EXPANDED:
++                raise ValueError("Expanded wheel exceeds 128 MB")
++            target = destination.joinpath(*parts)
++            target.parent.mkdir(parents=True, exist_ok=True)
++            with archive.open(item) as source, target.open("xb") as output:
++                shutil.copyfileobj(source, output)
++    return total
++
++
++@dataclass
++class Plan:
++    source: str
++    root: str
++    provider: Provider
++    candidates: list[Candidate]
++    dependencies: list[dict[str, object]]
++    created: float
++
++
++def manage(request: dict[str, Any]) -> dict[str, object]:
++    operation = request["operation"]
++    if operation == "resolve":
++        from _swiftgram_runtime import metadata
++
++        info = metadata(request["source"])
++        roots = [requirement(value) for value in cast(list[str], info["dependencies"])]
++        roots = [item for item in roots if active(item)]
++        provider = Provider()
++        result = Resolver(provider, BaseReporter()).resolve(roots, max_rounds=1000)
++        candidates = sorted(result.mapping.values(), key=lambda item: item.name)
++        direct = {str(canonicalize_name(item.name)) for item in roots}
++        dependencies = [item.display(direct) for item in candidates]
++        # Reviews are memory-only, bounded and expiring. No plugin code is imported.
++        for token, pending in list(_plans.items()):
++            if time.monotonic() - pending.created > 1800:
++                _plans.pop(token)
++        selected = {replace(item, extras=frozenset()) for item in candidates}
++        provider.downloads = {
++            key: value for key, value in provider.downloads.items() if key in selected
++        }
++        provider.metadata = {
++            key: value for key, value in provider.metadata.items() if key in selected
++        }
++        provider.projects.clear()
++        cached = sum(len(value) for value in provider.downloads.values()) + sum(
++            len(value)
++            for pending in _plans.values()
++            for value in pending.provider.downloads.values()
++        )
++        if len(_plans) >= 4 or cached > MAX_EXPANDED:
++            raise ValueError("Too many pending plugin reviews; close an earlier review")
++        token = uuid.uuid4().hex
++        _plans[token] = Plan(
++            request["source"], request["root"], provider, candidates, dependencies, time.monotonic()
++        )
++        return {"token": token, "dependencies": dependencies}
++    if operation == "discard":
++        _plans.pop(request["token"], None)
++        return {}
++    if operation == "verify":
++        verify(Path(request["dependencyPath"]), request["dependencies"])
++        return {}
++    plan = _plans.pop(request["token"], None)
++    if (
++        plan is None
++        or time.monotonic() - plan.created > 1800
++        or plan.root != request["root"]
++        or plan.source != request.get("source")
++        or plan.dependencies != request.get("dependencies")
++    ):
++        raise ValueError("Plugin review expired; import and review it again")
++    identifier = uuid.uuid4().hex
++    root = Path(plan.root)
++    root.mkdir(parents=True, exist_ok=True)
++    stage = root / (".staging-" + identifier)
++    final = root / identifier
++    stage.mkdir()
++    try:
++        occupied: set[str] = set()
++        total = 0
++        plan.provider.started = time.monotonic()
++        for candidate in plan.candidates:
++            data = plan.provider.wheel(candidate)
++            if wheel_metadata(data) != plan.provider.core(candidate):
++                raise ValueError("Wheel metadata changed since dependency review")
++            total += extract(data, stage, occupied)
++            if total > MAX_EXPANDED:
++                raise ValueError("Expanded dependency environment exceeds 128 MB")
++        files = {
++            str(file.relative_to(stage)): hashlib.sha256(file.read_bytes()).hexdigest()
++            for file in sorted(stage.rglob("*"))
++            if file.is_file()
++        }
++        (stage / ".swiftgram-lock.json").write_text(
++            json.dumps({"dependencies": plan.dependencies, "files": files}, sort_keys=True)
++        )
++        stage.rename(final)
++        return {"environment": identifier, "dependencies": plan.dependencies}
++    except BaseException:
++        shutil.rmtree(stage, ignore_errors=True)
++        raise
++
++
++def verify(directory: Path, dependencies: list[dict[str, object]]) -> None:
++    lock = json.loads((directory / ".swiftgram-lock.json").read_text())
++    if lock["dependencies"] != dependencies:
++        raise ValueError("Installed dependencies differ from the approved lock")
++    for relative, expected in lock["files"].items():
++        file = directory / relative
++        if not file.resolve().is_relative_to(directory.resolve()) or file.is_symlink():
++            raise ValueError("Unsafe installed dependency path")
++        digest(file.read_bytes(), expected)
++    actual = {str(file.relative_to(directory)) for file in directory.rglob("*") if file.is_file()}
++    if actual != {*lock["files"], ".swiftgram-lock.json"}:
++        raise ValueError("Dependency environment contains unapproved files")
 diff --git a/Swiftgram/SGPython/SDK/_swiftgram_runtime.py b/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417ec21dba4a
+index 00000000..bb14e64d
 --- /dev/null
 +++ b/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,322 @@
 +"""Trusted CPython bootstrap and value-only protocol used by the native bridge."""
 +
 +from __future__ import annotations
 +
 +import ast
++import importlib
 +import io
 +import json
 +import sys
 +import time
 +import tokenize
++import tomllib
 +import types
++from pathlib import Path
 +from typing import TYPE_CHECKING, Any, cast
 +
 +if TYPE_CHECKING:
@@ -1527,26 +2938,67 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +}
 +
 +
-+def metadata(source: str) -> dict[str, object]:
-+    """Read only literal top-level declarations; importing is a separate operation."""
-+    for token in tokenize.generate_tokens(io.StringIO(source.lstrip("\ufeff")).readline):
-+        if token.type == tokenize.COMMENT and token.string.strip() == "# /// script":
-+            raise ValueError("Inline script dependencies are unsupported; use the bundled SDK")
-+    tree = ast.parse(source.lstrip("\ufeff"), filename="<plugin>")
-+    fields = {
-+        "__id__": "id",
-+        "__name__": "name",
-+        "__version__": "version",
-+        "__author__": "author",
-+        "__description__": "description",
-+        "__sdk_version__": "sdkVersion",
-+        "__app_version__": "appVersion",
-+        "__permissions__": "permissions",
-+        "__hooks__": "hooks",
-+        "__settings__": "settings",
-+        "__menus__": "menus",
++def _dependency_manager() -> types.ModuleType:
++    # Only the manager uses build-pinned tooling. Its wheel paths are never added
++    # to plugin interpreters, so plugins can depend on their own tooling versions.
++    bundle = Path(__file__).parent
++    for wheel in ("packaging.whl", "resolvelib.whl"):
++        if (bundle / wheel).is_file() and str(bundle / wheel) not in sys.path:
++            sys.path.insert(0, str(bundle / wheel))
++    return importlib.import_module("_swiftgram_dependencies")
++
++
++def metadata(source: str, *, validate_dependencies: bool = True) -> dict[str, object]:
++    """Parse PEP 723 TOML and literal SDK registrations without executing source."""
++    source = source.lstrip("\ufeff")
++    tree = ast.parse(source, filename="<plugin>")
++    comments = {
++        token.start[0]: token.string
++        for token in tokenize.generate_tokens(io.StringIO(source).readline)
++        if token.type == tokenize.COMMENT and token.start[1] == 0
 +    }
-+    result: dict[str, object] = {
++    blocks: list[str] = []
++    lines = source.splitlines()
++    for number, comment in comments.items():
++        if comment != "# /// script":
++            continue
++        content: list[str] = []
++        for offset in range(number, len(lines)):
++            line = comments.get(offset + 1, "")
++            if line == "# ///":
++                blocks.append("\n".join(content))
++                break
++            if line != "#" and not line.startswith("# "):
++                raise ValueError("Unclosed PEP 723 script block")
++            content.append(line[2:] if line.startswith("# ") else "")
++        else:
++            raise ValueError("Unclosed PEP 723 script block")
++    if len(blocks) != 1:
++        raise ValueError("Python plugins require exactly one PEP 723 script block")
++    config = tomllib.loads(blocks[0])
++    tool = config.get("tool", {})
++    if not isinstance(tool, dict) or not isinstance(tool.get("swiftgram", {}), dict):
++        raise ValueError("tool.swiftgram must be a table")
++    info = tool.get("swiftgram", {})
++    fields = {
++        "id": "id",
++        "name": "name",
++        "version": "version",
++        "author": "author",
++        "description": "description",
++        "sdk-version": "sdkVersion",
++        "app-version": "appVersion",
++        "permissions": "permissions",
++        "hooks": "hooks",
++        "settings": "settings",
++        "menus": "menus",
++    }
++    if (
++        set(config) - {"dependencies", "requires-python", "tool", *fields}
++        or set(info) - fields.keys()
++    ):
++        raise ValueError("Unknown Swiftgram script metadata field")
++    result: dict[str, Any] = {
 +        "schemaVersion": 1,
 +        "version": "1.0",
 +        "permissions": [],
@@ -1554,8 +3006,32 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +        "pythonSource": "",
 +        "settings": [],
 +        "menus": [],
++        "dependencies": config.get("dependencies", []),
++        "requiresPython": config.get("requires-python", ""),
 +    }
-+    seen: set[str] = set()
++    for key, destination in fields.items():
++        if key in config and key in info:
++            raise ValueError(f"Duplicate metadata field: {key}")
++        if key in info or key in config:
++            result[destination] = info.get(key, config.get(key))
++    if (
++        not isinstance(result["dependencies"], list)
++        or len(result["dependencies"]) > 64
++        or any(not isinstance(value, str) or len(value) > 512 for value in result["dependencies"])
++    ):
++        raise ValueError("dependencies must contain at most 64 PEP 508 strings")
++    if not isinstance(result["requiresPython"], str):
++        raise ValueError("requires-python must be a version specifier string")
++    # Legacy SDK registration literals remain supported; identity comes only from TOML.
++    declarations = {
++        "__sdk_version__": "sdkVersion",
++        "__app_version__": "appVersion",
++        "__permissions__": "permissions",
++        "__hooks__": "hooks",
++        "__settings__": "settings",
++        "__menus__": "menus",
++    }
++    seen = {fields[key] for key in fields if key in info or key in config}
 +    for node in tree.body:
 +        targets = (
 +            node.targets
@@ -1563,22 +3039,33 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +            else ([node.target] if isinstance(node, ast.AnnAssign | ast.AugAssign) else [])
 +        )
 +        for target in targets:
-+            if isinstance(target, ast.Name) and target.id in {
++            if not isinstance(target, ast.Name):
++                continue
++            if target.id in {
 +                "__requirements__",
 +                "__dependencies__",
 +                "requirements",
 +                "dependencies",
 +            }:
-+                raise ValueError("Third-party dependencies are unsupported; use the bundled SDK")
-+            if isinstance(target, ast.Name) and target.id in fields:
-+                if target.id in seen:
-+                    raise ValueError(f"Duplicate metadata declaration: {target.id}")
-+                seen.add(target.id)
-+                if not isinstance(node, ast.Assign | ast.AnnAssign) or node.value is None:
-+                    raise ValueError("Metadata must use literal assignments")
-+                result[fields[target.id]] = ast.literal_eval(node.value)
++                raise ValueError("Declare dependencies in the PEP 723 script block")
++            if target.id in {"__id__", "__name__", "__version__", "__author__", "__description__"}:
++                raise ValueError("Declare plugin information in the PEP 723 script block")
++            if target.id not in declarations:
++                continue
++            field = declarations[target.id]
++            if field in seen:
++                raise ValueError(f"Duplicate metadata declaration: {target.id}")
++            seen.add(field)
++            if not isinstance(node, ast.Assign | ast.AnnAssign) or node.value is None:
++                raise ValueError("Metadata must use literal assignments")
++            result[field] = ast.literal_eval(node.value)
 +    if "id" not in result or "name" not in result:
-+        raise ValueError("Python plugins require literal __id__ and __name__ declarations")
++        raise ValueError("Python plugins require id and name in the PEP 723 script block")
++    for field in ("id", "name", "version", "author", "description", "sdkVersion", "appVersion"):
++        if field in result and not isinstance(result[field], str):
++            raise ValueError(f"{field} must be text")
++    if validate_dependencies:
++        _dependency_manager().validate_script(result["dependencies"], result["requiresPython"])
 +    for key in ("hooks", "menus"):
 +        registrations = result[key]
 +        if not isinstance(registrations, list) or any(
@@ -1635,7 +3122,7 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +        instance = previous[2]
 +        instance.settings = dict(request["settings"])
 +        return instance
-+    metadata(source)
++    metadata(source, validate_dependencies=False)
 +    _generation += 1
 +    module = types.ModuleType(f"_swiftgram_plugin_{_generation}")
 +    module.__file__ = f"swiftgram-plugin:{key[0]}"
@@ -1649,6 +3136,8 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +        candidate = plugin_class()
 +        candidate.account = key[1]
 +        candidate.settings = dict(request["settings"])
++        candidate.data_directory = Path(request.get("dataDirectory", "."))
++        candidate._actions_allowed = request["operation"] == "load"
 +        candidate.on_plugin_load()
 +        _settings(candidate)
 +        _unload(key)
@@ -1665,22 +3154,42 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +
 +def _execute(request: dict[str, Any]) -> dict[str, object]:
 +    operation = request["operation"]
++    if operation in ("resolve", "install", "discard", "verify"):
++        return cast(dict[str, object], _dependency_manager().manage(request))
 +    if operation == "inspect":
 +        return {"manifest": metadata(request["source"])}
 +    key = (str(request["id"]), str(request["account"]))
 +    if operation == "unload":
 +        _unload(key)
 +        return {}
++    dependency_path = request.get("dependencyPath")
++    if dependency_path and dependency_path not in sys.path:
++        sys.path.append(dependency_path)
 +    instance = _load(request)
++    if operation != "load":
++        instance._actions = []
++    instance._actions_allowed = operation in ("load", "menu", "actionResult") or (
++        operation == "hook"
++        and request["event"]["kind"] in ("message", "sendMessage")
++        and not request["event"].get("pluginOrigin", False)
++    )
 +    if operation == "load":
-+        return {"settings": _settings(instance)}
++        return {"settings": _settings(instance), "actions": instance._actions}
++    if operation in ("actionResult", "actionProgress"):
++        callback = (
++            instance.on_action_result
++            if operation == "actionResult"
++            else instance.on_action_progress
++        )
++        callback(request["actionResult"])
++        return {"settings": _settings(instance), "actions": instance._actions}
 +    event = Event(request["event"])
 +    callback = getattr(instance, request["callback"])
 +    if operation == "menu":
 +        text = callback(event, request["menuID"])
 +        if type(text) is not str or len(text.encode()) > 65536:
 +            raise ValueError("Menu callback must return text up to 64 KB")
-+        return {"text": text, "settings": _settings(instance)}
++        return {"text": text, "settings": _settings(instance), "actions": instance._actions}
 +    result = callback(event)
 +    if result is None:
 +        result = HookResult()
@@ -1695,12 +3204,15 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +        "text": result.text,
 +        "error": result.error,
 +        "settings": _settings(instance),
++        **({"actions": instance._actions} if instance._actions else {}),
 +    }
 +
 +
 +def handle(payload: str) -> str:
 +    request = cast(dict[str, Any], json.loads(payload))
-+    deadline = time.monotonic() + (0.1 if request["operation"] in ("hook", "menu") else 0.5)
++    deadline = time.monotonic() + (
++        0.1 if request["operation"] in ("hook", "menu", "actionResult", "actionProgress") else 0.5
++    )
 +
 +    def trace(frame: types.FrameType, event: str, arg: object) -> TraceFunction:
 +        if time.monotonic() > deadline:
@@ -1708,7 +3220,8 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +        return trace
 +
 +    response: dict[str, object]
-+    sys.settrace(trace)
++    if request["operation"] not in ("resolve", "install", "discard", "verify"):
++        sys.settrace(trace)
 +    try:
 +        response = {"result": _execute(request)}
 +    except BaseException as error:
@@ -1718,15 +3231,18 @@ index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417e
 +    return json.dumps(response, ensure_ascii=True, allow_nan=False)
 diff --git a/Swiftgram/SGPython/SDK/swiftgram.py b/Swiftgram/SGPython/SDK/swiftgram.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..737e6aabcdf069f345284e9ba6134f6c51733b78
+index 00000000..e0a84959
 --- /dev/null
 +++ b/Swiftgram/SGPython/SDK/swiftgram.py
-@@ -0,0 +1,75 @@
+@@ -0,0 +1,156 @@
 +"""Swiftgram's Python plugin API. Host objects never cross this boundary."""
 +
 +from __future__ import annotations
 +
 +from enum import StrEnum
++from pathlib import Path
++from typing import Any
++from uuid import uuid4
 +
 +SettingValue = bool | int | str
 +
@@ -1770,12 +3286,90 @@ index 0000000000000000000000000000000000000000..737e6aabcdf069f345284e9ba6134f6c
 +            raise TypeError("Event error must be a string")
 +        self.chat = chat
 +        self.error = error
++        self.message = payload.get("message")
++        self.plugin_origin = payload.get("pluginOrigin", False)
 +
 +
 +class BasePlugin:
 +    def __init__(self) -> None:
 +        self.account = ""
 +        self.settings: dict[str, SettingValue] = {}
++        self.data_directory = Path()
++        self._actions: list[dict[str, Any]] = []
++        self._actions_allowed = False
++
++    def _queue(self, operation: str, **arguments: Any) -> str:
++        if not self._actions_allowed:
++            raise RuntimeError("Actions are unavailable in this callback")
++        if len(self._actions) >= 32:
++            raise ValueError("At most 32 actions per callback")
++        identifier = uuid4().hex
++        self._actions.append({"id": identifier, "operation": operation, **arguments})
++        return identifier
++
++    def get_message(self, chat: str, message_id: int) -> str:
++        return self._queue("getMessage", chat=chat, messageID=message_id)
++
++    def send_message(
++        self,
++        chat: str,
++        text: str,
++        *,
++        entities: tuple[dict[str, Any], ...] = (),
++        reply_to: int | None = None,
++        thread_id: int | None = None,
++    ) -> str:
++        return self._queue(
++            "sendMessage",
++            chat=chat,
++            text=text,
++            entities=list(entities),
++            replyTo=reply_to,
++            threadID=thread_id,
++        )
++
++    def edit_message(
++        self, chat: str, message_id: int, text: str, *, entities: tuple[dict[str, Any], ...] = ()
++    ) -> str:
++        return self._queue(
++            "editMessage", chat=chat, messageID=message_id, text=text, entities=list(entities)
++        )
++
++    def download_media(self, chat: str, message_id: int, attachment_id: str) -> str:
++        return self._queue(
++            "downloadMedia", chat=chat, messageID=message_id, attachmentID=attachment_id
++        )
++
++    def send_media(
++        self,
++        chat: str,
++        path: str,
++        *,
++        kind: str,
++        caption: str = "",
++        entities: tuple[dict[str, Any], ...] = (),
++        reply_to: int | None = None,
++        thread_id: int | None = None,
++    ) -> str:
++        return self._queue(
++            "sendMedia",
++            chat=chat,
++            path=path,
++            mediaKind=kind,
++            text=caption,
++            entities=list(entities),
++            replyTo=reply_to,
++            threadID=thread_id,
++        )
++
++    def cancel_action(self, action_id: str) -> str:
++        return self._queue("cancel", targetID=action_id)
++
++    def on_action_result(self, result: dict[str, Any]) -> None:
++        """Receive action status; accepted precedes completed, failed, or cancelled."""
++
++    def on_action_progress(self, progress: dict[str, Any]) -> None:
++        """Receive coalesced transfer progress."""
 +
 +    def on_plugin_load(self) -> None:
 +        """Initialize this account's instance; raise to reject activation."""
@@ -1797,12 +3391,562 @@ index 0000000000000000000000000000000000000000..737e6aabcdf069f345284e9ba6134f6c
 +
 +    def on_menu(self, event: Event, menu_id: str) -> str:
 +        return event.text
+diff --git a/Swiftgram/SGPython/Tests/test_actions.py b/Swiftgram/SGPython/Tests/test_actions.py
+new file mode 100644
+index 00000000..faf7f33b
+--- /dev/null
++++ b/Swiftgram/SGPython/Tests/test_actions.py
+@@ -0,0 +1,105 @@
++"""Value-only action protocol and callback boundaries."""
++
++from __future__ import annotations
++
++import json
++import unittest
++from typing import Any, cast
++
++from _swiftgram_runtime import handle
++
++HEADER = '# /// script\n# id = "actions-test"\n# name = "Actions"\n# ///\n'
++BODY = """
++from swiftgram import BasePlugin
++class Plugin(BasePlugin):
++    def on_message(self, event):
++        self.send_message(event.chat, "reply", reply_to=17)
++    def on_action_result(self, result):
++        self.settings["status"] = result["status"]
++    def pre_request_hook(self, event):
++        self.send_message("user:42", "forbidden")
++"""
++
++
++class ActionTests(unittest.TestCase):
++    def call(self, operation: str, **values: object) -> dict[str, Any]:
++        return cast(
++            dict[str, Any],
++            json.loads(
++                handle(
++                    json.dumps(
++                        {
++                            "operation": operation,
++                            "id": "actions-test",
++                            "account": "77",
++                            "source": HEADER + BODY,
++                            "settings": {},
++                            **values,
++                        }
++                    )
++                )
++            ),
++        )
++
++    def tearDown(self) -> None:
++        self.call("unload")
++
++    def test_action_is_returned_with_successful_hook(self) -> None:
++        result = self.call(
++            "hook",
++            callback="on_message",
++            event={
++                "kind": "message",
++                "name": "message",
++                "account": "77",
++                "chat": "user:42",
++                "text": "hello",
++            },
++        )
++        actions = result["result"]["actions"]
++        self.assertEqual(actions[0]["operation"], "sendMessage")
++        self.assertEqual(actions[0]["replyTo"], 17)
++        self.assertEqual(len(actions[0]["id"]), 32)
++        reply = self.call(
++            "actionResult", actionResult={"id": actions[0]["id"], "status": "accepted"}
++        )
++        self.assertEqual(reply["result"]["settings"]["status"], "accepted")
++
++    def test_failed_callback_does_not_emit_actions(self) -> None:
++        source = HEADER + BODY.replace(
++            'self.send_message(event.chat, "reply", reply_to=17)',
++            'self.send_message(event.chat, "reply"); raise ValueError("failed")',
++        )
++        result = self.call(
++            "hook",
++            source=source,
++            callback="on_message",
++            event={
++                "kind": "message",
++                "name": "message",
++                "account": "77",
++                "chat": "user:42",
++                "text": "hello",
++            },
++        )
++        self.assertIn("failure", result)
++        self.assertNotIn("result", result)
++
++    def test_origin_and_request_callbacks_cannot_emit_actions(self) -> None:
++        for kind, callback, origin in (
++            ("message", "on_message", True),
++            ("preRequest", "pre_request_hook", False),
++        ):
++            result = self.call(
++                "hook",
++                callback=callback,
++                event={
++                    "kind": kind,
++                    "name": "message",
++                    "account": "77",
++                    "chat": "user:42",
++                    "text": "hello",
++                    "pluginOrigin": origin,
++                },
++            )
++            self.assertIn("Actions are unavailable", result["failure"])
+diff --git a/Swiftgram/SGPython/Tests/test_bridge.py b/Swiftgram/SGPython/Tests/test_bridge.py
+new file mode 100644
+index 00000000..12c18d61
+--- /dev/null
++++ b/Swiftgram/SGPython/Tests/test_bridge.py
+@@ -0,0 +1,146 @@
++"""Compile and exercise the actual C bridge in an independent CPython process."""
++
++from __future__ import annotations
++
++import json
++import shutil
++import subprocess
++import sys
++import sysconfig
++import tempfile
++import unittest
++from pathlib import Path
++from typing import Any
++
++HARNESS = r"""
++#include "SGPythonBridge.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++int main(int argc, char **argv) {
++    if (argc != 3) return 2;
++    char *error = NULL;
++    if (!SGPythonInitialize(argv[1], argv[2], &error)) {
++        fprintf(stderr, "%s\n", error); SGPythonFree(error); return 3;
++    }
++    char *line = NULL;
++    size_t capacity = 0;
++    while (getline(&line, &capacity, stdin) > 0) {
++        char *payload = strchr(line, '\t');
++        if (!payload) return 4;
++        *payload++ = '\0';
++        int release = *payload++ == '1';
++        if (*payload++ != '\t') return 5;
++        char *result = SGPythonCallIsolated(line, payload, release, &error);
++        if (!result) {
++            fprintf(stderr, "%s\n", error); SGPythonFree(error); return 6;
++        }
++        puts(result);
++        SGPythonFree(result);
++    }
++    free(line);
++    return 0;
++}
++"""
++
++
++class BridgeTests(unittest.TestCase):
++    def test_conflicting_versions_and_module_state_are_isolated(self) -> None:
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            python = Path(__file__).resolve().parents[1]
++            bridge = python / "Bridge"
++            harness = root / "harness.c"
++            harness.write_text(HARNESS)
++            executable = root / "bridge-check"
++            compiler = shutil.which("clang") or "cc"
++            library = Path(sysconfig.get_config_var("LIBDIR")) / sysconfig.get_config_var(
++                "LDLIBRARY"
++            )
++            subprocess.run(
++                [
++                    compiler,
++                    "-std=c11",
++                    "-D_POSIX_C_SOURCE=200809L",
++                    "-Wall",
++                    "-Wextra",
++                    "-Werror",
++                    "-I",
++                    sysconfig.get_path("include"),
++                    "-I",
++                    str(bridge),
++                    str(harness),
++                    str(bridge / "SGPythonBridge.c"),
++                    str(library),
++                    "-Wl,-rpath," + str(library.parent),
++                    "-o",
++                    str(executable),
++                ],
++                check=True,
++                capture_output=True,
++                text=True,
++            )
++            environments = [root / "one", root / "two"]
++            for index, directory in enumerate(environments):
++                directory.mkdir()
++                (directory / "shared_dependency.py").write_text(f"VERSION = {index + 1}\n")
++            source = """# /// script
++# id = "isolated-plugin"
++# name = "Isolated"
++# ///
++import json
++import math
++import shared_dependency
++from swiftgram import BasePlugin, HookResult, HookStrategy
++class Plugin(BasePlugin):
++    def on_message(self, event):
++        previous = getattr(json, "plugin_state", "clean")
++        json.plugin_state = str(shared_dependency.VERSION)
++        text = f"{shared_dependency.VERSION}:{previous}:{math.factorial(3)}"
++        return HookResult(HookStrategy.MODIFY, text=text)
++"""
++
++            def request(index: int, *, unload: bool = False) -> str:
++                payload = {
++                    "operation": "unload" if unload else "hook",
++                    "id": "isolated-plugin",
++                    "account": "77",
++                    "source": source,
++                    "settings": {},
++                    "dependencyPath": str(environments[index]),
++                    "callback": "on_message",
++                    "event": {"kind": "message", "name": "message", "account": "77", "text": "x"},
++                }
++                return f"plugin-{index}\t{int(unload)}\t{json.dumps(payload)}\n"
++
++            calls = (
++                request(0)
++                + request(1)
++                + request(0)
++                + request(0, unload=True)
++                + request(0)
++                + request(1)
++            )
++            completed = subprocess.run(
++                [str(executable), sys.base_prefix, str(python / "SDK")],
++                input=calls,
++                capture_output=True,
++                text=True,
++                check=True,
++                timeout=20,
++            )
++            replies: list[dict[str, Any]] = [
++                json.loads(line) for line in completed.stdout.splitlines()
++            ]
++            self.assertFalse(any("failure" in reply for reply in replies), replies)
++            self.assertFalse(
++                any(root.rglob("__pycache__")), "Plugin imports must not mutate environments"
++            )
++            self.assertEqual(
++                [reply.get("result", {}).get("text") for reply in replies],
++                ["1:clean:6", "2:clean:6", "1:1:6", None, "1:clean:6", "2:2:6"],
++            )
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/Swiftgram/SGPython/Tests/test_dependencies.py b/Swiftgram/SGPython/Tests/test_dependencies.py
+new file mode 100644
+index 00000000..35fbd38b
+--- /dev/null
++++ b/Swiftgram/SGPython/Tests/test_dependencies.py
+@@ -0,0 +1,281 @@
++"""Offline contracts for review, resolution, artifact verification and installation."""
++
++from __future__ import annotations
++
++import hashlib
++import io
++import json
++import tempfile
++import unittest
++import zipfile
++from pathlib import Path
++from typing import Any
++from unittest.mock import patch
++
++import _swiftgram_dependencies as deps
++from _swiftgram_runtime import metadata
++from resolvelib.resolvers import ResolutionImpossible
++
++
++def script(requirements: list[str]) -> str:
++    return (
++        '# /// script\n# id = "dependency-test"\n# name = "Dependencies"\n'
++        f"# dependencies = {json.dumps(requirements)}\n# ///\n"
++        'raise RuntimeError("inspection must not run this")\n'
++    )
++
++
++class Index:
++    def __init__(self) -> None:
++        self.files: dict[str, bytes] = {}
++        self.projects: dict[str, list[dict[str, Any]]] = {}
++
++    def add(
++        self,
++        name: str,
++        version: str,
++        requirements: tuple[str, ...] = (),
++        *,
++        extras: tuple[str, ...] = (),
++        members: dict[str, str] | None = None,
++        tag: str = "py3-none-any",
++        sidecar: bool = True,
++        yanked: bool = False,
++    ) -> str:
++        filename = f"{name.replace('-', '_')}-{version}-{tag}.whl"
++        url = f"https://files.pythonhosted.org/packages/{filename}"
++        info = (
++            f"Metadata-Version: 2.3\nName: {name}\nVersion: {version}\nRequires-Python: >=3.12\n"
++            + "".join(f"Requires-Dist: {item}\n" for item in requirements)
++            + "".join(f"Provides-Extra: {item}\n" for item in extras)
++            + "\n"
++        ).encode()
++        stream = io.BytesIO()
++        with zipfile.ZipFile(stream, "w") as archive:
++            archive.writestr(f"{name}-{version}.dist-info/METADATA", info)
++            archive.writestr(
++                f"{name}-{version}.dist-info/WHEEL",
++                "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
++            )
++            for path, content in (
++                members or {f"{name}/__init__.py": f'VERSION = "{version}"'}
++            ).items():
++                archive.writestr(path, content)
++        self.files[url] = stream.getvalue()
++        self.files[url + ".metadata"] = info
++        self.projects.setdefault(name, []).append(
++            {
++                "filename": filename,
++                "url": url,
++                "requires-python": ">=3.12",
++                "yanked": yanked,
++                "hashes": {"sha256": hashlib.sha256(self.files[url]).hexdigest()},
++                "core-metadata": {"sha256": hashlib.sha256(info).hexdigest()} if sidecar else False,
++            }
++        )
++        return url
++
++    def fetch(self, url: str, limit: int, *, index: bool = False) -> bytes:
++        if index:
++            name = url.rstrip("/").rsplit("/", 1)[-1]
++            return json.dumps(
++                {"meta": {"api-version": "1.1"}, "files": self.projects.get(name, [])}
++            ).encode()
++        return self.files[url]
++
++
++class DependencyTests(unittest.TestCase):
++    def setUp(self) -> None:
++        self.temporary = tempfile.TemporaryDirectory()
++        self.root = Path(self.temporary.name) / "environments"
++        self.index = Index()
++        self.network = patch.object(deps, "fetch", self.index.fetch)
++        self.network.start()
++
++    def tearDown(self) -> None:
++        self.network.stop()
++        self.temporary.cleanup()
++        deps._plans.clear()
++
++    def prepare(self, requirements: list[str]) -> dict[str, Any]:
++        return deps.manage(
++            {"operation": "resolve", "source": script(requirements), "root": str(self.root)}
++        )
++
++    def install(self, plan: dict[str, Any]) -> Path:
++        reply = deps.manage(
++            {
++                "operation": "install",
++                "token": plan["token"],
++                "root": str(self.root),
++                "source": deps._plans[plan["token"]].source if plan["token"] in deps._plans else "",
++                "dependencies": plan["dependencies"],
++            }
++        )
++        return self.root / str(reply["environment"])
++
++    def test_backtracking_and_transitive_pins(self) -> None:
++        self.index.add("alpha", "2", ("shared>=2",))
++        self.index.add("alpha", "1", ("shared<2",))
++        self.index.add("shared", "2")
++        self.index.add("shared", "1")
++        self.index.add("beta", "1", ("shared<2",))
++        plan = self.prepare(["alpha", "beta"])
++        self.assertEqual(
++            [(item["name"], item["version"], item["direct"]) for item in plan["dependencies"]],
++            [("alpha", "1", True), ("beta", "1", True), ("shared", "1", False)],
++        )
++        self.assertFalse(self.root.exists())
++        directory = self.install(plan)
++        deps.verify(directory, plan["dependencies"])
++
++    def test_constraints_extras_and_markers(self) -> None:
++        self.index.add(
++            "alpha",
++            "1",
++            ('extra-package; extra == "fast"', 'ignored; sys_platform == "win32"'),
++            extras=("fast",),
++        )
++        self.index.add("extra-package", "1")
++        plan = self.prepare(["alpha[fast]~=1.0", 'unavailable; python_version < "3.0"'])
++        self.assertEqual(
++            [item["name"] for item in plan["dependencies"]], ["alpha", "extra-package"]
++        )
++        self.assertFalse(plan["dependencies"][1]["direct"])
++
++    def test_late_extra_merges_are_resolved(self) -> None:
++        self.index.add("alpha", "1", ('extra-package; extra == "fast"',), extras=("fast",))
++        self.index.add("zeta", "1", ("alpha[fast]",))
++        self.index.add("extra-package", "1")
++        plan = self.prepare(["alpha", "zeta"])
++        self.assertEqual(
++            [item["name"] for item in plan["dependencies"]], ["alpha", "extra-package", "zeta"]
++        )
++
++    def test_conflicts_and_native_only_releases_fail_before_install(self) -> None:
++        self.index.add("alpha", "1", ("shared<2",))
++        self.index.add("beta", "1", ("shared>=2",))
++        self.index.add("shared", "1")
++        self.index.add("shared", "2")
++        with self.assertRaises(ResolutionImpossible):
++            self.prepare(["alpha", "beta"])
++        self.index.add("native", "1", tag="cp314-cp314-manylinux_2_17_x86_64")
++        with self.assertRaises(ResolutionImpossible):
++            self.prepare(["native"])
++        self.assertFalse(self.root.exists())
++
++    def test_install_never_resolves_again_and_versions_are_private(self) -> None:
++        self.index.add("shared", "1")
++        self.index.add("shared", "2")
++        first = self.prepare(["shared==1"])
++        second = self.prepare(["shared==2"])
++        with patch.object(deps.Provider, "versions", side_effect=AssertionError("re-resolved")):
++            one = self.install(first)
++            two = self.install(second)
++        self.assertNotEqual(one, two)
++        self.assertIn('"1"', (one / "shared/__init__.py").read_text())
++        self.assertIn('"2"', (two / "shared/__init__.py").read_text())
++        (two / "shared/__init__.py").write_text("changed")
++        deps.verify(one, first["dependencies"])
++        with self.assertRaisesRegex(ValueError, "SHA-256"):
++            deps.verify(two, second["dependencies"])
++
++    def test_artifact_tampering_rolls_back_staging(self) -> None:
++        url = self.index.add("shared", "1")
++        plan = self.prepare(["shared"])
++        self.index.files[url] += b"tampered"
++        with self.assertRaisesRegex(ValueError, "SHA-256"):
++            self.install(plan)
++        self.assertEqual(list(self.root.iterdir()), [])
++
++    def test_metadata_sidecar_must_match_wheel(self) -> None:
++        url = self.index.add("shared", "1")
++        plan = self.prepare(["shared"])
++        # A valid artifact hash cannot excuse different reviewed metadata.
++        candidate = deps._plans[plan["token"]].candidates[0]
++        deps._plans[plan["token"]].provider.metadata[candidate] += b"Requires-Dist: hidden\n"
++        with self.assertRaisesRegex(ValueError, "metadata changed"):
++            self.install(plan)
++        self.assertEqual(list(self.root.iterdir()), [])
++        self.assertTrue(url)
++
++    def test_fallback_without_sidecar_and_cancelled_review(self) -> None:
++        self.index.add("shared", "1", sidecar=False)
++        plan = self.prepare(["shared"])
++        self.assertFalse(self.root.exists())
++        deps.manage({"operation": "discard", "token": plan["token"]})
++        with self.assertRaisesRegex(ValueError, "expired"):
++            self.install(plan)
++        self.assertFalse(self.root.exists())
++        self.install(self.prepare(["shared"]))
++
++    def test_expired_and_wrong_registry_reviews_fail(self) -> None:
++        plan = self.prepare([])
++        deps._plans[plan["token"]].created -= 1801
++        with self.assertRaisesRegex(ValueError, "expired"):
++            self.install(plan)
++        plan = self.prepare([])
++        with self.assertRaisesRegex(ValueError, "expired"):
++            deps.manage({"operation": "install", "token": plan["token"], "root": "/different"})
++        self.assertFalse(self.root.exists())
++
++    def test_review_is_bound_to_source_and_dependency_list(self) -> None:
++        self.index.add("shared", "1")
++        changes: list[dict[str, object]] = [{"source": script([])}, {"dependencies": []}]
++        for changed in changes:
++            plan = self.prepare(["shared"])
++            payload = {
++                "operation": "install",
++                "token": plan["token"],
++                "root": str(self.root),
++                "source": script(["shared"]),
++                "dependencies": plan["dependencies"],
++                **changed,
++            }
++            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "review"):
++                deps.manage(payload)
++            self.assertFalse(self.root.exists())
++
++    def test_archive_traversal_collisions_and_import_hooks_are_rejected(self) -> None:
++        for member in (
++            "../escaped.py",
++            "/absolute.py",
++            "pkg/../../escape.py",
++            "sitecustomize.py",
++            "swiftgram.py",
++            "evil.pth",
++            "pkg/extension.so",
++        ):
++            with self.subTest(member=member):
++                self.index = Index()
++                self.index.add("unsafe", "1", members={member: "bad"})
++                with patch.object(deps, "fetch", self.index.fetch):
++                    plan = self.prepare(["unsafe"])
++                    with self.assertRaises(ValueError):
++                        self.install(plan)
++                self.assertEqual(list(self.root.iterdir()), [])
++        self.index.add("alpha", "1", members={"same.py": "a"})
++        self.index.add("beta", "1", members={"SAME.py": "b"})
++        with (
++            patch.object(deps, "fetch", self.index.fetch),
++            self.assertRaisesRegex(ValueError, "collision"),
++        ):
++            self.install(self.prepare(["alpha", "beta"]))
++
++    def test_source_urls_and_python_constraints_are_validated(self) -> None:
++        for requirements in (["pkg @ https://example.org/pkg.whl"], ["not a requirement"]):
++            with self.subTest(requirements=requirements), self.assertRaises(ValueError):
++                metadata(script(requirements))
++        with self.assertRaisesRegex(ValueError, "requires Python"):
++            metadata(script([]).replace("# id =", '# requires-python = ">=4"\n# id ='))
++
++    def test_added_files_are_detected_on_activation(self) -> None:
++        plan = self.prepare([])
++        directory = self.install(plan)
++        (directory / "injected.py").write_text("bad")
++        with self.assertRaisesRegex(ValueError, "unapproved files"):
++            deps.verify(directory, [])
++
++
++if __name__ == "__main__":
++    unittest.main()
 diff --git a/Swiftgram/SGPython/Tests/test_runtime.py b/Swiftgram/SGPython/Tests/test_runtime.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..abf9867b0e9918578487e8850a49072444b1e5ca
+index 00000000..7262343a
 --- /dev/null
 +++ b/Swiftgram/SGPython/Tests/test_runtime.py
-@@ -0,0 +1,137 @@
+@@ -0,0 +1,149 @@
 +"""Behavioral checks for the bundled Python SDK and import contract."""
 +
 +from __future__ import annotations
@@ -1813,7 +3957,7 @@ index 0000000000000000000000000000000000000000..abf9867b0e9918578487e8850a490724
 +
 +from _swiftgram_runtime import handle, metadata
 +
-+HEADER = '__id__ = "python-test"\n__name__ = "Python test"\n'
++HEADER = '# /// script\n# id = "python-test"\n# name = "Python test"\n# ///\n'
 +
 +
 +class RuntimeTests(unittest.TestCase):
@@ -1873,19 +4017,31 @@ index 0000000000000000000000000000000000000000..abf9867b0e9918578487e8850a490724
 +            ):
 +                with (
 +                    self.subTest(declaration=declaration),
-+                    self.assertRaisesRegex(ValueError, "Third-party dependencies are unsupported"),
++                    self.assertRaisesRegex(ValueError, "PEP 723"),
 +                ):
 +                    metadata(HEADER + declaration)
 +
-+    def test_inline_dependency_metadata_rejected(self) -> None:
-+        with self.assertRaisesRegex(ValueError, "Inline script dependencies are unsupported"):
-+            metadata('# /// script\n# dependencies = ["requests"]\n# ///\n' + HEADER)
-+        # Text mentioning the format does not become a dependency declaration.
++    def test_pep723_metadata_and_types(self) -> None:
++        source = HEADER.replace("# id =", '# dependencies = ["requests>=2"]\n# id =')
++        self.assertEqual(metadata(source)["dependencies"], ["requests>=2"])
++        for declaration in (
++            'dependencies = "requests"',
++            "requires-python = 314",
++            "id = 17",
++            'unknown = "x"',
++        ):
++            with self.subTest(declaration=declaration), self.assertRaises(ValueError):
++                metadata(HEADER.replace("# ///\n", f"# {declaration}\n# ///\n"))
++        with self.assertRaisesRegex(ValueError, "exactly one"):
++            metadata(HEADER + HEADER)
++        with self.assertRaisesRegex(ValueError, "Unclosed"):
++            metadata(HEADER.removesuffix("# ///\n"))
++        # A script marker inside a string is not a metadata comment.
 +        self.assertEqual(metadata(HEADER + 'description = "# /// script"')["id"], "python-test")
 +
 +    def test_restored_sources_are_validated_before_execution(self) -> None:
 +        response = self.call("load", source=HEADER + '__requirements__ = ["requests"]', settings={})
-+        self.assertIn("Third-party dependencies are unsupported", str(response.get("failure")))
++        self.assertIn("PEP 723", str(response.get("failure")))
 +
 +    def test_missing_import_fails_without_installing_or_changing_search_paths(self) -> None:
 +        source = HEADER + "\nimport swiftgram_missing_third_party_package_987654321\n"
@@ -1942,10 +4098,10 @@ index 0000000000000000000000000000000000000000..abf9867b0e9918578487e8850a490724
 +    unittest.main()
 diff --git a/Swiftgram/SGPython/prepare_runtime.py b/Swiftgram/SGPython/prepare_runtime.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..44661a557c4f95e30a3979728ee6c8ce6c4fad79
+index 00000000..985615fd
 --- /dev/null
 +++ b/Swiftgram/SGPython/prepare_runtime.py
-@@ -0,0 +1,121 @@
+@@ -0,0 +1,128 @@
 +"""Package pinned CPython slices as signed-by-the-app Bazel framework imports."""
 +
 +from __future__ import annotations
@@ -1953,10 +4109,16 @@ index 0000000000000000000000000000000000000000..44661a557c4f95e30a3979728ee6c8ce
 +import plistlib
 +import shutil
 +import sys
++import zipfile
 +from pathlib import Path
 +
 +
 +def prepare(root: Path) -> None:
++    with zipfile.ZipFile(root / "certifi.whl") as certificates:
++        (root / "cacert.pem").write_bytes(certificates.read("certifi/cacert.pem"))
++        (root / "certifi-LICENSE").write_bytes(
++            certificates.read("certifi-2025.10.5.dist-info/licenses/LICENSE")
++        )
 +    python = root / "Python.xcframework"
 +    bundle = root / "SwiftgramPython.bundle"
 +    library = bundle / "lib/python3.14"
@@ -2049,6 +4211,7 @@ index 0000000000000000000000000000000000000000..44661a557c4f95e30a3979728ee6c8ce
 +load("@build_bazel_rules_apple//apple:apple.bzl", "apple_dynamic_xcframework_import")
 +load("@build_bazel_rules_apple//apple:resources.bzl", "apple_bundle_import")
 +package(default_visibility = ["//visibility:public"])
++exports_files(["packaging.whl", "resolvelib.whl", "cacert.pem", "certifi-LICENSE"])
 +apple_bundle_import(name = "stdlib", bundle_imports = glob(["SwiftgramPython.bundle/**"]))
 +apple_dynamic_xcframework_import(
 +    name = "Python",
@@ -2069,14 +4232,29 @@ index 0000000000000000000000000000000000000000..44661a557c4f95e30a3979728ee6c8ce
 +    prepare(Path(sys.argv[1]))
 diff --git a/Swiftgram/SGPython/python_repository.bzl b/Swiftgram/SGPython/python_repository.bzl
 new file mode 100644
-index 0000000000000000000000000000000000000000..92a75cf2cfdfbf0111aae754445e39151e4640c8
+index 00000000..cbff8385
 --- /dev/null
 +++ b/Swiftgram/SGPython/python_repository.bzl
-@@ -0,0 +1,13 @@
+@@ -0,0 +1,28 @@
 +def _python_ios_repository_impl(ctx):
 +    ctx.download_and_extract(
 +        url = "https://github.com/beeware/Python-Apple-support/releases/download/3.14-b10/Python-3.14-iOS-support.b10.tar.gz",
 +        sha256 = "200ef60eb67be0483ceb638daa9048f84f41a9a952707a5ad4c3198037c7b583",
++    )
++    ctx.download(
++        url = "https://files.pythonhosted.org/packages/20/12/38679034af332785aac8774540895e234f4d07f7545804097de4b666afd8/packaging-25.0-py3-none-any.whl",
++        sha256 = "29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484",
++        output = "packaging.whl",
++    )
++    ctx.download(
++        url = "https://files.pythonhosted.org/packages/e2/23/c941a0d0353681ca138489983c4309e0f5095dfd902e1357004f2357ddf2/resolvelib-1.2.1-py3-none-any.whl",
++        sha256 = "fb06b66c8da04172d9e72a21d7d06186d8919e32ae5ab5cdf5b9d920be805ac2",
++        output = "resolvelib.whl",
++    )
++    ctx.download(
++        url = "https://files.pythonhosted.org/packages/e4/37/af0d2ef3967ac0d6113837b44a4f0bfe1328c2b9763bd5b1744520e5cfed/certifi-2025.10.5-py3-none-any.whl",
++        sha256 = "0f212c2744a9bb6de0c56639a6f68afe01ecd92d91f14ae897c4fe7bbeeef0de",
++        output = "certifi.whl",
 +    )
 +    result = ctx.execute(["python3", str(ctx.path(ctx.attr.prepare_script)), str(ctx.path("."))])
 +    if result.return_code:
@@ -2087,7 +4265,7 @@ index 0000000000000000000000000000000000000000..92a75cf2cfdfbf0111aae754445e3915
 +    attrs = {"prepare_script": attr.label(default = Label("//Swiftgram/SGPython:prepare_runtime.py"), allow_single_file = True)},
 +)
 diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
-index a4f4355726997d56ec55e57816b0dc2da6e5051b..87e0e65ce8f7d2082263e95a9037cced3726bf22 100644
+index a4f43557..87e0e65c 100644
 --- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
 +++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
 @@ -15,10 +15,13 @@ import SGStrings
@@ -2133,10 +4311,10 @@ index a4f4355726997d56ec55e57816b0dc2da6e5051b..87e0e65ce8f7d2082263e95a9037cced
      func error(_ error: Error) { controller?.present(additionalError(context: context, error: error), in: .window(.root)) }
 diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..7267fb5847d0200af2d8678ef7d4df5f9b0464d2
+index 00000000..19f3b2e3
 --- /dev/null
 +++ b/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift
-@@ -0,0 +1,296 @@
+@@ -0,0 +1,454 @@
 +import AccountContext
 +import Display
 +import Foundation
@@ -2230,6 +4408,10 @@ index 0000000000000000000000000000000000000000..7267fb5847d0200af2d8678ef7d4df5f
 +                title: manifest.permissions.map { i18n("Additional.PluginPermission." + $0.rawValue, lang) }.joined(
 +                    separator: "\n")),
 +        ]
++        entries.append(
++            AdditionalFormEntry(
++                stableId: 4, section: 0, kind: .disclosure,
++                title: i18n("Additional.PluginDependencies", lang), value: String(record.dependencies?.count ?? 0)))
 +        if let error = current?.error {
 +            entries.append(AdditionalFormEntry(stableId: 3, section: 0, kind: .notice, title: error))
 +        }
@@ -2279,7 +4461,9 @@ index 0000000000000000000000000000000000000000..7267fb5847d0200af2d8678ef7d4df5f
 +    }
 +    model.action = { [weak model] id in
 +        guard let model else { return }
-+        if id == 50 {
++        if id == 4 {
++            model.push(pluginDependenciesController(context: context, dependencies: record.dependencies ?? []))
++        } else if id == 50 {
 +            do {
 +                guard
 +                    PluginRegistry.shared.records().first(where: { $0.manifest.id == manifest.id })?.manifest
@@ -2404,37 +4588,189 @@ index 0000000000000000000000000000000000000000..7267fb5847d0200af2d8678ef7d4df5f
 +    guard size <= 256 * 1024 else { throw SettingsError.invalid("Plugin exceeds 256 KB.") }
 +}
 +
-+private func pluginInstallController(context: AccountContext, data: Data, manifest: PluginManifest) -> ViewController {
++private func pluginMetadataEntries(_ manifest: PluginManifest, lang: String) -> [AdditionalFormEntry] {
++    let pythonVersion = manifest.requiresPython ?? ""
++    let fields = [
++        ("PluginName", manifest.name), ("PluginID", manifest.id), ("PluginVersion", manifest.version),
++        ("PluginAuthor", manifest.author ?? "—"), ("PluginDescription", manifest.description ?? "—"),
++        ("PluginPythonVersion", pythonVersion.isEmpty ? "—" : pythonVersion),
++    ]
++    return fields.enumerated().map { index, field in
++        AdditionalFormEntry(
++            stableId: index, section: 0, kind: .notice,
++            title: i18n("Additional." + field.0, lang) + "\n" + field.1)
++    }
++}
++
++private func pluginDependenciesController(context: AccountContext, dependencies: [PluginDependency]) -> ViewController {
 +    let model = AdditionalForm(context: context)
 +    model.entries = { lang in
-+        [
++        var entries = [
 +            AdditionalFormEntry(
 +                stableId: 0, section: 0, kind: .notice,
-+                title: manifest.name + " · " + manifest.version + "\n" + (manifest.author ?? "") + "\n"
-+                    + (manifest.description ?? "")),
-+            AdditionalFormEntry(
-+                stableId: 1, section: 1, kind: .notice,
-+                title: manifest.permissions.map { i18n("Additional.PluginPermission." + $0.rawValue, lang) }.joined(
-+                    separator: "\n")),
-+            AdditionalFormEntry(
-+                stableId: 2, section: 1, kind: .notice,
-+                title: i18n(
-+                    "Additional.PluginPythonNotice",
-+                    lang)),
-+            AdditionalFormEntry(stableId: 3, section: 2, kind: .action, title: i18n("Additional.PluginInstall", lang)),
++                title: i18n("Additional.PluginDependencyNotice", lang))
 +        ]
++        if dependencies.isEmpty {
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 1, section: 0, kind: .notice,
++                    title: i18n("Additional.PluginNoDependencies", lang)))
++        }
++        for (index, dependency) in dependencies.enumerated() {
++            let origin = i18n("Additional." + (dependency.direct ? "PluginDirect" : "PluginTransitive"), lang)
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: index * 2 + 10, section: Int32(index + 1), kind: .disclosure,
++                    title: dependency.name + " == " + dependency.version, value: "PyPI ↗"))
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: index * 2 + 11, section: Int32(index + 1), kind: .notice,
++                    title: origin + "\n" + dependency.filename + "\nSHA-256: " + dependency.sha256))
++        }
++        return entries
 +    }
-+    model.action = { [weak model] _ in
++    model.action = { id in
++        let index = (id - 10) / 2
++        guard id >= 10, dependencies.indices.contains(index), let url = dependencies[index].pypiURL else { return }
++        context.sharedContext.applicationBindings.openUrl(url.absoluteString)
++    }
++    let lang = context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }
++    return model.make(title: i18n("Additional.PluginDependencies", lang))
++}
++
++private final class PluginReviewState {
++    var review: PluginInstallation?
++    var resolving = false
++    var installing = false
++    var declined = false
++    var error: String?
++
++    deinit {
++        if let review {
++            DispatchQueue.global(qos: .utility).async { PluginRegistry.shared.discardInstallation(review) }
++        }
++    }
++}
++
++private func pluginInstallController(context: AccountContext, data: Data, manifest: PluginManifest) -> ViewController {
++    let model = AdditionalForm(context: context)
++    let state = PluginReviewState()
++    let resolve: () -> Void = { [weak model] in
 +        guard let model else { return }
-+        do {
-+            try PluginRegistry.shared.install(data)
-+            model.controller?.navigationController?.popViewController(animated: true)
-+        } catch { model.error(error) }
++        guard !state.resolving, !state.installing, !state.declined else { return }
++        state.resolving = true
++        state.error = nil
++        model.refresh()
++        DispatchQueue.global(qos: .userInitiated).async { [weak model] in
++            let result = Result { try PluginRegistry.shared.prepareInstallation(data) }
++            DispatchQueue.main.async {
++                state.resolving = false
++                guard let model, !state.declined else {
++                    if case .success(let review) = result {
++                        DispatchQueue.global(qos: .utility).async { PluginRegistry.shared.discardInstallation(review) }
++                    }
++                    return
++                }
++                switch result {
++                case .success(let review): state.review = review
++                case .failure(let error): state.error = error.localizedDescription
++                }
++                model.refresh()
++            }
++        }
 +    }
-+    return model.make(title: manifest.name)
++    model.entries = { lang in
++        var entries = pluginMetadataEntries(manifest, lang: lang)
++        let permissions = manifest.permissions.map { i18n("Additional.PluginPermission." + $0.rawValue, lang) }.joined(
++            separator: "\n")
++        entries.append(
++            AdditionalFormEntry(
++                stableId: 10, section: 1, kind: .notice,
++                title: i18n("Additional.PluginPermissions", lang) + "\n" + (permissions.isEmpty ? "—" : permissions)))
++        entries.append(
++            AdditionalFormEntry(
++                stableId: 11, section: 1, kind: .notice,
++                title: i18n("Additional.PluginPythonNotice", lang)))
++        if let previous = PluginRegistry.shared.records().first(where: { $0.manifest.id == manifest.id }) {
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 12, section: 1, kind: .notice,
++                    title: i18n("Additional.PluginUpdate", lang) + ": " + previous.manifest.version + " → "
++                        + manifest.version))
++        }
++        if state.resolving || state.installing {
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 20, section: 2, kind: .notice,
++                    title: i18n("Additional." + (state.installing ? "PluginInstalling" : "PluginResolving"), lang)))
++        } else if let review = state.review {
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 21, section: 2, kind: .disclosure,
++                    title: i18n("Additional.PluginDependencies", lang), value: String(review.dependencies.count)))
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 22, section: 2, kind: .notice,
++                    title: i18n(
++                        review.dependencies.isEmpty
++                            ? "Additional.PluginNoDependencies" : "Additional.PluginDependencyNotice", lang)))
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 30, section: 3, kind: .action,
++                    title: i18n("Additional.PluginInstall", lang)))
++        } else if let error = state.error {
++            entries.append(AdditionalFormEntry(stableId: 23, section: 2, kind: .notice, title: error))
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 24, section: 2, kind: .action,
++                    title: i18n("Additional.PluginResolveAgain", lang)))
++        }
++        if !state.installing {
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: 31, section: 3, kind: .action,
++                    title: i18n("Additional.PluginDecline", lang)))
++        }
++        return entries
++    }
++    model.action = { [weak model] id in
++        guard let model, !state.installing else { return }
++        if id == 21, let review = state.review {
++            model.push(pluginDependenciesController(context: context, dependencies: review.dependencies))
++        } else if id == 24 {
++            resolve()
++        } else if id == 31 {
++            state.declined = true
++            if let review = state.review {
++                state.review = nil
++                DispatchQueue.global(qos: .utility).async { PluginRegistry.shared.discardInstallation(review) }
++            }
++            model.controller?.navigationController?.popViewController(animated: true)
++        } else if id == 30, let review = state.review {
++            state.review = nil
++            state.installing = true
++            model.refresh()
++            DispatchQueue.global(qos: .userInitiated).async { [weak model] in
++                let result = Result { try PluginRegistry.shared.install(review) }
++                DispatchQueue.main.async {
++                    state.installing = false
++                    guard let model else { return }
++                    switch result {
++                    case .success: model.controller?.navigationController?.popViewController(animated: true)
++                    case .failure(let error):
++                        state.error = error.localizedDescription
++                        model.refresh()
++                    }
++                }
++            }
++        }
++    }
++    let controller = model.make(title: manifest.name)
++    resolve()
++    return controller
 +}
 diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-index 445502d00093a092ea8131dbc3cd8980c7e16ba1..e7c7ccdf6999869c3471720bde3860f3d274c3a0 100644
+index 445502d0..e7c7ccdf 100644
 --- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
 +++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
 @@ -143,7 +143,7 @@ private enum SGSliderSetting: String {
@@ -2464,10 +4800,10 @@ index 445502d00093a092ea8131dbc3cd8980c7e16ba1..e7c7ccdf6999869c3471720bde3860f3
              pushControllerImpl?(additionalDiagnosticsController(context: context))
              case .languageSettings:
 diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
-index f8001ad7f927da76a2cbb13902964399aeb6f270..d83f3e35dbbc43c2e0e6e0332b1b6be8f63c2712 100644
+index f8001ad7..f0355343 100644
 --- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
 +++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
-@@ -335,3 +335,20 @@
+@@ -335,3 +335,44 @@
  
  "Additional.saveDisappearing" = "Save disappearing media";
  "Additional.DisappearingNotice" = "Also keep observed timed and view-once photos, videos, and voice messages when saving deleted messages. Media is downloaded while available. Secret chats are excluded.";
@@ -2475,7 +4811,7 @@ index f8001ad7f927da76a2cbb13902964399aeb6f270..d83f3e35dbbc43c2e0e6e0332b1b6be8
 +"Additional.PluginAccount" = "Active account for plugin settings";
 +"Additional.PluginSafeMode" = "Safe mode (pause all plugins)";
 +"Additional.PluginImport" = "Import plugin";
-+"Additional.PluginFormat" = "Python .py / .plugin files. Enable each plugin separately for each account. Android and Java APIs require porting.";
++"Additional.PluginFormat" = "Import a Python source file with PEP 723 metadata. Review plugin details and exact dependencies before installation.";
 +"Additional.PluginEnabled" = "Enabled";
 +"Additional.PluginDisabled" = "Disabled";
 +"Additional.PluginFailed" = "Failed";
@@ -2487,12 +4823,36 @@ index f8001ad7f927da76a2cbb13902964399aeb6f270..d83f3e35dbbc43c2e0e6e0332b1b6be8
 +"Additional.PluginPermission.outgoingMessages" = "Change or block outgoing cloud-message text";
 +"Additional.PluginPermission.network" = "Block account requests and change displayed request errors";
 +"Additional.PluginPermission.menus" = "Add copy and information actions to native menus";
-+"Additional.PluginPythonNotice" = "Python plugins execute real code inside Swiftgram and can access app data and the network. Permissions describe SDK access, not a Python sandbox. Install only source you trust. New plugins are disabled until enabled for an account.";
++"Additional.PluginPythonNotice" = "Trusted Python code runs inside Swiftgram with filesystem and network access. Each plugin has a separate dependency environment and interpreter; this is not a security sandbox. Only compatible pure Python wheels from PyPI are supported.";
++
++"Additional.PluginName" = "Name";
++"Additional.PluginID" = "Plugin ID";
++"Additional.PluginVersion" = "Version";
++"Additional.PluginAuthor" = "Author";
++"Additional.PluginDescription" = "Description";
++"Additional.PluginPythonVersion" = "Requires Python";
++"Additional.PluginPermissions" = "Requested permissions";
++"Additional.PluginDependencies" = "Dependencies";
++"Additional.PluginDependencyNotice" = "The complete list includes direct and transitive dependencies. Installation uses these exact versions and SHA-256 hashes from PyPI in a private plugin environment. Tap a package to open its PyPI release.";
++"Additional.PluginNoDependencies" = "No third-party packages will be installed.";
++"Additional.PluginDirect" = "Direct dependency";
++"Additional.PluginTransitive" = "Transitive dependency";
++"Additional.PluginResolving" = "Resolving dependencies from PyPI…";
++"Additional.PluginInstalling" = "Installing the reviewed packages…";
++"Additional.PluginResolveAgain" = "Resolve and review again";
++"Additional.PluginDecline" = "Decline installation";
++"Additional.PluginUpdate" = "Updates installed version";
++
++"Additional.PluginPermission.readMessages" = "Read detailed messages and retrieve messages by ID";
++"Additional.PluginPermission.sendMessages" = "Send and reply in accessible cloud chats";
++"Additional.PluginPermission.editMessages" = "Edit your message text and captions";
++"Additional.PluginPermission.downloadMedia" = "Download ordinary cloud attachments";
++"Additional.PluginPermission.sendMedia" = "Send photos, videos, and documents";
 diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
-index e7e25e87e151f8018f6036ddc668ad5466d07818..b455331413f0c626f1c90a63a6c94bff4ede60da 100644
+index e7e25e87..518a2b65 100644
 --- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
 +++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
-@@ -330,3 +330,20 @@
+@@ -330,3 +330,44 @@
  
  "Additional.saveDisappearing" = "Сохранять исчезающие медиа";
  "Additional.DisappearingNotice" = "При сохранении удалённых сообщений сохранять также полученные фото, видео и голосовые сообщения с таймером или однократным просмотром. Медиа загружаются, пока доступны. Секретные чаты исключены.";
@@ -2500,7 +4860,7 @@ index e7e25e87e151f8018f6036ddc668ad5466d07818..b455331413f0c626f1c90a63a6c94bff
 +"Additional.PluginAccount" = "Аккаунт для настроек плагинов";
 +"Additional.PluginSafeMode" = "Безопасный режим (приостановить плагины)";
 +"Additional.PluginImport" = "Импортировать плагин";
-+"Additional.PluginFormat" = "Python-файлы .py / .plugin. Включайте плагины отдельно для каждого аккаунта. Android- и Java-API требуют адаптации.";
++"Additional.PluginFormat" = "Импортируйте Python-файл с метаданными PEP 723. Проверьте информацию о плагине и точные зависимости перед установкой.";
 +"Additional.PluginEnabled" = "Включён";
 +"Additional.PluginDisabled" = "Выключен";
 +"Additional.PluginFailed" = "Ошибка";
@@ -2512,9 +4872,33 @@ index e7e25e87e151f8018f6036ddc668ad5466d07818..b455331413f0c626f1c90a63a6c94bff
 +"Additional.PluginPermission.outgoingMessages" = "Изменять или блокировать исходящие облачные сообщения";
 +"Additional.PluginPermission.network" = "Блокировать запросы аккаунта и изменять текст ошибок";
 +"Additional.PluginPermission.menus" = "Добавлять действия копирования и информации в меню";
-+"Additional.PluginPythonNotice" = "Python-плагины исполняют код внутри Swiftgram и могут обращаться к данным приложения и сети. Разрешения описывают SDK, а не изоляцию Python. Устанавливайте только код, которому доверяете. Новые плагины выключены до включения для аккаунта.";
++"Additional.PluginPythonNotice" = "Доверенный Python-код работает внутри Swiftgram с доступом к файлам и сети. У каждого плагина отдельные зависимости и интерпретатор; это не защитная песочница. Поддерживаются только совместимые pure Python wheels из PyPI.";
++
++"Additional.PluginName" = "Название";
++"Additional.PluginID" = "ID плагина";
++"Additional.PluginVersion" = "Версия";
++"Additional.PluginAuthor" = "Автор";
++"Additional.PluginDescription" = "Описание";
++"Additional.PluginPythonVersion" = "Требуется Python";
++"Additional.PluginPermissions" = "Запрашиваемые разрешения";
++"Additional.PluginDependencies" = "Зависимости";
++"Additional.PluginDependencyNotice" = "Полный список включает прямые и транзитивные зависимости. Установка использует эти версии и SHA-256 из PyPI в отдельном окружении плагина. Нажмите на пакет, чтобы открыть его версию на PyPI.";
++"Additional.PluginNoDependencies" = "Сторонние пакеты не будут установлены.";
++"Additional.PluginDirect" = "Прямая зависимость";
++"Additional.PluginTransitive" = "Транзитивная зависимость";
++"Additional.PluginResolving" = "Разрешение зависимостей из PyPI…";
++"Additional.PluginInstalling" = "Установка проверенных пакетов…";
++"Additional.PluginResolveAgain" = "Разрешить и проверить заново";
++"Additional.PluginDecline" = "Отказаться от установки";
++"Additional.PluginUpdate" = "Обновление установленной версии";
++
++"Additional.PluginPermission.readMessages" = "Читать подробные данные сообщений и получать сообщения по ID";
++"Additional.PluginPermission.sendMessages" = "Отправлять сообщения и ответы в доступных облачных чатах";
++"Additional.PluginPermission.editMessages" = "Редактировать текст и подписи ваших сообщений";
++"Additional.PluginPermission.downloadMedia" = "Скачивать обычные облачные вложения";
++"Additional.PluginPermission.sendMedia" = "Отправлять фото, видео и документы";
 diff --git a/Telegram/BUILD b/Telegram/BUILD
-index ebe01b2f693d93f247670fb20fccc15cb089b132..1659da3b335d85c050ab284216d6f6bfd69ef551 100644
+index ebe01b2f..1659da3b 100644
 --- a/Telegram/BUILD
 +++ b/Telegram/BUILD
 @@ -2045,6 +2045,8 @@ ios_application(
@@ -2526,8 +4910,33 @@ index ebe01b2f693d93f247670fb20fccc15cb089b132..1659da3b335d85c050ab284216d6f6bf
          #":DefaultAppIcon",
      ],
      frameworks = [
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index c94692ea..fffa55cc 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1593,6 +1593,12 @@ public class Account {
+         self.restartConfigurationUpdates()
+         
+         self.automaticCacheEvictionContext = AutomaticCacheEvictionContext(postbox: postbox, accountManager: accountManager)
++        if !supplementary {
++            PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: AdditionalPluginActionAdapter(account: self))
++            self.managedOperationsDisposable.add((self.loggedOut |> filter { $0 } |> take(1)).start(next: { _ in
++                PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: nil)
++            }))
++        }
+         
+         /*#if DEBUG
+         self.managedOperationsDisposable.add(debugFetchAllStickers(account: self).start(completed: {
+@@ -1602,6 +1608,7 @@ public class Account {
+     }
+     
+     deinit {
++        if !self.supplementary { PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(self.peerId), adapter: nil) }
+         self.managedContactsDisposable.dispose()
+         self.managedStickerPacksDisposable.dispose()
+         self.managedServiceViewsDisposable.dispose()
 diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
-index c7c1040610143c006cae764602789a840426b660..299b9cc23810016d29f38d388d969ab3a5436108 100644
+index c7c10406..299b9cc2 100644
 --- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
 +++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
 @@ -131,7 +131,9 @@ final class AdditionalMessageProcessor {
@@ -2541,12 +4950,346 @@ index c7c1040610143c006cae764602789a840426b660..299b9cc23810016d29f38d388d969ab3
      }
  }
  
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
+new file mode 100644
+index 00000000..24d3c2ac
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
+@@ -0,0 +1,328 @@
++import AVFoundation
++import Foundation
++import ImageIO
++import Postbox
++import SGAdditionalCore
++import SwiftSignalKit
++import UIKit
++
++private let pluginOrigins = Atomic<(Set<Int64>, Set<MessageId>)>(value: ([], []))
++
++func additionalPluginCorrelation() -> Int64 {
++    let value = Int64.random(in: Int64.min ... -1)
++    _ = pluginOrigins.modify { current in
++        var current = current
++        current.0.insert(value)
++        return current
++    }
++    return value
++}
++
++func additionalPluginIsOrigin(_ correlation: Int64?) -> Bool {
++    guard let correlation else { return false }
++    return pluginOrigins.with { $0.0.contains(correlation) }
++}
++
++public func additionalPluginIsOrigin(_ message: MessageId) -> Bool {
++    pluginOrigins.with { $0.1.contains(message) }
++}
++
++private func pluginPeer(_ chat: String) -> PeerId? {
++    let parts = chat.split(separator: ":")
++    guard parts.count == 2, let value = Int64(parts[1]), value > 0 else { return nil }
++    let namespace: Int32
++    switch parts[0] {
++    case "user": namespace = Namespaces.Peer.CloudUser
++    case "chat": namespace = Namespaces.Peer.CloudGroup
++    case "channel": namespace = Namespaces.Peer.CloudChannel
++    default: return nil
++    }
++    return PeerId(namespace: namespace, id: ._internalFromInt64Value(value))
++}
++
++public func additionalPluginSnapshot(
++    id: Int32?, sender: PeerId?, timestamp: Int32?, thread: Int64?, text: String, attributes: [MessageAttribute],
++    media: [Media]
++) -> PluginMessage {
++    let entities = additionalRevision(text: text, timestamp: timestamp ?? 0, attributes: attributes).entities.compactMap
++    { entity -> PluginTextEntity? in
++        let kind = String(entity.kind.dropFirst("messageEntity".count))
++        guard ["Bold", "Italic", "Underline", "Strike", "Spoiler", "Code", "Pre", "TextUrl"].contains(kind) else {
++            return nil
++        }
++        return PluginTextEntity(kind: kind, offset: entity.offset, length: entity.length, value: entity.value)
++    }
++    let attachments = media.enumerated().compactMap { index, value -> PluginAttachment? in
++        if let file = value as? TelegramMediaFile {
++            return PluginAttachment(
++                id: String(index), kind: file.isVideo ? "video" : "document", filename: file.fileName,
++                mimeType: file.mimeType, size: file.size)
++        }
++        if value is TelegramMediaImage { return PluginAttachment(id: String(index), kind: "photo") }
++        return nil
++    }
++    let reply = attributes.compactMap { ($0 as? ReplyMessageAttribute)?.messageId.id }.first
++    return PluginMessage(
++        id: id, sender: sender.flatMap(additionalChatKey), timestamp: timestamp, replyTo: reply, threadID: thread,
++        text: text, entities: entities, attachments: attachments)
++}
++
++final class AdditionalPluginActionAdapter: PluginActionAdapter {
++    private weak var account: Account?
++    init(account: Account) { self.account = account }
++
++    func execute(
++        _ action: PluginAction, directory: URL, progress: @escaping (Double) -> Void,
++        completion: @escaping (PluginActionResult) -> Void
++    ) -> () -> Void {
++        guard let account, let peer = pluginPeer(action.chat ?? "") else {
++            completion(.init(id: action.id, status: "failed", error: "unavailableTarget"))
++            return {}
++        }
++        let disposables = DisposableSet()
++        let cancelled = Atomic<Bool>(value: false)
++        let fail: (String) -> Void = { completion(.init(id: action.id, status: "failed", error: $0)) }
++        let messageID = MessageId(peerId: peer, namespace: Namespaces.Message.Cloud, id: action.messageID ?? 0)
++        if action.operation == "sendMessage" || action.operation == "sendMedia" {
++            do {
++                let media: AnyMediaReference?
++                if action.operation == "sendMedia" {
++                    media = try upload(action, account: account, directory: directory)
++                } else {
++                    media = nil
++                }
++                let attributes: [MessageAttribute] = [TextEntitiesMessageAttribute(entities: textEntities(action))]
++                let reply = action.replyTo.map {
++                    EngineMessageReplySubject(
++                        messageId: MessageId(peerId: peer, namespace: Namespaces.Message.Cloud, id: $0), quote: nil,
++                        innerSubject: nil)
++                }
++                let correlation = additionalPluginCorrelation()
++                let message = EnqueueMessage.message(
++                    text: action.text ?? "", attributes: attributes, inlineStickers: [:], mediaReference: media,
++                    threadId: action.threadID, replyToMessageId: reply, replyToStoryId: nil, localGroupingKey: nil,
++                    correlationId: correlation, bubbleUpEmojiOrStickersets: nil)
++                disposables.add(
++                    enqueueMessages(account: account, peerId: peer, messages: [message]).start(next: { ids in
++                        let localIDs = ids.compactMap { $0 }
++                        _ = pluginOrigins.modify { current in
++                            var current = current
++                            current.1.formUnion(localIDs)
++                            return current
++                        }
++                        completion(.init(id: action.id, status: "accepted", messageIDs: localIDs.map { $0.id }))
++                        guard let localID = localIDs.first else {
++                            fail("unavailableTarget")
++                            return
++                        }
++                        disposables.add(
++                            account.pendingMessageManager.pendingMessageStatus(localID).start(next: { status, failure in
++                                if failure != nil {
++                                    fail("telegramRestriction")
++                                } else if let status {
++                                    progress(Double(status.progress.progress))
++                                } else if let sent = account.pendingMessageManager.synchronouslyLookupCorrelationId(
++                                    correlationId: correlation)
++                                {
++                                    _ = pluginOrigins.modify { current in
++                                        var current = current
++                                        current.1.insert(sent)
++                                        return current
++                                    }
++                                    completion(.init(id: action.id, status: "completed", messageIDs: [sent.id]))
++                                }
++                            }))
++                    }))
++            } catch { fail("invalidContent") }
++        } else {
++            disposables.add(
++                TelegramEngine(account: account).messages.downloadMessage(messageId: messageID).start(next: {
++                    [weak self] value in
++                    guard let self, let message = value?._asMessage() else {
++                        fail("unavailableTarget")
++                        return
++                    }
++                    switch action.operation {
++                    case "getMessage":
++                        completion(
++                            .init(
++                                id: action.id, status: "completed",
++                                message: additionalPluginSnapshot(
++                                    id: message.id.id, sender: message.author?.id, timestamp: message.timestamp,
++                                    thread: message.threadId, text: message.text, attributes: message.attributes,
++                                    media: message.media)))
++                    case "editMessage":
++                        guard message.author?.id == account.peerId else {
++                            fail("permissionDenied")
++                            return
++                        }
++                        disposables.add(
++                            TelegramEngine(account: account).messages.requestEditMessage(
++                                messageId: messageID, text: action.text ?? "", media: .keep,
++                                entities: TextEntitiesMessageAttribute(entities: self.textEntities(action)),
++                                richText: nil, inlineStickers: [:]
++                            ).start(
++                                next: { result in
++                                    switch result {
++                                    case .progress(let value): progress(Double(value))
++                                    case .done(let success):
++                                        if success {
++                                            completion(.init(id: action.id, status: "completed"))
++                                        } else {
++                                            fail("telegramRestriction")
++                                        }
++                                    }
++                                }, error: { _ in fail("telegramRestriction") }))
++                    case "downloadMedia":
++                        self.download(
++                            action, message: message, account: account, directory: directory, disposables: disposables,
++                            cancelled: cancelled,
++                            progress: progress, completion: completion)
++                    default: fail("invalidContent")
++                    }
++                }))
++        }
++        return {
++            _ = cancelled.swap(true)
++            disposables.dispose()
++        }
++    }
++
++    private func textEntities(_ action: PluginAction) -> [MessageTextEntity] {
++        let revision = MessageRevision(
++            text: action.text ?? "",
++            entities: (action.entities ?? []).map {
++                RevisionEntity(kind: "messageEntity" + $0.kind, offset: $0.offset, length: $0.length, value: $0.value)
++            }, messageDate: 0, editDate: nil)
++        return additionalTextEntities(revision)
++    }
++
++    private func upload(_ action: PluginAction, account: Account, directory: URL) throws -> AnyMediaReference {
++        let snapshot = try PluginFiles.snapshot(path: action.path ?? "", directory: directory)
++        defer { try? FileManager.default.removeItem(at: snapshot) }
++        let resource = LocalFileMediaResource(fileId: Int64.random(in: 1...Int64.max))
++        var data = try Data(contentsOf: snapshot, options: .mappedIfSafe)
++        if action.mediaKind == "photo" {
++            guard let source = CGImageSourceCreateWithData(data as CFData, nil),
++                let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
++                let width = properties[kCGImagePropertyPixelWidth] as? Int,
++                let height = properties[kCGImagePropertyPixelHeight] as? Int,
++                width > 0, height > 0, width <= 10000, height <= 10000, width * height <= 40_000_000,
++                let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.9)
++            else { throw SettingsError.invalid("Invalid photo.") }
++            data = jpeg
++            account.postbox.mediaBox.storeResourceData(resource.id, data: data)
++            return .standalone(
++                media: TelegramMediaImage(
++                    imageId: MediaId(namespace: Namespaces.Media.LocalImage, id: resource.fileId),
++                    representations: [
++                        TelegramMediaImageRepresentation(
++                            dimensions: PixelDimensions(width: Int32(width), height: Int32(height)), resource: resource,
++                            progressiveSizes: [], immediateThumbnailData: nil, hasVideo: false, isPersonal: false)
++                    ], immediateThumbnailData: nil, reference: nil, partialReference: nil, flags: []))
++        }
++        var attributes: [TelegramMediaFileAttribute] = [
++            .FileName(fileName: URL(fileURLWithPath: action.path ?? "file").lastPathComponent)
++        ]
++        var mimeType = "application/octet-stream"
++        if action.mediaKind == "video" {
++            let asset = AVURLAsset(url: snapshot)
++            guard let track = asset.tracks(withMediaType: .video).first, asset.duration.seconds.isFinite,
++                asset.duration.seconds > 0
++            else { throw SettingsError.invalid("Invalid video.") }
++            let size = track.naturalSize.applying(track.preferredTransform)
++            guard abs(size.width) <= 10000, abs(size.height) <= 10000 else {
++                throw SettingsError.invalid("Invalid video size.")
++            }
++            attributes.append(
++                .Video(
++                    duration: asset.duration.seconds,
++                    size: PixelDimensions(width: Int32(abs(size.width)), height: Int32(abs(size.height))), flags: [],
++                    preloadSize: nil, coverTime: nil, videoCodec: nil))
++            mimeType = "video/mp4"
++        }
++        account.postbox.mediaBox.storeResourceData(resource.id, data: data)
++        return .standalone(
++            media: TelegramMediaFile(
++                fileId: MediaId(namespace: Namespaces.Media.LocalFile, id: resource.fileId), partialReference: nil,
++                resource: resource,
++                previewRepresentations: [], videoThumbnails: [], immediateThumbnailData: nil, mimeType: mimeType,
++                size: Int64(data.count), attributes: attributes, alternativeRepresentations: []))
++    }
++
++    private func download(
++        _ action: PluginAction, message: Message, account: Account, directory: URL, disposables: DisposableSet,
++        cancelled: Atomic<Bool>,
++        progress: @escaping (Double) -> Void, completion: @escaping (PluginActionResult) -> Void
++    ) {
++        let fail: (String) -> Void = { completion(.init(id: action.id, status: "failed", error: $0)) }
++        guard !message.flags.contains(.CopyProtected), !message.containsSecretMedia,
++            !message.attributes.contains(where: {
++                $0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute
++            }),
++            message.peers[message.id.peerId]?.isCopyProtectionEnabled != true,
++            let index = Int(action.attachmentID ?? ""), message.media.indices.contains(index)
++        else {
++            fail("permissionDenied")
++            return
++        }
++        let media = message.media[index]
++        let resource: MediaResource
++        if let file = media as? TelegramMediaFile {
++            guard let size = file.size, size <= PluginFiles.maximumFileSize else {
++                fail("quotaExceeded")
++                return
++            }
++            resource = file.resource
++        } else if let image = media as? TelegramMediaImage,
++            let representation = image.representations.max(by: { $0.dimensions.width < $1.dimensions.width })
++        {
++            resource = representation.resource
++        } else {
++            fail("invalidContent")
++            return
++        }
++        disposables.add(
++            (account.postbox.transaction { transaction -> Bool in
++                guard let cached = transaction.getPeerCachedData(peerId: message.id.peerId) as? CachedUserData else {
++                    return true
++                }
++                return !cached.flags.contains(.copyProtectionEnabled)
++                    && !cached.flags.contains(.myCopyProtectionEnabled)
++            }).start(next: { allowed in
++                guard allowed else {
++                    fail("permissionDenied")
++                    return
++                }
++                let reference = MediaResourceReference.media(
++                    media: .message(message: MessageReference(message), media: media), resource: resource)
++                disposables.add(
++                    fetchedMediaResource(
++                        mediaBox: account.postbox.mediaBox, userLocation: .peer(message.id.peerId),
++                        userContentType: .other, reference: reference
++                    ).start(error: { _ in fail("unavailableTarget") }))
++                disposables.add(
++                    account.postbox.mediaBox.resourceStatus(resource).start(next: { status in
++                        if case .Fetching(_, let value) = status { progress(Double(value)) }
++                    }))
++                disposables.add(
++                    (account.postbox.mediaBox.resourceData(resource)).start(next: {
++                        data in
++                        guard data.size <= PluginFiles.maximumFileSize else {
++                            fail("quotaExceeded")
++                            return
++                        }
++                        guard data.complete, !cancelled.with({ $0 }) else { return }
++                        do {
++                            let path = try PluginFiles.importDownload(
++                                source: URL(fileURLWithPath: data.path), directory: directory)
++                            if cancelled.with({ $0 }) {
++                                try? FileManager.default.removeItem(at: path)
++                                return
++                            }
++                            completion(.init(id: action.id, status: "completed", path: path.path))
++                        } catch { fail("quotaExceeded") }
++                    }))
++            }))
++    }
++}
 diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..a351b01c6c8e80f281482f631ad34a68cc5819eb
+index 00000000..ff0c14f4
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
-@@ -0,0 +1,57 @@
+@@ -0,0 +1,63 @@
 +import Foundation
 +import MtProtoKit
 +import Postbox
@@ -2558,8 +5301,11 @@ index 0000000000000000000000000000000000000000..a351b01c6c8e80f281482f631ad34a68
 +        let chat = additionalChatKey(id.peerId), id.namespace == Namespaces.Message.Cloud,
 +        previous?.text != message.text
 +    else { return message }
-+    let event = PluginEvent(
++    var event = PluginEvent(
 +        kind: .message, name: "message", account: additionalAccountKey(account), chat: chat, text: message.text)
++    event.message = additionalPluginSnapshot(
++        id: id.id, sender: message.authorId, timestamp: message.timestamp, thread: message.threadId, text: message.text,
++        attributes: message.attributes, media: message.media)
 +    guard let result = PluginRegistry.shared.dispatch(event) else { return nil }
 +    guard result.text != message.text else { return message }
 +    // Text offsets and inline emoji entities refer to the original UTF-16 text.
@@ -2581,8 +5327,11 @@ index 0000000000000000000000000000000000000000..a351b01c6c8e80f281482f631ad34a68
 +            let
 +                replyToStoryId, let localGroupingKey, let correlationId, let bubbleUpEmojiOrStickersets) = message
 +    else { return message }
-+    let event = PluginEvent(
++    var event = PluginEvent(
 +        kind: .sendMessage, name: "send_message", account: additionalAccountKey(account), chat: chat, text: text)
++    event.pluginOrigin = additionalPluginIsOrigin(correlationId)
++    event.message = additionalPluginSnapshot(
++        id: nil, sender: account, timestamp: nil, thread: threadId, text: text, attributes: attributes, media: [])
 +    guard let result = PluginRegistry.shared.dispatch(event) else { return nil }
 +    guard result.text != text else { return message }
 +    return .message(
@@ -2605,7 +5354,7 @@ index 0000000000000000000000000000000000000000..a351b01c6c8e80f281482f631ad34a68
 +    return MTRpcError(errorCode: error.errorCode, errorDescription: description)
 +}
 diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
-index e8f3012ff53f7f3647de1fbaeae0ba073ceb228c..0badd1589fc6bf3ecc7051e75ba95205382749fa 100644
+index e8f3012f..0badd158 100644
 --- a/submodules/TelegramCore/Sources/Network/Network.swift
 +++ b/submodules/TelegramCore/Sources/Network/Network.swift
 @@ -1264,7 +1264,12 @@ public final class Network: NSObject {
@@ -2669,7 +5418,7 @@ index e8f3012ff53f7f3647de1fbaeae0ba073ceb228c..0badd1589fc6bf3ecc7051e75ba95205
                  }
              )
 diff --git a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
-index 8ae2e4e7a570f183cb9bb2b46cf54be20a69c2bd..6bbe51c7b724579a80f78ade11f981fe388e5f95 100644
+index 8ae2e4e7..6bbe51c7 100644
 --- a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
 +++ b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
 @@ -539,6 +539,7 @@ private func generateEphemeralOutgoingRandomId() -> Int64 {
@@ -2704,15 +5453,17 @@ index 8ae2e4e7a570f183cb9bb2b46cf54be20a69c2bd..6bbe51c7b724579a80f78ade11f981fe
       * If it is a support account, mark messages as read here as they are
       * not marked as read when chat is opened.
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-index 8383ea1b3a3d24119df114aaa06a8e5b11caa606..89bdca456c68a05314f8afebf037c02d6540725c 100644
+index 8383ea1b..78686458 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 +++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
-@@ -2302,6 +2302,25 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+@@ -2302,6 +2302,27 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
              return false
          })
  
 +        if message.id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(message.id.peerId) {
-+            let event = PluginEvent(kind: .message, name: "message_menu", account: additionalAccountKey(context.account.peerId), chat: chat, text: message.text)
++            var event = PluginEvent(kind: .message, name: "message_menu", account: additionalAccountKey(context.account.peerId), chat: chat, text: message.text)
++            event.pluginOrigin = additionalPluginIsOrigin(message.id)
++            event.message = additionalPluginSnapshot(id: message.id.id, sender: message.author?.id, timestamp: message.timestamp, thread: message.threadId, text: message.text, attributes: message.attributes, media: message.media)
 +            for item in PluginRegistry.shared.menuItems(location: .message, event: event) {
 +                actions.append(.action(ContextMenuActionItem(text: item.title, icon: { theme in
 +                    UIImage(systemName: "puzzlepiece.extension")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)

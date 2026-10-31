@@ -52,7 +52,7 @@ jobs:
           just-version: '1.59.0'
       - name: Fetch pinned sources and apply the complete patch series
         run: python3 tools/patches.py prepare build/source
-      - name: Check bundled Python SDK and dependency policy
+      - name: Check Python SDK, dependency resolution and interpreter isolation
         run: just test-python
 
   core:

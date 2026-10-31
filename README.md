@@ -20,10 +20,13 @@ and patched in `patches/series` order when preparing a build.
   individual account. Changes take effect without restarting; off by default.
 - Local profile options and badge customization.
 - Python plugins with per-account activation/settings, message/send/request hooks,
-  menu actions, atomic updates, and safe-mode recovery. Import `.py` / `.plugin` files
+  menu actions, permission-controlled Telegram sending/editing and media transfer,
+  atomic updates, and safe-mode recovery. Import `.py` / `.plugin` files
   from Files under **Additional functions → Plugins**. CPython, its standard library,
   and the Swiftgram SDK ship with the IPA. Only Python source plugins are supported;
-  third-party dependencies and dependency resolution are unsupported. See the
+  PEP 723 metadata declares plugin details and Python requirements. Review exact
+  dependency versions and PyPI links before installation; each plugin has isolated
+  dependencies and Python interpreters. Compatible pure Python wheels are supported. See the
   [plugin SDK and usage guide](PLUGINS.md) and
   [Python example](examples/plugins/uppercase.py). AyuGram Python plugins require porting.
 
