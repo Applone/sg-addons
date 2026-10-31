@@ -1,0 +1,673 @@
+diff --git a/Swiftgram/SGAdditionalCore/Sources/DisappearingMessages.swift b/Swiftgram/SGAdditionalCore/Sources/DisappearingMessages.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..9183417c40a8e2ab48e47e3979bfda0bc52a7b60
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/DisappearingMessages.swift
+@@ -0,0 +1,11 @@
++import Foundation
++
++public enum DisappearingMessages {
++    public static func shouldSave(
++        profile: AddonProfile, cloudMessage: Bool, hasTimeout: Bool,
++        hasMedia: Bool, expired: Bool, service: Bool
++    ) -> Bool {
++        profile.saveDeleted && profile.saveDisappearing && cloudMessage && hasTimeout
++            && hasMedia && !expired && !service
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+index f9fa6267ac4ab931e1720d0a012a907437ff3b69..c7a88f79eb5f8ee5336392045d7244ec57939925 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+@@ -75,6 +75,11 @@ public final class MessageArchive {
+                   PRIMARY KEY(account,chat,id))
+                 """)
+             try execute("CREATE INDEX IF NOT EXISTS retained_message_ids ON messages(account,id)")
++            try execute("""
++                CREATE TABLE IF NOT EXISTS disappearing_media (
++                  account TEXT NOT NULL, chat TEXT NOT NULL, id INTEGER NOT NULL,
++                  resources BLOB NOT NULL, PRIMARY KEY(account,chat,id))
++                """)
+             try execute("""
+                 CREATE TABLE IF NOT EXISTS revisions (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+@@ -122,10 +127,76 @@ public final class MessageArchive {
+         lock.unlock()
+         if schedule { queue.asyncAfter(deadline: .now() + 0.1) { self.flush() } }
+     }
++    // Persist resource ownership before removing the host's expiration attributes.
++    public func observeDisappearing(_ key: MessageKey, resources: [String]) -> Bool {
++        let success = queue.sync { () -> Bool in
++            var committed = false
++            do {
++                try execute("BEGIN IMMEDIATE")
++                defer { if !committed { try? execute("ROLLBACK") } }
++                guard let metadata = statement("""
++                    INSERT INTO messages(account,chat,id,sender,body,date,seen,wire)
++                    VALUES(?,?,?,'','',0,?,zeroblob(0)) ON CONFLICT(account,chat,id) DO NOTHING
++                    """) else { throw SettingsError.invalid("Preparing disappearing-message metadata failed.") }
++                defer { sqlite3_finalize(metadata) }
++                let data = try JSONEncoder().encode(Array(Set(resources)).sorted())
++                guard let media = statement("INSERT OR REPLACE INTO disappearing_media(account,chat,id,resources) VALUES(?,?,?,?)")
++                else { throw SettingsError.invalid("Preparing disappearing-media ownership failed.") }
++                defer { sqlite3_finalize(media) }
++                bind(metadata, 1, key.account); bind(metadata, 2, key.chat); sqlite3_bind_int64(metadata, 3, key.id)
++                sqlite3_bind_int64(metadata, 4, Int64(Date().timeIntervalSince1970))
++                guard sqlite3_step(metadata) == SQLITE_DONE else { throw SettingsError.invalid("Saving disappearing-message metadata failed.") }
++                bind(media, 1, key.account); bind(media, 2, key.chat); sqlite3_bind_int64(media, 3, key.id)
++                _ = data.withUnsafeBytes { sqlite3_bind_blob(media, 4, $0.baseAddress, Int32($0.count), transient) }
++                guard sqlite3_step(media) == SQLITE_DONE else { throw SettingsError.invalid("Saving disappearing-media ownership failed.") }
++                try execute("COMMIT")
++                committed = true
++                return true
++            } catch { setFailure(error.localizedDescription); return false }
++        }
++        if success {
++            lock.lock(); excluded.remove(key); eligible.insert(key); pending.remove(key); lock.unlock()
++        }
++        return success
++    }
++    public func hasDisappearingMedia(_ key: MessageKey) -> Bool {
++        queue.sync {
++            guard let sql = statement("SELECT 1 FROM disappearing_media WHERE account=? AND chat=? AND id=?") else { return false }
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++            return sqlite3_step(sql) == SQLITE_ROW
++        }
++    }
++    public func disappearingResourceIds(account: String) -> Set<String> {
++        queue.sync {
++            guard let sql = statement("SELECT resources FROM disappearing_media WHERE account=?") else { return [] }
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, account)
++            var result = Set<String>()
++            while sqlite3_step(sql) == SQLITE_ROW {
++                guard let bytes = sqlite3_column_blob(sql, 0) else { continue }
++                let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(sql, 0)))
++                if let ids = try? JSONDecoder().decode([String].self, from: data) { result.formUnion(ids) }
++            }
++            return result
++        }
++    }
++    public func forgetDisappearing(_ keys: [MessageKey]) {
++        guard !keys.isEmpty else { return }
++        queue.sync {
++            guard let sql = statement("DELETE FROM disappearing_media WHERE account=? AND chat=? AND id=?") else { return }
++            defer { sqlite3_finalize(sql) }
++            for key in keys {
++                sqlite3_reset(sql); sqlite3_clear_bindings(sql)
++                bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++                if sqlite3_step(sql) != SQLITE_DONE { setFailure("Removing disappearing-media ownership failed.") }
++            }
++        }
++    }
+     public func exclude(_ key: MessageKey) {
+         lock.lock(); excluded.insert(key); eligible.remove(key); deleted.remove(key); pending.remove(key); lock.unlock()
+         queue.async {
+-            for table in ["messages", "revisions"] {
++            for table in ["messages", "revisions", "disappearing_media"] {
+                 guard let sql = self.statement("DELETE FROM \(table) WHERE account=? AND chat=? AND id=?") else { continue }
+                 self.bind(sql, 1, key.account); self.bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
+                 if sqlite3_step(sql) != SQLITE_DONE { self.setFailure("Removing expiring message data failed.") }
+@@ -155,7 +226,7 @@ public final class MessageArchive {
+         } catch { setFailure(error.localizedDescription) }
+     }
+ 
+-    // Return only known, non-expiring messages. Unknown/secret/TTL deletions
++    // Return only observed, eligible messages. Unknown/secret deletions
+     // continue through the host. Preserve every update's pts and ptsCount.
+     public func retain(account: String, channel: Int64?, ids: [Int64]) -> Set<Int64> {
+         // Wait for the initial metadata read on the update-processing thread,
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Settings.swift b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+index b6ad1aa23486e19a8542a4dbf09c69fcc5961800..cd31ea77392f505aed6cdcf9f699837f7ab99076 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/Settings.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+@@ -62,6 +62,7 @@ public struct AddonProfile: Codable {
+     public var hideUpload = true
+     public var ghostExceptions: [String] = []
+     public var saveDeleted = false
++    public var saveDisappearing = false
+     public var dimDeleted = true
+     public var retentionDays = 30
+     public var filtersEnabled = false
+@@ -73,7 +74,7 @@ public struct AddonProfile: Codable {
+     public init() {}
+     private enum CodingKeys: String, CodingKey {
+         case ghostEnabled, hideRead, hideStories, hideOnline, hideTyping, hideUpload
+-        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium, saveEditHistory, blockAds
++        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium, saveEditHistory, blockAds, saveDisappearing
+     }
+     public init(from decoder: Decoder) throws {
+         let values = try decoder.container(keyedBy: CodingKeys.self)
+@@ -85,6 +86,7 @@ public struct AddonProfile: Codable {
+         hideUpload = try values.decodeIfPresent(Bool.self, forKey: .hideUpload) ?? true
+         ghostExceptions = try values.decodeIfPresent([String].self, forKey: .ghostExceptions) ?? []
+         saveDeleted = try values.decodeIfPresent(Bool.self, forKey: .saveDeleted) ?? false
++        saveDisappearing = try values.decodeIfPresent(Bool.self, forKey: .saveDisappearing) ?? false
+         dimDeleted = try values.decodeIfPresent(Bool.self, forKey: .dimDeleted) ?? true
+         retentionDays = try values.decodeIfPresent(Int.self, forKey: .retentionDays) ?? 30
+         filtersEnabled = try values.decodeIfPresent(Bool.self, forKey: .filtersEnabled) ?? false
+diff --git a/Swiftgram/SGAdditionalCore/Tests/DisappearingChecks.swift b/Swiftgram/SGAdditionalCore/Tests/DisappearingChecks.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..5fb40944908f035a371d9fe69c4698ee796af250
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/DisappearingChecks.swift
+@@ -0,0 +1,76 @@
++import Foundation
++import SQLite3
++
++enum DisappearingChecks {
++    static func run(root: URL) throws {
++        var profile = try JSONDecoder().decode(AddonProfile.self, from: Data("{\"saveDeleted\":true}".utf8))
++        CheckCore.require(!profile.saveDisappearing, "existing profiles do not silently enable disappearing capture")
++        func allowed(
++            cloud: Bool = true, timed: Bool = true, media: Bool = true, expired: Bool = false, service: Bool = false
++        ) -> Bool {
++            DisappearingMessages.shouldSave(
++                profile: profile, cloudMessage: cloud, hasTimeout: timed, hasMedia: media, expired: expired,
++                service: service)
++        }
++        CheckCore.require(!allowed(), "disappearing retention is opt in")
++        profile.saveDisappearing = true
++        CheckCore.require(allowed(), "observed timed cloud media are eligible")
++        CheckCore.require(!allowed(cloud: false), "secret chats remain excluded")
++        CheckCore.require(!allowed(expired: true), "unavailable media cannot be recovered")
++        CheckCore.require(!allowed(service: true), "service messages remain excluded")
++        CheckCore.require(!allowed(timed: false) && !allowed(media: false), "only timed media use disappearing capture")
++        profile.saveDeleted = false
++        CheckCore.require(!allowed(), "disappearing option requires deleted-message retention")
++        let encoded = try JSONEncoder().encode(profile)
++        let decoded = try JSONDecoder().decode(AddonProfile.self, from: encoded)
++        CheckCore.require(decoded.saveDisappearing, "disappearing setting round trip")
++
++        let archive = MessageArchive.shared
++        let key = MessageKey(account: "123", chat: "user:42", id: 10)
++        let otherChat = MessageKey(account: "123", chat: "channel:42", id: 10)
++        let otherAccount = MessageKey(account: "456", chat: "user:42", id: 10)
++        archive.exclude(key)
++        archive.drain()
++        CheckCore.require(
++            archive.observeDisappearing(key, resources: ["voice", "preview"]), "persist disappearing resource ownership"
++        )
++        CheckCore.require(
++            archive.hasDisappearingMedia(key) && archive.retain(key),
++            "opt-in observation can replace a previous TTL exclusion")
++        CheckCore.require(
++            !archive.hasDisappearingMedia(otherChat) && !archive.hasDisappearingMedia(otherAccount),
++            "disappearing keys include account and chat namespace")
++        CheckCore.require(
++            archive.observeDisappearing(otherChat, resources: ["voice", "photo"]), "shared resource ownership")
++        CheckCore.require(
++            archive.disappearingResourceIds(account: "123") == ["voice", "preview", "photo"],
++            "restart pin list includes all owned media")
++        CheckCore.require(archive.disappearingResourceIds(account: "456").isEmpty, "media pins are account scoped")
++        archive.forgetDisappearing([key])
++        CheckCore.require(
++            archive.disappearingResourceIds(account: "123") == ["voice", "photo"],
++            "removing a message preserves resources still owned by another message")
++        archive.forgetDisappearing([otherChat])
++        CheckCore.require(
++            archive.disappearingResourceIds(account: "123").isEmpty, "last local deletion releases resource ownership")
++
++        var db: OpaquePointer?
++        let path = root.appendingPathComponent("SwiftgramAyu/messages.sqlite3").path
++        CheckCore.require(sqlite3_open(path, &db) == SQLITE_OK, "open independent retention connection")
++        defer { sqlite3_close(db) }
++        CheckCore.require(
++            sqlite3_exec(
++                db,
++                "CREATE TRIGGER fail_disappearing BEFORE INSERT ON disappearing_media BEGIN SELECT RAISE(ABORT,'test failure'); END",
++                nil, nil, nil) == SQLITE_OK, "create retention failure fixture")
++        CheckCore.require(
++            !archive.observeDisappearing(otherAccount, resources: ["lost"]),
++            "storage failure prevents disabling host expiration")
++        CheckCore.require(
++            !archive.hasDisappearingMedia(otherAccount) && !archive.retain(otherAccount),
++            "failed capture does not become eligible")
++        CheckCore.require(
++            sqlite3_exec(db, "DROP TRIGGER fail_disappearing", nil, nil, nil) == SQLITE_OK,
++            "remove retention failure fixture")
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+index 914ec27a5fa162021614d2529c9a5cbd493a7d07..cfe68b527df9988894a74e03018cb57c6e869a6b 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -60,6 +60,7 @@ struct CheckCore {
+         let saved = try JSONDecoder().decode([String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
+         CheckCore.require(saved["77"]?["serverUser"] == Data([1, 2]), "badge changes preserve legacy server snapshot")
+         CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "88") == nil, "badge account isolation")
+-        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage")
++        try DisappearingChecks.run(root: root)
++        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media")
+     }
+ }
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index 7e537511f5af54d4d5d7d762f37d7a973a23ecaf..445502d00093a092ea8131dbc3cd8980c7e16ba1 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -54,6 +54,7 @@ private enum SGBoolSetting: String {
+     case additionalHideOnline
+     case additionalHideTyping
+     case additionalHideUpload
++    case additionalSaveDisappearing
+     case additionalSaveDeleted
+     case additionalDimDeleted
+     case additionalSaveEditHistory
+@@ -188,11 +189,13 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.disclosure(id: id.count, section: .additionalGhost, link: .additionalExceptions, text: text("Exceptions")))
+     entries.append(.header(id: id.count, section: .additionalHistory, text: text("History"), badge: nil))
+     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDeleted, value: profile.saveDeleted, text: text("saveDeleted"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDisappearing, value: profile.saveDisappearing, text: text("saveDisappearing"), enabled: profile.saveDeleted))
+     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalDimDeleted, value: profile.dimDeleted, text: text("dimDeleted"), enabled: true))
+     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveEditHistory, value: profile.saveEditHistory, text: text("saveEditHistory"), enabled: true))
+     entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalRetention, text: text("Retention")))
+     entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("Clear")))
+     entries.append(.notice(id: id.count, section: .additionalHistory, text: text("HistoryNotice")))
++    entries.append(.notice(id: id.count, section: .additionalHistory, text: text("DisappearingNotice")))
+     entries.append(.header(id: id.count, section: .additionalFilters, text: text("Filters"), badge: nil))
+     entries.append(.toggle(id: id.count, section: .additionalFilters, settingName: .additionalFiltersEnabled, value: profile.filtersEnabled, text: text("filtersEnabled"), enabled: true))
+     entries.append(.disclosure(id: id.count, section: .additionalFilters, link: .additionalFilters, text: text("EditFilters")))
+@@ -426,7 +429,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+             return
+         }
+         switch setting {
+-        case .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalBlockAds, .additionalLocalPremium: break
++        case .additionalSaveDisappearing, .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalBlockAds, .additionalLocalPremium: break
+         case .hidePhoneInSettings:
+             SGSimpleSettings.shared.hidePhoneInSettings = value
+             askForRestart?()
+@@ -895,6 +898,7 @@ private extension SGBoolSetting {
+         case .additionalHideOnline: return \AddonProfile.hideOnline
+         case .additionalHideTyping: return \AddonProfile.hideTyping
+         case .additionalHideUpload: return \AddonProfile.hideUpload
++        case .additionalSaveDisappearing: return \AddonProfile.saveDisappearing
+         case .additionalSaveDeleted: return \AddonProfile.saveDeleted
+         case .additionalDimDeleted: return \AddonProfile.dimDeleted
+         case .additionalSaveEditHistory: return \AddonProfile.saveEditHistory
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index 304ceacfeaee26b6dcc52f5f0480289b2db189f8..f8001ad7f927da76a2cbb13902964399aeb6f270 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -294,7 +294,7 @@
+ "Additional.Exceptions" = "Chat exceptions";
+ "Additional.Retention" = "History retention, days";
+ "Additional.Clear" = "Clear saved history";
+-"Additional.HistoryNotice" = "Only versions observed while capture is enabled are saved. Secret and expiring messages are excluded. Earlier edits cannot be recovered.";
++"Additional.HistoryNotice" = "Only versions observed while capture is enabled are saved. Secret chats are excluded. Timed media require Save disappearing media. Earlier edits cannot be recovered.";
+ "Additional.EditFilters" = "Edit filters";
+ "Additional.PremiumNotice" = "Changes affect this client only. Server features still require a subscription. Select your profile badge from your profile.";
+ "Additional.Diagnostics" = "Diagnostics";
+@@ -332,3 +332,6 @@
+ "Additional.Ads" = "Telegram ads";
+ "Additional.blockAds" = "Block Telegram ads";
+ "Additional.AdsNotice" = "Hide sponsored messages and search ads in this client. No Telegram Premium subscription is required.";
++
++"Additional.saveDisappearing" = "Save disappearing media";
++"Additional.DisappearingNotice" = "Also keep observed timed and view-once photos, videos, and voice messages when saving deleted messages. Media is downloaded while available. Secret chats are excluded.";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index b2e581ab04b311bc720cc94deb0edb22e5d4f1e5..e7e25e87e151f8018f6036ddc668ad5466d07818 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -289,7 +289,7 @@
+ "Additional.Exceptions" = "Исключения чатов";
+ "Additional.Retention" = "Срок хранения истории, дней";
+ "Additional.Clear" = "Очистить сохранённую историю";
+-"Additional.HistoryNotice" = "Сохраняются только версии, полученные при включённой записи. Секретные и исчезающие сообщения исключены. Более ранние изменения восстановить нельзя.";
++"Additional.HistoryNotice" = "Сохраняются только версии, полученные при включённой записи. Секретные чаты исключены. Медиа с таймером требуют включения сохранения исчезающих медиа. Более ранние изменения восстановить нельзя.";
+ "Additional.EditFilters" = "Настроить фильтры";
+ "Additional.PremiumNotice" = "Изменения действуют только в этом клиенте. Серверные возможности требуют подписки. Значок профиля выбирается в профиле.";
+ "Additional.Diagnostics" = "Диагностика";
+@@ -327,3 +327,6 @@
+ "Additional.Ads" = "Реклама Telegram";
+ "Additional.blockAds" = "Блокировать рекламу Telegram";
+ "Additional.AdsNotice" = "Скрывать рекламные сообщения и рекламу в поиске в этом клиенте. Подписка Telegram Premium не требуется.";
++
++"Additional.saveDisappearing" = "Сохранять исчезающие медиа";
++"Additional.DisappearingNotice" = "При сохранении удалённых сообщений сохранять также полученные фото, видео и голосовые сообщения с таймером или однократным просмотром. Медиа загружаются, пока доступны. Секретные чаты исключены.";
+diff --git a/submodules/Postbox/Sources/Postbox.swift b/submodules/Postbox/Sources/Postbox.swift
+index 95054e7146636c69de4a7e1d63c8ae94c87d89c5..a22711f5f9b956570d6b7b250c0a2f5129516d38 100644
+--- a/submodules/Postbox/Sources/Postbox.swift
++++ b/submodules/Postbox/Sources/Postbox.swift
+@@ -43,7 +43,12 @@ public final class Transaction {
+         self.postbox?.keychainTable.set(key, value: value)
+     }
+     
+-    public func setMessageProcessor(_ processor: @escaping (StoreMessage) -> StoreMessage?) {
++    public func setMessageDeletionObserver(_ observer: @escaping ([MessageId]) -> Void) {
++        assert(self.queue.isCurrent())
++        self.postbox?.messageDeletionObserver = observer
++    }
++
++    public func setMessageProcessor(_ processor: @escaping (StoreMessage, Message?) -> StoreMessage?) {
+         assert(self.queue.isCurrent())
+         self.postbox?.messageProcessor = processor
+     }
+@@ -1607,7 +1612,8 @@ public func openPostbox(basePath: String, seedConfiguration: SeedConfiguration,
+ }
+ 
+ final class PostboxImpl {
+-    var messageProcessor: ((StoreMessage) -> StoreMessage?)?
++    var messageProcessor: ((StoreMessage, Message?) -> StoreMessage?)?
++    var messageDeletionObserver: (([MessageId]) -> Void)?
+     public let queue: Queue
+     public let seedConfiguration: SeedConfiguration
+     private let basePath: String
+@@ -2198,7 +2204,11 @@ final class PostboxImpl {
+     }
+     
+     fileprivate func addMessages(transaction: Transaction, messages: [StoreMessage], location: AddMessagesLocation) -> [Int64: MessageId] {
+-        let messages = self.messageProcessor.map { processor in messages.compactMap(processor) } ?? messages
++        let messages = self.messageProcessor.map { processor in messages.compactMap { message in
++            let previous: Message?
++            if case let .Id(id) = message.id { previous = transaction.getMessage(id) } else { previous = nil }
++            return processor(message, previous)
++        } } ?? messages
+         var addedMessagesByPeerId: [PeerId: [StoreMessage]] = [:]
+         let addResult = self.messageHistoryTable.addMessages(messages: messages, operationsByPeerId: &self.currentOperationsByPeerId, updatedMedia: &self.currentUpdatedMedia, unsentMessageOperations: &currentUnsentOperations, updatedPeerReadStateOperations: &self.currentUpdatedSynchronizeReadStateOperations, globalTagsOperations: &self.currentGlobalTagsOperations, pendingActionsOperations: &self.currentPendingMessageActionsOperations, updatedMessageActionsSummaries: &self.currentUpdatedMessageActionsSummaries, updatedMessageTagSummaries: &self.currentUpdatedMessageTagSummaries, invalidateMessageTagSummaries: &self.currentInvalidateMessageTagSummaries, localTagsOperations: &self.currentLocalTagsOperations, timestampBasedMessageAttributesOperations: &self.currentTimestampBasedMessageAttributesOperations, processMessages: { messagesByPeerId in
+             addedMessagesByPeerId = messagesByPeerId
+@@ -2794,6 +2804,19 @@ final class PostboxImpl {
+             }
+         }
+         
++        if let observer = self.messageDeletionObserver {
++            var removed = Set<MessageId>()
++            for operations in self.currentOperationsByPeerId.values {
++                for operation in operations {
++                    if case let .Remove(indices) = operation {
++                        for (index, _, _) in indices where self.messageHistoryIndexTable.getIndex(index.id) == nil {
++                            removed.insert(index.id)
++                        }
++                    }
++                }
++            }
++            if !removed.isEmpty { observer(Array(removed)) }
++        }
+         self.currentPeerHoleOperations.removeAll()
+         self.currentOperationsByPeerId.removeAll()
+         self.currentUpdatedChatListInclusions.removeAll()
+@@ -3089,7 +3112,7 @@ final class PostboxImpl {
+             if case let .update(proposedMessage) = update(message) {
+                 let updatedMessage: StoreMessage
+                 if let processor = self.messageProcessor {
+-                    guard let processed = processor(proposedMessage) else {
++                    guard let processed = processor(proposedMessage, message) else {
+                         transaction.deleteMessages([id], forEachMedia: nil)
+                         return
+                     }
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index 5f39aa239aedc7c3879126b4681382cdf4667097..c94692eafe6b57da7c19ff28fcdfafcdbe70e568 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1287,9 +1287,10 @@ public class Account {
+         self.peerId = peerId
+         if !supplementary {
+             network.additionalAccountId = additionalAccountKey(peerId)
+-            let processor = AdditionalMessageProcessor(account: peerId)
++            let processor = AdditionalMessageProcessor(account: peerId, mediaBox: postbox.mediaBox)
+             let _ = postbox.transaction { transaction -> Bool in
+-                transaction.setMessageProcessor { processor.process($0) }
++                transaction.setMessageProcessor { processor.process($0, previous: $1) }
++                transaction.setMessageDeletionObserver { processor.deleted($0) }
+                 return additionalRestoreLegacyProfile(transaction: transaction, account: peerId)
+             }.start(next: { restored in
+                 if restored { AdditionalLocalProfileState.shared.didRestoreLegacyProfile(account: additionalAccountKey(peerId)) }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..6461aaece3dd7e3b6286b440a3728951a8941f4f
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift
+@@ -0,0 +1,167 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++import SwiftSignalKit
++
++private func disappearingResources(_ media: [Media]) -> [MediaResource] {
++    media.flatMap { item -> [MediaResource] in
++        if let image = item as? TelegramMediaImage { return image.representations.map { $0.resource } }
++        if let file = item as? TelegramMediaFile {
++            return [file.resource] + file.previewRepresentations.map { $0.resource }
++        }
++        return []
++    }
++}
++
++private func withoutExpiration(_ attributes: [MessageAttribute]) -> [MessageAttribute] {
++    attributes.filter { !($0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute) }
++}
++
++/// Owns downloads and cache pins for one authorized account. Postbox owns its lifetime.
++final class AdditionalDisappearingMedia {
++    private let account: String
++    private let mediaBox: MediaBox
++    private let queue = Queue(name: "Swiftgram.DisappearingMedia")
++    private var pins: [MediaResourceId: Disposable] = [:]
++    private var downloads: [MediaResourceId: MetaDisposable] = [:]
++    private var pending: [MediaResource] = []
++
++    init(account: PeerId, mediaBox: MediaBox) {
++        self.account = additionalAccountKey(account)
++        self.mediaBox = mediaBox
++        let ids = MessageArchive.shared.disappearingResourceIds(account: self.account)
++        queue.async { [weak self] in
++            guard let self else { return }
++            for value in ids {
++                let id = MediaResourceId(value)
++                self.pins[id] = mediaBox.keepResource(id: id).start()
++            }
++        }
++    }
++
++    deinit {
++        for disposable in pins.values { disposable.dispose() }
++        for disposable in downloads.values { disposable.dispose() }
++    }
++
++    func process(_ proposed: StoreMessage, previous: Message?) -> StoreMessage {
++        guard case .Id(let id) = proposed.id, id.namespace == Namespaces.Message.Cloud,
++            let chat = additionalChatKey(id.peerId)
++        else { return proposed }
++        let key = MessageKey(account: account, chat: chat, id: Int64(id.id))
++        let profile = AddonSettings.shared.profile(account)
++        guard profile.saveDeleted && profile.saveDisappearing else { return proposed }
++        let timed = proposed.attributes.contains {
++            $0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute
++        }
++        let previouslyTimed =
++            previous?.attributes.contains {
++                $0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute
++            } ?? false
++        let expired = proposed.media.contains { $0 is TelegramMediaExpiredContent }
++        guard timed || previouslyTimed || expired else { return proposed }
++        var message = proposed
++        var restored = false
++        // A history refresh can deliver an expired placeholder after we saved the original.
++        if proposed.media.contains(where: { $0 is TelegramMediaExpiredContent }),
++            MessageArchive.shared.hasDisappearingMedia(key), let previous,
++            !disappearingResources(previous.media).isEmpty
++        {
++            message = proposed.withUpdatedMedia(previous.media)
++            restored = true
++        }
++        let resources = disappearingResources(message.media)
++        let save = DisappearingMessages.shouldSave(
++            profile: profile, cloudMessage: true, hasTimeout: timed || previouslyTimed,
++            hasMedia: !resources.isEmpty, expired: message.media.contains { $0 is TelegramMediaExpiredContent },
++            service: message.media.contains { $0 is TelegramMediaAction })
++        guard save || restored else { return message }
++        guard MessageArchive.shared.observeDisappearing(key, resources: resources.map { $0.id.stringRepresentation })
++        else { return proposed }
++        if restored { _ = MessageArchive.shared.retain(key) }
++        queue.async { [weak self] in self?.enqueue(resources) }
++        return message.withUpdatedAttributes(withoutExpiration(message.attributes))
++    }
++
++    private func enqueue(_ resources: [MediaResource]) {
++        for resource in resources {
++            if pins[resource.id] == nil { pins[resource.id] = mediaBox.keepResource(id: resource.id).start() }
++            if downloads[resource.id] == nil && !pending.contains(where: { $0.id == resource.id }) {
++                pending.append(resource)
++            }
++        }
++        startDownloads()
++    }
++
++    func deleted(_ ids: [MessageId]) {
++        let keys = ids.compactMap { id -> MessageKey? in
++            guard id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(id.peerId) else { return nil }
++            return MessageKey(account: account, chat: chat, id: Int64(id.id))
++        }
++        MessageArchive.shared.forgetDisappearing(keys)
++        queue.async { [weak self] in
++            guard let self else { return }
++            let owned = MessageArchive.shared.disappearingResourceIds(account: self.account)
++            for id in Array(self.pins.keys) where !owned.contains(id.stringRepresentation) {
++                self.pins.removeValue(forKey: id)?.dispose()
++                self.downloads.removeValue(forKey: id)?.dispose()
++            }
++            self.pending.removeAll { !owned.contains($0.id.stringRepresentation) }
++            self.startDownloads()
++        }
++    }
++
++    private func startDownloads() {
++        while downloads.count < 4 && !pending.isEmpty {
++            let resource = pending.removeFirst()
++            let disposable = MetaDisposable()
++            downloads[resource.id] = disposable
++            let finished: () -> Void = { [weak self] in
++                guard let self else { return }
++                self.downloads.removeValue(forKey: resource.id)?.dispose()
++                self.startDownloads()
++            }
++            disposable.set(
++                (fetchedMediaResource(
++                    mediaBox: mediaBox, userLocation: .other,
++                    userContentType: .other, reference: .standalone(resource: resource))
++                    |> deliverOn(queue)).start(error: { _ in finished() }, completed: finished))
++        }
++    }
++}
++
++/// Captures media for an existing timer and removes its timestamp entries so later timers can run.
++func additionalRetainDisappearingAtExpiry(account: String?, message: Message, transaction: Transaction) -> Bool {
++    guard let account, message.id.namespace == Namespaces.Message.Cloud,
++        let chat = additionalChatKey(message.id.peerId)
++    else { return false }
++    let profile = AddonSettings.shared.profile(account)
++    let resources = disappearingResources(message.media)
++    guard
++        DisappearingMessages.shouldSave(
++            profile: profile, cloudMessage: true, hasTimeout: true,
++            hasMedia: !resources.isEmpty, expired: message.media.contains { $0 is TelegramMediaExpiredContent },
++            service: message.media.contains { $0 is TelegramMediaAction })
++    else { return false }
++    let key = MessageKey(account: account, chat: chat, id: Int64(message.id.id))
++    guard MessageArchive.shared.observeDisappearing(key, resources: resources.map { $0.id.stringRepresentation }),
++        MessageArchive.shared.retain(key)
++    else { return false }
++    transaction.updateMessage(message.id) { current in
++        let forward = current.forwardInfo.map {
++            StoreMessageForwardInfo(
++                authorId: $0.author?.id, sourceId: $0.source?.id, sourceMessageId: $0.sourceMessageId,
++                date: $0.date, authorSignature: $0.authorSignature, psaType: $0.psaType, flags: $0.flags)
++        }
++        return .update(
++            StoreMessage(
++                id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId,
++                groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp,
++                flags: StoreMessageFlags(current.flags), tags: current.tags, globalTags: current.globalTags,
++                localTags: current.localTags, forwardInfo: forward, authorId: current.author?.id, text: current.text,
++                attributes: withoutExpiration(current.attributes), media: current.media))
++    }
++    transaction.clearTimestampBasedAttribute(id: message.id, tag: 0)
++    transaction.clearTimestampBasedAttribute(id: message.id, tag: 1)
++    return true
++}
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+index 65814070885454d135f60ae4879d55d2a6a5f006..c7c1040610143c006cae764602789a840426b660 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ import Postbox
+ import SGAdditionalCore
++import SwiftSignalKit
+ 
+ public func additionalAccountKey(_ id: PeerId) -> String { String(id.id._internalGetInt64Value()) }
+ 
+@@ -22,7 +23,7 @@ public func additionalMessageKey(account: PeerId, id: MessageId) -> MessageKey?
+ 
+ public func additionalCanArchive(attributes: [MessageAttribute], media: [Media]) -> Bool {
+     !attributes.contains { $0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute }
+-        && !media.contains { $0 is TelegramMediaAction }
++        && !media.contains { $0 is TelegramMediaAction || $0 is TelegramMediaExpiredContent }
+ }
+ 
+ public func additionalRevision(text: String, timestamp: Int32, attributes: [MessageAttribute]) -> MessageRevision {
+@@ -96,13 +97,22 @@ public func additionalTextEntities(_ revision: MessageRevision) -> [MessageTextE
+ final class AdditionalMessageProcessor {
+     let account: PeerId
+     private let filters = CompiledFilters()
+-    init(account: PeerId) { self.account = account }
+-    func process(_ message: StoreMessage) -> StoreMessage? {
+-        guard AddonSettings.shared.anyEnabled(), case let .Id(id) = message.id,
++    private let disappearing: AdditionalDisappearingMedia
++    init(account: PeerId, mediaBox: MediaBox) {
++        self.account = account
++        self.disappearing = AdditionalDisappearingMedia(account: account, mediaBox: mediaBox)
++    }
++    func deleted(_ ids: [MessageId]) { disappearing.deleted(ids) }
++    func process(_ proposed: StoreMessage, previous: Message?) -> StoreMessage? {
++        let message = disappearing.process(proposed, previous: previous)
++        guard case let .Id(id) = message.id,
+               let key = additionalMessageKey(account: account, id: id) else { return message }
+         let profile = AddonSettings.shared.profile(key.account)
+         let allowed = additionalCanArchive(attributes: message.attributes, media: message.media)
+-        if !allowed, profile.saveDeleted || profile.saveEditHistory { MessageArchive.shared.exclude(key) }
++        if !allowed, profile.saveDeleted || profile.saveEditHistory {
++            MessageArchive.shared.exclude(key)
++            disappearing.deleted([id])
++        }
+         if allowed {
+             if profile.saveDeleted { MessageArchive.shared.observe(key) }
+             if profile.saveEditHistory {
+@@ -116,7 +126,10 @@ final class AdditionalMessageProcessor {
+             for attribute in message.attributes {
+                 if let bot = (attribute as? InlineBotMessageAttribute)?.peerId, let value = additionalChatKey(bot) { authors.append(value) }
+             }
+-            if filters.matches(text: message.text, chat: key.chat, authors: authors, profile: profile, account: key.account) { return nil }
++            if filters.matches(text: message.text, chat: key.chat, authors: authors, profile: profile, account: key.account) {
++                disappearing.deleted([id])
++                return nil
++            }
+         }
+         return message
+     }
+@@ -124,7 +137,9 @@ final class AdditionalMessageProcessor {
+ 
+ func additionalRetainDeleted(account: PeerId, id: MessageId, transaction: Transaction) -> Bool {
+     guard AddonSettings.shared.anyRetentionEnabled(), let key = additionalMessageKey(account: account, id: id),
+-          AddonSettings.shared.profile(key.account).saveDeleted, let message = transaction.getMessage(id),
+-          additionalCanArchive(attributes: message.attributes, media: message.media) else { return false }
++          AddonSettings.shared.profile(key.account).saveDeleted, let message = transaction.getMessage(id) else { return false }
++    if !additionalCanArchive(attributes: message.attributes, media: message.media) {
++        return additionalRetainDisappearingAtExpiry(account: key.account, message: message, transaction: transaction)
++    }
+     return MessageArchive.shared.retain(key)
+ }
+diff --git a/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift b/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift
+index f40bad06a6875c21e3cd09aa2c27b7d86c15c857..cef22bd20109931bc0457c7f721fe8d79149ff1e 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedAutoremoveMessageOperations.swift
+@@ -82,6 +82,9 @@ func managedAutoremoveMessageOperations(network: Network, postbox: Postbox, isRe
+                     Logger.shared.log("Autoremove", "Performing autoremove for \(entry.messageId), isRemove: \(isRemove)")
+ 
+                     if let message = transaction.getMessage(entry.messageId) {
++                        if additionalRetainDisappearingAtExpiry(account: network.additionalAccountId, message: message, transaction: transaction) {
++                            return
++                        }
+                         if message.id.peerId.namespace == Namespaces.Peer.SecretChat || isRemove {
+                             _internal_deleteMessages(transaction: transaction, mediaBox: postbox.mediaBox, ids: [entry.messageId])
+                         } else {

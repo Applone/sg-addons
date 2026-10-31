@@ -8,8 +8,9 @@ and patched in `patches/series` order when preparing a build.
 
 - Ghost mode: hide read receipts, story views, online status, typing, and upload
   activity, with chat exceptions.
-- Local message history and deleted-message retention. Only observed messages
-  are captured; secret and expiring messages are excluded. The Message history
+- Local message history and deleted-message retention, with an optional
+  **Save disappearing media** setting for observed timed/view-once cloud photos,
+  videos, and voice messages. Secret chats are excluded. The Message history
   action appears on edited messages while history capture is enabled for the
   account, and uses the chat's theme and wallpaper.
 - Message filters with per-account settings and JSON import/export.
@@ -18,6 +19,13 @@ and patched in `patches/series` order when preparing a build.
   settings → **Additional functions** → **Telegram ads** for all accounts or an
   individual account. Changes take effect without restarting; off by default.
 - Local profile options and badge customization.
+- Python plugins with per-account activation/settings, message/send/request hooks,
+  menu actions, atomic updates, and safe-mode recovery. Import `.py` / `.plugin` files
+  from Files under **Additional functions → Plugins**. CPython, its standard library,
+  and the Swiftgram SDK ship with the IPA. Only Python source plugins are supported;
+  third-party dependencies and dependency resolution are unsupported. See the
+  [plugin SDK and usage guide](PLUGINS.md) and
+  [Python example](examples/plugins/uppercase.py). AyuGram Python plugins require porting.
 
 ## Build in CI
 

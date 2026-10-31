@@ -12,3 +12,5 @@ build/history-ui-compatibility.patch
 ui/message-history.patch
 core/telegram-ads.patch
 ui/telegram-ads.patch
+core/disappearing-messages.patch
+core/addons.patch

@@ -10,7 +10,7 @@ dev = ["mypy==1.19.1", "ruff==0.14.3", "yamllint==1.37.1"]
 [tool.ruff]
 target-version = "py311"
 line-length = 100
-include = ["tools/*.py"]
+include = ["*.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]

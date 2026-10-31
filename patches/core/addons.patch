@@ -1,0 +1,2735 @@
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 38b95c8d2afd40a3ab789a94c4b40c180678b3af..8834cc79609415b0ec7b3963e5c63e9af3ef2037 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -249,3 +249,6 @@ local_path_override(
+     module_name = "build_configuration",
+     path = "./build-input/configuration-repository",
+ )
++
++python_ios_repository = use_repo_rule("//Swiftgram/SGPython:python_repository.bzl", "python_ios_repository")
++python_ios_repository(name = "swiftgram_python")
+diff --git a/Swiftgram/SGAdditionalCore/BUILD b/Swiftgram/SGAdditionalCore/BUILD
+index 994a2d3eb758ffd9b69c2e3d0145b736a9470095..7531d1f086a9fcbf4b076a6400b0d909efd6f805 100644
+--- a/Swiftgram/SGAdditionalCore/BUILD
++++ b/Swiftgram/SGAdditionalCore/BUILD
+@@ -5,5 +5,6 @@ swift_library(
+     module_name = "SGAdditionalCore",
+     srcs = glob(["Sources/**/*.swift"]),
+     linkopts = ["-lsqlite3"],
++    deps = ["//Swiftgram/SGPython:SGPythonBridge"],
+     visibility = ["//visibility:public"],
+ )
+diff --git a/Swiftgram/SGAdditionalCore/Sources/PluginManifest.swift b/Swiftgram/SGAdditionalCore/Sources/PluginManifest.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..fc1cb6f42e745244412b19652baeac3366651258
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/PluginManifest.swift
+@@ -0,0 +1,235 @@
++import Foundation
++
++public enum PluginPermission: String, Codable, CaseIterable {
++    case incomingMessages, outgoingMessages, network, menus
++}
++
++public enum PluginEventKind: String, Codable {
++    case message, sendMessage, preRequest, postRequest
++
++    var permission: PluginPermission {
++        switch self {
++        case .message: return .incomingMessages
++        case .sendMessage: return .outgoingMessages
++        case .preRequest, .postRequest: return .network
++        }
++    }
++}
++
++public enum PluginStrategy: String, Codable {
++    case `default`, modify, modifyFinal, cancel
++}
++
++public enum PluginValue: Codable, Equatable {
++    case bool(Bool)
++    case integer(Int)
++    case string(String)
++
++    public init(from decoder: Decoder) throws {
++        let container = try decoder.singleValueContainer()
++        if let value = try? container.decode(Bool.self) {
++            self = .bool(value)
++        } else if let value = try? container.decode(Int.self) {
++            self = .integer(value)
++        } else {
++            self = .string(try container.decode(String.self))
++        }
++    }
++
++    public func encode(to encoder: Encoder) throws {
++        var container = encoder.singleValueContainer()
++        switch self {
++        case .bool(let value): try container.encode(value)
++        case .integer(let value): try container.encode(value)
++        case .string(let value): try container.encode(value)
++        }
++    }
++
++    public var text: String {
++        switch self {
++        case .bool(let value): return value ? "true" : "false"
++        case .integer(let value): return String(value)
++        case .string(let value): return value
++        }
++    }
++
++    func sameType(as other: PluginValue) -> Bool {
++        switch (self, other) {
++        case (.bool, .bool), (.integer, .integer), (.string, .string): return true
++        default: return false
++        }
++    }
++
++    func validate() throws {
++        switch self {
++        case .string(let value): try pluginRequire(value.utf8.count <= 2048, "Setting text exceeds 2048 bytes.")
++        case .integer(let value):
++            try pluginRequire((-1_000_000...1_000_000).contains(value), "Setting number is out of range.")
++        case .bool: break
++        }
++    }
++}
++
++public struct PluginSetting: Codable, Equatable {
++    public let key: String
++    public let title: String
++    public let defaultValue: PluginValue
++    public var choices: [String]?
++
++    func validate(_ value: PluginValue) throws {
++        try pluginRequire(value.sameType(as: defaultValue), "Setting type changed: " + key)
++        try value.validate()
++        if let choices {
++            try pluginRequire(choices.contains(value.text), "Unknown choice: " + key)
++        }
++    }
++}
++
++public struct PluginHook: Codable, Equatable {
++    public let event: PluginEventKind
++    public let name: String
++    public var substring: Bool?
++    public var priority: Int?
++    public let callback: String
++
++    func matchesName(_ value: String) -> Bool {
++        substring == true ? !name.isEmpty && value.contains(name) : name == value
++    }
++}
++
++public struct PluginMenu: Codable, Equatable {
++    public enum Location: String, Codable { case message, settings }
++    public enum Action: String, Codable { case copyText, showText }
++    public let id: String
++    public let title: String
++    public let location: Location
++    public let callback: String
++    public let action: Action
++}
++
++public struct PluginManifest: Codable, Equatable {
++    public var pythonSource: String
++    public let schemaVersion: Int
++    public let id: String
++    public let name: String
++    public let version: String
++    public var author: String?
++    public var description: String?
++    public var sdkVersion: String?
++    public var appVersion: String?
++    public let permissions: [PluginPermission]
++    public let hooks: [PluginHook]
++    public let settings: [PluginSetting]
++    public let menus: [PluginMenu]
++
++    public func validate(hostVersion: String) throws {
++        try pluginRequire(
++            !pythonSource.isEmpty && pythonSource.utf8.count <= 256 * 1024,
++            "Python source must be present and at most 256 KB.")
++        try pluginRequire(schemaVersion == 1, "Unsupported plugin format.")
++        try pluginRequire(Self.validID(id), "Plugin ID must be 2–32 ASCII characters, starting with a letter.")
++        try pluginRequire(
++            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && name.utf8.count <= 120,
++            "Invalid plugin name.")
++        _ = try PluginVersion(version)
++        try pluginRequire(
++            (author?.utf8.count ?? 0) <= 120 && (description?.utf8.count ?? 0) <= 2048, "Plugin metadata is too long.")
++        if let sdkVersion { try PluginVersion.check(sdkVersion, current: "1.0") }
++        if let appVersion { try PluginVersion.check(appVersion, current: hostVersion) }
++        try pluginRequire(Set(permissions).count == permissions.count, "Duplicate permissions.")
++        try pluginRequire(
++            hooks.count <= 32 && settings.count <= 32 && menus.count <= 16, "Too many plugin registrations.")
++        try pluginRequire(
++            Set(settings.map(\.key)).count == settings.count && Set(menus.map(\.id)).count == menus.count,
++            "Duplicate setting or menu IDs.")
++        for setting in settings {
++            try pluginRequire(
++                Self.validID(setting.key) && !setting.title.isEmpty && setting.title.utf8.count <= 120,
++                "Invalid setting definition.")
++            if let choices = setting.choices {
++                try pluginRequire(
++                    !choices.isEmpty && choices.count <= 20 && Set(choices).count == choices.count,
++                    "Invalid setting choices.")
++                try pluginRequire(choices.allSatisfy { $0.utf8.count <= 120 }, "Setting choice is too long.")
++                guard case .string = setting.defaultValue else {
++                    throw SettingsError.invalid("Choices require a text setting.")
++                }
++            }
++            try setting.validate(setting.defaultValue)
++        }
++        for hook in hooks {
++            try pluginRequire(
++                permissions.contains(hook.event.permission),
++                "Hook requires permission: " + hook.event.permission.rawValue)
++            try pluginRequire(
++                !hook.name.isEmpty && hook.name.utf8.count <= 120 && (-1000...1000).contains(hook.priority ?? 0),
++                "Invalid event name or priority.")
++            try validateCallback(hook.callback)
++        }
++        for menu in menus {
++            try pluginRequire(
++                permissions.contains(.menus) && Self.validID(menu.id), "Menu permission or ID is invalid.")
++            if menu.location == .message {
++                try pluginRequire(
++                    permissions.contains(.incomingMessages), "Message menus require incomingMessages permission.")
++            }
++            try pluginRequire(!menu.title.isEmpty && menu.title.utf8.count <= 120, "Invalid menu title.")
++            try validateCallback(menu.callback)
++        }
++    }
++
++    private func validateCallback(_ callback: String) throws {
++        let bytes = Array(callback.utf8)
++        try pluginRequire(
++            !bytes.isEmpty && bytes.count <= 64
++                && bytes.allSatisfy {
++                    (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 95
++                } && !((48...57).contains(bytes[0])), "Invalid Python callback name.")
++    }
++
++    public static func validID(_ value: String) -> Bool {
++        let bytes = Array(value.utf8)
++        func letter(_ byte: UInt8) -> Bool { (65...90).contains(byte) || (97...122).contains(byte) }
++        return (2...32).contains(bytes.count) && letter(bytes[0])
++            && bytes.dropFirst().allSatisfy { letter($0) || (48...57).contains($0) || $0 == 95 || $0 == 45 }
++    }
++}
++
++struct PluginVersion: Comparable {
++    let parts: [Int]
++    init(_ value: String) throws {
++        let components = value.split(separator: ".", omittingEmptySubsequences: false)
++        try pluginRequire((1...4).contains(components.count), "Invalid numeric plugin version.")
++        var numbers: [Int] = []
++        for component in components {
++            guard !component.isEmpty, component.utf8.allSatisfy({ (48...57).contains($0) }),
++                component.count <= 6, let number = Int(component)
++            else { throw SettingsError.invalid("Invalid numeric plugin version.") }
++            numbers.append(number)
++        }
++        parts = numbers + Array(repeating: 0, count: 4 - numbers.count)
++    }
++    static func < (lhs: Self, rhs: Self) -> Bool { lhs.parts.lexicographicallyPrecedes(rhs.parts) }
++    static func check(_ expression: String, current: String) throws {
++        let operators = [">=", "<=", "==", ">", "<"]
++        guard let op = operators.first(where: { expression.hasPrefix($0) }) else {
++            throw SettingsError.invalid("Version constraint needs >=, <=, ==, >, or <.")
++        }
++        let required = try Self(String(expression.dropFirst(op.count)).trimmingCharacters(in: .whitespaces))
++        let actual = try Self(current)
++        let accepted: Bool
++        switch op {
++        case ">=": accepted = actual >= required
++        case "<=": accepted = actual <= required
++        case ">": accepted = actual > required
++        case "<": accepted = actual < required
++        default: accepted = actual == required
++        }
++        try pluginRequire(
++            accepted, "Plugin is incompatible with version " + current + " (requires " + expression + ").")
++    }
++}
++
++func pluginRequire(_ condition: Bool, _ message: String) throws {
++    guard condition else { throw SettingsError.invalid(message) }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift b/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..03e1442931011d5d51e3953dbb9774fd71a01e16
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
+@@ -0,0 +1,481 @@
++import Foundation
++
++public struct PluginEvent: Codable, Equatable {
++    public let kind: PluginEventKind
++    public let name: String
++    public let account: String
++    public var chat: String?
++    public var text: String
++    public var error: String?
++
++    public init(
++        kind: PluginEventKind, name: String, account: String, chat: String? = nil,
++        text: String = "", error: String? = nil
++    ) {
++        self.kind = kind
++        self.name = name
++        self.account = account
++        self.chat = chat
++        self.text = text
++        self.error = error
++    }
++}
++
++public struct PluginRecord: Codable, Equatable {
++    public let manifest: PluginManifest
++    public var enabledAccounts: Set<String>
++    public var settings: [String: [String: PluginValue]]
++    public var error: String?
++
++    public func values(account: String) -> [String: PluginValue] {
++        var values: [String: PluginValue] = [:]
++        for setting in manifest.settings { values[setting.key] = setting.defaultValue }
++        for (key, value) in settings[account] ?? [:] { values[key] = value }
++        return values
++    }
++
++    public func isEnabled(account: String) -> Bool { enabledAccounts.contains(account) && error == nil }
++}
++
++public struct PluginMenuItem: Equatable {
++    public let pluginID: String
++    public let menuID: String
++    public let title: String
++}
++
++public struct PluginMenuResult: Equatable {
++    public let action: PluginMenu.Action
++    public let text: String
++}
++
++/// Coordinates Python plugins with account-owned registrations.
++/// A lock covers dispatch and lifecycle so a completed disable removes all registrations.
++public final class PluginRegistry {
++    public static let shared: PluginRegistry = {
++        #if TESTING
++            let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SGA_TEST_DIRECTORY"]!)
++        #else
++            let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
++        #endif
++        return PluginRegistry(
++            directory: root.appendingPathComponent("SwiftgramPlugins", isDirectory: true),
++            hostVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "13.0.1")
++    }()
++
++    private struct Document: Codable {
++        var schemaVersion = 1
++        var safeMode = false
++        var records: [String: PluginRecord] = [:]
++    }
++
++    private let lock = NSLock()
++    private let directory: URL
++    private let file: URL
++    private let recoveryFile: URL
++    private let pythonRecovery: URL
++    public let hostVersion: String
++    private var document = Document()
++    private var failure: String?
++    private var corrupt = false
++
++    public init(directory: URL, hostVersion: String) {
++        self.directory = directory
++        self.file = directory.appendingPathComponent("registry.json")
++        self.recoveryFile = directory.appendingPathComponent("recovery.json")
++        self.pythonRecovery = directory.appendingPathComponent("python-invocation.json")
++        self.hostVersion = hostVersion
++        do {
++            #if os(iOS)
++                let attributes: [FileAttributeKey: Any] = [
++                    .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
++                ]
++            #else
++                let attributes: [FileAttributeKey: Any] = [:]
++            #endif
++            try FileManager.default.createDirectory(
++                at: directory, withIntermediateDirectories: true, attributes: attributes)
++            var protectedDirectory = directory
++            var resourceValues = URLResourceValues()
++            resourceValues.isExcludedFromBackup = true
++            try protectedDirectory.setResourceValues(resourceValues)
++            if FileManager.default.fileExists(atPath: file.path) {
++                let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
++                try pluginRequire(size <= 32 * 1024 * 1024, "Plugin registry exceeds 32 MB.")
++                let stored = try JSONDecoder().decode(Document.self, from: Data(contentsOf: file))
++                try pluginRequire(stored.schemaVersion == 1 && stored.records.count <= 64, "Invalid plugin registry.")
++                for (id, record) in stored.records {
++                    try pluginRequire(id == record.manifest.id, "Plugin registry identity mismatch.")
++                    // An application upgrade can make one plugin incompatible without losing the others.
++                    var validated = record
++                    do { try record.manifest.validate(hostVersion: hostVersion) } catch {
++                        validated.error = error.localizedDescription
++                    }
++                    for (account, values) in record.settings {
++                        try Self.validateAccount(account)
++                        for (key, value) in values {
++                            guard let setting = record.manifest.settings.first(where: { $0.key == key }) else {
++                                throw SettingsError.invalid("Unknown stored plugin setting.")
++                            }
++                            try setting.validate(value)
++                        }
++                    }
++                    for account in record.enabledAccounts { try Self.validateAccount(account) }
++                    document.records[id] = validated
++                }
++                document.safeMode = stored.safeMode
++            }
++            if FileManager.default.fileExists(atPath: recoveryFile.path)
++                || FileManager.default.fileExists(atPath: pythonRecovery.path)
++            {
++                // Recovery never executes Python. An interrupted lifecycle mutation enters safe mode.
++                document.safeMode = true
++                failure = "An interrupted plugin change was recovered. Plugins are in safe mode."
++            }
++        } catch {
++            document = Document()
++            document.safeMode = true
++            failure = error.localizedDescription
++            corrupt = true
++        }
++    }
++
++    public func records() -> [PluginRecord] {
++        lock.lock()
++        defer { lock.unlock() }
++        return document.records.values.sorted { $0.manifest.id < $1.manifest.id }
++    }
++
++    public func safeMode() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        return document.safeMode
++    }
++    public func status() -> String? {
++        lock.lock()
++        defer { lock.unlock() }
++        return failure
++    }
++
++    public func inspect(_ data: Data) throws -> PluginManifest {
++        try pluginRequire(data.count <= 256 * 1024, "Plugin exceeds 256 KB.")
++        guard let source = String(data: data, encoding: .utf8) else {
++            throw SettingsError.invalid("Plugin must be UTF-8.")
++        }
++        let manifest = try PythonPluginRuntime.shared.inspect(source, marker: pythonRecovery)
++        try manifest.validate(hostVersion: hostVersion)
++        return manifest
++    }
++
++    @discardableResult public func install(_ data: Data) throws -> PluginManifest {
++        let manifest = try inspect(data)
++        lock.lock()
++        defer { lock.unlock() }
++        var next = document
++        let previous = next.records[manifest.id]
++        try pluginRequire(previous != nil || next.records.count < 64, "Maximum 64 installed plugins.")
++        let gainedPermissions = !Set(manifest.permissions).isSubset(of: Set(previous?.manifest.permissions ?? []))
++        var record = PluginRecord(
++            manifest: manifest,
++            enabledAccounts: gainedPermissions ? [] : previous?.enabledAccounts ?? [], settings: [:], error: nil)
++        // Keep compatible settings. Removed keys and changed types return to new defaults.
++        for (account, values) in previous?.settings ?? [:] {
++            for setting in manifest.settings {
++                if let value = values[setting.key], (try? setting.validate(value)) != nil {
++                    record.settings[account, default: [:]][setting.key] = value
++                }
++            }
++        }
++        next.records[manifest.id] = record
++        try commit(next)
++        return manifest
++    }
++
++    public func setEnabled(_ id: String, account: String, enabled: Bool) throws {
++        try Self.validateAccount(account)
++        lock.lock()
++        defer { lock.unlock() }
++        var next = document
++        guard var record = next.records[id] else { throw SettingsError.invalid("Plugin is not installed.") }
++        if enabled {
++            try record.manifest.validate(hostVersion: hostVersion)
++            record.enabledAccounts.insert(account)
++            record.error = nil
++        } else {
++            record.enabledAccounts.remove(account)
++        }
++        next.records[id] = record
++        do { try commit(next) } catch {
++            if enabled { fail(id, error: error) }
++            throw error
++        }
++    }
++
++    public func saveSettings(_ id: String, account: String, values: [String: PluginValue]) throws {
++        try Self.validateAccount(account)
++        lock.lock()
++        defer { lock.unlock() }
++        var next = document
++        guard var record = next.records[id] else { throw SettingsError.invalid("Plugin is not installed.") }
++        for (key, value) in values {
++            guard let setting = record.manifest.settings.first(where: { $0.key == key }) else {
++                throw SettingsError.invalid("Unknown plugin setting: " + key)
++            }
++            try setting.validate(value)
++        }
++        record.settings[account] = values
++        next.records[id] = record
++        try commit(next)
++    }
++
++    public func remove(_ id: String) throws {
++        lock.lock()
++        defer { lock.unlock() }
++        var next = document
++        next.records.removeValue(forKey: id)
++        try commit(next)
++    }
++
++    public func setSafeMode(_ enabled: Bool) throws {
++        lock.lock()
++        defer { lock.unlock() }
++        var next = document
++        next.safeMode = enabled
++        try commit(next)
++    }
++
++    /// Explicit recovery from malformed storage keeps the original bytes for inspection.
++    public func reset() throws {
++        lock.lock()
++        defer { lock.unlock() }
++        if FileManager.default.fileExists(atPath: file.path) {
++            try FileManager.default.copyItem(
++                at: file, to: directory.appendingPathComponent("registry-" + UUID().uuidString + ".bak"))
++        }
++        var empty = Document()
++        try transitionPython(from: document, to: &empty)
++        try persist(empty)
++        document = empty
++        corrupt = false
++        failure = nil
++        try clearRecovery()
++        if FileManager.default.fileExists(atPath: pythonRecovery.path) {
++            try FileManager.default.removeItem(at: pythonRecovery)
++        }
++        changed()
++    }
++
++    public func dispatch(_ original: PluginEvent) -> PluginEvent? {
++        lock.lock()
++        defer { lock.unlock() }
++        guard !document.safeMode, original.text.utf8.count <= 65536 else { return original }
++        var current = original
++        // One invocation per plugin using its highest matching priority; IDs break ties.
++        let candidates: [(String, Int)] = document.records.compactMap { id, record in
++            guard record.isEnabled(account: original.account) else { return nil }
++            let priorities = record.manifest.hooks.filter { $0.event == original.kind && $0.matchesName(original.name) }
++                .map { $0.priority ?? 0 }
++            return priorities.max().map { (id, $0) }
++        }.sorted { $0.1 == $1.1 ? $0.0 < $1.0 : $0.1 > $1.1 }
++        for (id, _) in candidates {
++            guard let record = document.records[id], record.isEnabled(account: current.account) else { continue }
++            let hooks = record.manifest.hooks.enumerated().filter {
++                $0.element.event == current.kind && $0.element.matchesName(current.name)
++            }.sorted {
++                let left = $0.element.priority ?? 0
++                let right = $1.element.priority ?? 0
++                return left == right ? $0.offset < $1.offset : left > right
++            }
++            guard let hook = hooks.first?.element else { continue }
++            do {
++                let reply = try PythonPluginRuntime.shared.invoke(
++                    record, event: current, callback: hook.callback, marker: pythonRecovery)
++                let strategy = reply.strategy ?? .default
++                let replacementText = reply.text
++                let replacementError = reply.error
++                try acceptPythonSettings(reply.settings, id: id, account: current.account)
++                if current.kind == .preRequest {
++                    try pluginRequire(
++                        (strategy == .default || strategy == .cancel) && replacementText == nil
++                            && replacementError == nil,
++                        "Pre-request hooks support default or cancel only.")
++                } else if current.kind == .postRequest {
++                    try pluginRequire(
++                        strategy != .cancel && replacementText == nil,
++                        "Post-request hooks cannot cancel or replace a response.")
++                } else {
++                    try pluginRequire(replacementError == nil, "Message hooks cannot return errors.")
++                }
++                if strategy == .modify || strategy == .modifyFinal {
++                    try pluginRequire(
++                        current.kind == .postRequest ? replacementError != nil : replacementText != nil,
++                        "Python modification returned no replacement value.")
++                }
++                switch strategy {
++                case .default: continue
++                case .cancel: return nil
++                case .modify, .modifyFinal:
++                    var modified = current
++                    if let text = replacementText {
++                        try pluginRequire(text.utf8.count <= 65536, "Python text exceeds 64 KB.")
++                        modified.text = text
++                    }
++                    if let error = replacementError, current.error != nil {
++                        try pluginRequire(error.utf8.count <= 512, "Plugin error text exceeds 512 bytes.")
++                        modified.error = error
++                    }
++                    if current.kind == .sendMessage {
++                        try pluginRequire(
++                            modified.text.utf16.count <= 4096, "Outgoing plugin text exceeds 4096 characters.")
++                    }
++                    current = modified
++                    if strategy == .modifyFinal { return current }
++                }
++            } catch { fail(id, error: error) }
++        }
++        return current
++    }
++
++    public func menuItems(location: PluginMenu.Location, event: PluginEvent) -> [PluginMenuItem] {
++        lock.lock()
++        defer { lock.unlock() }
++        guard !document.safeMode else { return [] }
++        return document.records.keys.sorted().flatMap { id -> [PluginMenuItem] in
++            guard let record = document.records[id], record.isEnabled(account: event.account) else { return [] }
++            return record.manifest.menus.filter {
++                $0.location == location
++            }.map { PluginMenuItem(pluginID: id, menuID: $0.id, title: $0.title) }
++        }
++    }
++
++    public func performMenu(_ item: PluginMenuItem, location: PluginMenu.Location, event: PluginEvent)
++        -> PluginMenuResult?
++    {
++        lock.lock()
++        defer { lock.unlock() }
++        guard !document.safeMode, let record = document.records[item.pluginID],
++            record.isEnabled(account: event.account),
++            let menu = record.manifest.menus.first(where: { $0.id == item.menuID && $0.location == location })
++        else { return nil }
++        do {
++            let reply = try PythonPluginRuntime.shared.invoke(
++                record, event: event, callback: menu.callback, menuID: menu.id, marker: pythonRecovery)
++            guard let text = reply.text, text.utf8.count <= 65536 else {
++                throw SettingsError.invalid("Python menu returned invalid text.")
++            }
++            try acceptPythonSettings(reply.settings, id: item.pluginID, account: event.account)
++            return PluginMenuResult(action: menu.action, text: text)
++        } catch {
++            fail(item.pluginID, error: error)
++            return nil
++        }
++    }
++
++    private static func validateAccount(_ account: String) throws {
++        try pluginRequire(
++            !account.isEmpty && account.utf8.count <= 32 && account.utf8.allSatisfy { (48...57).contains($0) },
++            "Invalid plugin account ID.")
++    }
++
++    private func fail(_ id: String, error: Error) {
++        var next = document
++        next.records[id]?.error = error.localizedDescription
++        // Runtime failure preserves desired enablement but removes every active registration.
++        do { try commit(next) } catch {
++            document = next
++            document.safeMode = true
++            failure = error.localizedDescription
++            changed()
++        }
++    }
++
++    private func commit(_ proposed: Document) throws {
++        try pluginRequire(!corrupt, "Plugin registry is damaged. Reset it before making changes.")
++        var next = proposed
++        // One atomic document covers sources, settings, and desired enablement. Memory changes last.
++        try Data("{\"operation\":\"registry-change\"}".utf8).write(to: recoveryFile, options: .atomic)
++        do {
++            try transitionPython(from: document, to: &next)
++            try persist(next)
++        } catch {
++            var restored = document
++            do { try transitionPython(from: next, to: &restored) } catch {
++                document.safeMode = true
++                failure = "Python rollback failed. Restart in safe mode: " + error.localizedDescription
++            }
++            throw error
++        }
++        document = next
++        do {
++            try clearRecovery()
++            failure = nil
++        } catch {
++            document.safeMode = true
++            failure = error.localizedDescription
++        }
++        changed()
++    }
++
++    private func checkedPythonSettings(_ values: [String: PluginValue], record: PluginRecord) throws {
++        for (key, value) in values {
++            guard let setting = record.manifest.settings.first(where: { $0.key == key }) else {
++                throw SettingsError.invalid("Python changed an undeclared setting: " + key)
++            }
++            try setting.validate(value)
++        }
++    }
++
++    private func acceptPythonSettings(_ values: [String: PluginValue]?, id: String, account: String) throws {
++        guard let values, let record = document.records[id] else { return }
++        try checkedPythonSettings(values, record: record)
++        guard values != record.values(account: account) else { return }
++        var next = document
++        next.records[id]?.settings[account] = values
++        try commit(next)
++    }
++
++    private func transitionPython(from old: Document, to next: inout Document) throws {
++        for id in Set(old.records.keys).union(next.records.keys).sorted() {
++            let previous = old.records[id]
++            let updated = next.records[id]
++            let accounts = (previous?.enabledAccounts ?? []).union(updated?.enabledAccounts ?? [])
++            for account in accounts.sorted() {
++                let wasActive = !old.safeMode && previous?.isEnabled(account: account) == true
++                let active = !next.safeMode && next.records[id]?.isEnabled(account: account) == true
++                let changedSource = previous?.manifest.pythonSource != updated?.manifest.pythonSource
++                if wasActive, !active || changedSource {
++                    do { try PythonPluginRuntime.shared.unload(id, account: account, marker: pythonRecovery) } catch {
++                        next.records[id]?.error = error.localizedDescription
++                    }
++                }
++                if active, var record = next.records[id], !wasActive || changedSource {
++                    let values = try PythonPluginRuntime.shared.load(record, account: account, marker: pythonRecovery)
++                    try checkedPythonSettings(values, record: record)
++                    record.settings[account] = values
++                    next.records[id] = record
++                }
++            }
++        }
++    }
++
++    private func persist(_ next: Document) throws {
++        let encoder = JSONEncoder()
++        encoder.outputFormatting = [.sortedKeys]
++        let data = try encoder.encode(next)
++        try pluginRequire(data.count <= 32 * 1024 * 1024, "Plugin registry exceeds 32 MB.")
++        try data.write(to: file, options: .atomic)
++    }
++
++    private func clearRecovery() throws {
++        if FileManager.default.fileExists(atPath: recoveryFile.path) {
++            try FileManager.default.removeItem(at: recoveryFile)
++        }
++    }
++
++    private func changed() {
++        DispatchQueue.main.async { NotificationCenter.default.post(name: .pluginsChanged, object: nil) }
++    }
++}
++
++extension Notification.Name {
++    public static let pluginsChanged = Notification.Name("SGAPluginsChanged")
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift b/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..607293863bdafe357d1b4c184c1a70f82d79a448
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
+@@ -0,0 +1,167 @@
++import Foundation
++import SGPythonBridge
++
++struct PythonPluginReply: Decodable {
++    var manifest: PluginManifest?
++    var settings: [String: PluginValue]?
++    var strategy: PluginStrategy?
++    var text: String?
++    var error: String?
++}
++
++/// Calls CPython on a worker and bounds the host's wait. A timeout quarantines the
++/// interpreter until restart; it does not pretend to terminate arbitrary Python/C code.
++final class PythonPluginRuntime {
++    static let shared = PythonPluginRuntime()
++    private let worker = DispatchQueue(label: "app.swiftgram.python")
++    private let stateLock = NSLock()
++    private var quarantined = false
++    private var initialized = false
++
++    private struct Request: Encodable {
++        let operation: String
++        var id: String?
++        var account: String?
++        var source: String?
++        var settings: [String: PluginValue]?
++        var event: PluginEvent?
++        var callback: String?
++        var menuID: String?
++    }
++
++    private struct Envelope: Decodable {
++        var result: PythonPluginReply?
++        var failure: String?
++    }
++
++    private final class Job {
++        let semaphore = DispatchSemaphore(value: 0)
++        let lock = NSLock()
++        var expired = false
++        var result: Result<PythonPluginReply, Error>?
++    }
++
++    func inspect(_ source: String, marker: URL) throws -> PluginManifest {
++        let reply = try request(Request(operation: "inspect", source: source), marker: marker)
++        guard var manifest = reply.manifest else { throw SettingsError.invalid("Python returned no metadata.") }
++        manifest.pythonSource = source
++        return manifest
++    }
++
++    func load(_ record: PluginRecord, account: String, marker: URL) throws -> [String: PluginValue] {
++        try request(
++            Request(
++                operation: "load", id: record.manifest.id, account: account,
++                source: record.manifest.pythonSource, settings: record.values(account: account)), marker: marker
++        ).settings ?? [:]
++    }
++
++    func unload(_ id: String, account: String, marker: URL) throws {
++        stateLock.lock()
++        let blocked = quarantined
++        stateLock.unlock()
++        if blocked { return }
++        _ = try request(Request(operation: "unload", id: id, account: account), marker: marker)
++    }
++
++    func invoke(
++        _ record: PluginRecord, event: PluginEvent, callback: String, menuID: String? = nil,
++        marker: URL
++    ) throws -> PythonPluginReply {
++        try request(
++            Request(
++                operation: menuID == nil ? "hook" : "menu", id: record.manifest.id,
++                account: event.account, source: record.manifest.pythonSource,
++                settings: record.values(account: event.account),
++                event: event, callback: callback, menuID: menuID), marker: marker)
++    }
++
++    private func request(_ request: Request, marker: URL) throws -> PythonPluginReply {
++        stateLock.lock()
++        let blocked = quarantined
++        stateLock.unlock()
++        try pluginRequire(!blocked, "Python stopped responding. Restart Swiftgram to recover.")
++        let payload = String(decoding: try JSONEncoder().encode(request), as: UTF8.self)
++        let job = Job()
++        let recovery = try JSONEncoder().encode(["id": request.id ?? "", "operation": request.operation])
++        worker.async { [self] in
++            job.lock.lock()
++            let expired = job.expired
++            job.lock.unlock()
++            if expired {
++                job.semaphore.signal()
++                return
++            }
++            let result = Result { () throws -> PythonPluginReply in
++                try recovery.write(to: marker, options: .atomic)
++                if !initialized {
++                    #if TESTING
++                        let home = ProcessInfo.processInfo.environment["SGA_PYTHON_HOME"] ?? ""
++                        let sdk = ProcessInfo.processInfo.environment["SGA_PYTHON_SDK"] ?? ""
++                    #else
++                        guard let home = Self.bundledResource("SwiftgramPython.bundle"),
++                            let sdk = Self.bundledResource("SwiftgramPythonSDK.bundle")
++                        else {
++                            throw SettingsError.invalid("Bundled Python resources are unavailable.")
++                        }
++                    #endif
++                    var error: UnsafeMutablePointer<CChar>?
++                    let success = SGPythonInitialize(home, sdk, &error)
++                    defer { SGPythonFree(error) }
++                    try pluginRequire(success != 0, error.map { String(cString: $0) } ?? "Cannot initialize CPython.")
++                    initialized = true
++                }
++                var error: UnsafeMutablePointer<CChar>?
++                let response = SGPythonCall(payload, &error)
++                defer {
++                    SGPythonFree(response)
++                    SGPythonFree(error)
++                }
++                guard let response else {
++                    throw SettingsError.invalid(error.map { String(cString: $0) } ?? "Python failed.")
++                }
++                let data = Data(String(cString: response).utf8)
++                try pluginRequire(data.count <= 512 * 1024, "Python returned an oversized response.")
++                let envelope = try JSONDecoder().decode(Envelope.self, from: data)
++                if let failure = envelope.failure { throw SettingsError.invalid(failure) }
++                guard let reply = envelope.result else { throw SettingsError.invalid("Invalid Python response.") }
++                return reply
++            }
++            job.lock.lock()
++            if !job.expired {
++                try? FileManager.default.removeItem(at: marker)
++                job.result = result
++            }
++            job.lock.unlock()
++            job.semaphore.signal()
++        }
++        let seconds: Double = (request.operation == "hook" || request.operation == "menu") ? 0.25 : 2.0
++        if job.semaphore.wait(timeout: .now() + seconds) == .timedOut {
++            job.lock.lock()
++            job.expired = true
++            job.lock.unlock()
++            stateLock.lock()
++            quarantined = true
++            stateLock.unlock()
++            // Keep recovery even if completion raced the caller's deadline.
++            try? recovery.write(to: marker, options: .atomic)
++            throw SettingsError.invalid("Python exceeded the host deadline. The interpreter is paused until restart.")
++        }
++        job.lock.lock()
++        let result = job.result
++        job.lock.unlock()
++        guard let result else { throw SettingsError.invalid("Missing Python result.") }
++        return try result.get()
++    }
++
++    private static func bundledResource(_ name: String) -> String? {
++        for bundle in [Bundle.main] + Bundle.allFrameworks {
++            if let directory = bundle.resourceURL?.appendingPathComponent(name),
++                FileManager.default.fileExists(atPath: directory.path)
++            {
++                return directory.path
++            }
++        }
++        return nil
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+index cfe68b527df9988894a74e03018cb57c6e869a6b..fbb1b865636d25b7756ad21a3c26cff318543ffa 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -60,7 +60,9 @@ struct CheckCore {
+         let saved = try JSONDecoder().decode([String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
+         CheckCore.require(saved["77"]?["serverUser"] == Data([1, 2]), "badge changes preserve legacy server snapshot")
+         CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "88") == nil, "badge account isolation")
++        try PluginChecks.run(root: root)
++        try PythonPluginChecks.run(root: root)
+         try DisappearingChecks.run(root: root)
+-        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media")
++        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media, plugins")
+     }
+ }
+diff --git a/Swiftgram/SGAdditionalCore/Tests/PluginChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PluginChecks.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..c2a602d36b5a359ba33353a03ac4d812e39dab8a
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/PluginChecks.swift
+@@ -0,0 +1,310 @@
++import Foundation
++
++enum PluginChecks {
++    private static func source(
++        _ id: String = "aa", name: String = "Test", version: String = "1.0",
++        permissions: String = "['incomingMessages']",
++        hooks: String = "[{'event': 'message', 'name': 'message'}]",
++        settings: String = "[]", menus: String = "[]", metadata: String = "",
++        methods: String =
++            "    def on_message(self, event):\n        return HookResult(HookStrategy.MODIFY, text=event.text + 'A')"
++    ) -> Data {
++        func literal(_ value: String) -> String {
++            let encoder = JSONEncoder()
++            encoder.outputFormatting = [.withoutEscapingSlashes]
++            return String(decoding: try! encoder.encode(value), as: UTF8.self)
++        }
++        return Data(
++            """
++            __id__ = \(literal(id))
++            __name__ = \(literal(name))
++            __version__ = \(literal(version))
++            __permissions__ = \(permissions)
++            __hooks__ = \(hooks)
++            __settings__ = \(settings)
++            __menus__ = \(menus)
++            \(metadata)
++            from swiftgram import BasePlugin, HookResult, HookStrategy
++            class Plugin(BasePlugin):
++            \(methods)
++            """.utf8)
++    }
++
++    private static func rejects(_ label: String, _ action: () throws -> Void) {
++        do { try action() } catch { return }
++        fatalError("FAILED: accepted " + label)
++    }
++
++    static func run(root: URL) throws {
++        let directory = root.appendingPathComponent("plugin-checks")
++        let registry = PluginRegistry(directory: directory, hostVersion: "13.0.1")
++        let event = PluginEvent(kind: .message, name: "message", account: "77", chat: "user:42", text: "x")
++        for id in ["ab", "a_", "a-", "a" + String(repeating: "1", count: 31)] {
++            _ = try registry.inspect(source(id))
++        }
++        for id in ["a", "a" + String(repeating: "1", count: 32), "1a", "éa", "a/a", "../a", "a.b", ""] {
++            rejects("invalid ID " + id) { _ = try registry.inspect(source(id)) }
++        }
++        rejects("blank name") { _ = try registry.inspect(source(name: " \n ")) }
++        rejects("invalid UTF-8") { _ = try registry.inspect(Data([0xff])) }
++        rejects("source-size limit") { _ = try registry.inspect(Data(repeating: 32, count: 256 * 1024 + 1)) }
++        rejects("missing metadata") { _ = try registry.inspect(Data("print('not metadata')".utf8)) }
++        for expression in [">=1", "<=1.0.0", "==1", ">0.9", "<1.1"] {
++            _ = try registry.inspect(source(metadata: "__sdk_version__ = '\(expression)'"))
++        }
++        for expression in [">1", "<1.0", ">=2", "1", "~=1", ">=1..0", ">=-1", ">=9999999", "=="] {
++            rejects("SDK constraint " + expression) {
++                _ = try registry.inspect(source(metadata: "__sdk_version__ = '\(expression)'"))
++            }
++        }
++        rejects("host constraint") { _ = try registry.inspect(source(metadata: "__app_version__ = '>13.0.1'")) }
++        rejects("missing capability") { _ = try registry.inspect(source(permissions: "[]")) }
++        rejects("priority overflow") {
++            _ = try registry.inspect(source(hooks: "[{'event':'message','name':'message','priority':1001}]"))
++        }
++        rejects("invalid callback") {
++            _ = try registry.inspect(source(hooks: "[{'event':'message','name':'message','callback':'not.a.method'}]"))
++        }
++        rejects("declarative hook behavior") {
++            _ = try registry.inspect(source(hooks: "[{'event':'message','name':'message','strategy':'cancel'}]"))
++        }
++        rejects("declarative menu text") {
++            _ = try registry.inspect(source(menus: "[{'id':'copy','text':'${text}'}]"))
++        }
++        try registry.install(source())
++        CheckCore.require(registry.dispatch(event) == event, "installation does not enable Python")
++        let stored = try Data(contentsOf: directory.appendingPathComponent("registry.json"))
++        for input in [
++            "{}", "[]",
++            "{\"schemaVersion\":1,\"id\":\"json-test\",\"name\":\"JSON\",\"version\":\"1\",\"permissions\":[],\"rules\":[],\"settings\":[],\"menus\":[]}",
++        ] {
++            rejects("JSON plugin") { try registry.install(Data(input.utf8)) }
++        }
++        let afterRejectedImports = try Data(contentsOf: directory.appendingPathComponent("registry.json"))
++        CheckCore.require(
++            afterRejectedImports == stored,
++            "rejected JSON imports preserve installed Python plugins")
++        try registry.setEnabled("aa", account: "77", enabled: true)
++        CheckCore.require(registry.dispatch(event)?.text == "xA", "Python callback changes message text")
++        let other = PluginEvent(kind: .message, name: "message", account: "88", text: "x")
++        CheckCore.require(registry.dispatch(other) == other, "account isolation")
++        for (id, suffix, priority) in [("bb", "B", 0), ("cc", "C", -1)] {
++            try registry.install(
++                source(
++                    id, hooks: "[{'event':'message','name':'message','priority':\(priority)}]",
++                    methods:
++                        "    def on_message(self, event):\n        return HookResult(HookStrategy.MODIFY, text=event.text + '\(suffix)')"
++                ))
++            try registry.setEnabled(id, account: "77", enabled: true)
++        }
++        CheckCore.require(registry.dispatch(event)?.text == "xABC", "priority order and ID tie break")
++        let overlapping = """
++            [{'event':'message','name':'message','priority':1},
++             {'event':'message','name':'mess','substring':True,'priority':10,'callback':'high'}]
++            """
++        let methods = """
++                def on_message(self, event):
++                    return HookResult(HookStrategy.MODIFY, text=event.text + 'L')
++                def high(self, event):
++                    return HookResult(HookStrategy.MODIFY, text=event.text + 'H')
++            """
++        try registry.install(source(hooks: overlapping, methods: methods))
++        CheckCore.require(registry.dispatch(event)?.text == "xHBC", "highest priority callback runs once per plugin")
++        try registry.setEnabled("aa", account: "77", enabled: true)
++        CheckCore.require(registry.dispatch(event)?.text == "xHBC", "repeated enable does not duplicate callbacks")
++        let uppercase = PluginEvent(kind: .message, name: "Message", account: "77", text: "x")
++        CheckCore.require(registry.dispatch(uppercase) == uppercase, "event names are case sensitive")
++        try registry.install(
++            source(
++                methods:
++                    "    def on_message(self, event):\n        return HookResult(HookStrategy.MODIFY_FINAL, text=event.text + 'F')"
++            ))
++        CheckCore.require(registry.dispatch(event)?.text == "xF", "final modification stops later plugins")
++        try registry.install(
++            source(methods: "    def on_message(self, event):\n        return HookResult(HookStrategy.CANCEL)"))
++        CheckCore.require(registry.dispatch(event) == nil, "Python cancellation stops processing")
++        let before = registry.records()
++        rejects("invalid update") { try registry.install(source(version: "invalid")) }
++        CheckCore.require(
++            registry.records() == before && registry.dispatch(event) == nil, "invalid update preserves installation")
++
++        let settings = """
++            [{'key':'caption','title':'Caption','defaultValue':'A','choices':['A','B']},
++             {'key':'amount','title':'Amount','defaultValue':2},
++             {'key':'enabled','title':'Enabled','defaultValue':True}]
++            """
++        let menus = "[{'id':'copy','title':'Copy','location':'message','action':'copyText'}]"
++        let configured = source(
++            permissions: "['incomingMessages','menus']", settings: settings, menus: menus,
++            methods:
++                "    def on_message(self, event):\n        return HookResult(HookStrategy.MODIFY, text=event.text + str(self.settings['caption']))"
++        )
++        try registry.install(configured)
++        CheckCore.require(
++            registry.records().first?.enabledAccounts.isEmpty == true, "added permissions require reenabling")
++        try registry.setEnabled("aa", account: "77", enabled: true)
++        try registry.saveSettings("aa", account: "77", values: ["caption": .string("B"), "amount": .integer(7)])
++        CheckCore.require(registry.dispatch(event)?.text == "xBBC", "settings reach Python callbacks")
++        rejects("wrong setting type") {
++            try registry.saveSettings("aa", account: "77", values: ["amount": .string("bad")])
++        }
++        rejects("unknown choice") { try registry.saveSettings("aa", account: "77", values: ["caption": .string("C")]) }
++        rejects("unknown setting") { try registry.saveSettings("aa", account: "77", values: ["missing": .bool(true)]) }
++        let reloaded = PluginRegistry(directory: directory, hostVersion: "13.0.1")
++        CheckCore.require(
++            reloaded.dispatch(event)?.text == "xBBC", "registry round trip preserves settings and activation")
++        let items = reloaded.menuItems(location: .message, event: event)
++        CheckCore.require(
++            items.count == 1 && reloaded.performMenu(items[0], location: .message, event: event)?.text == "x",
++            "native menu invokes Python")
++        CheckCore.require(
++            reloaded.menuItems(location: .settings, event: event).isEmpty, "menu locations remain distinct")
++        try reloaded.setSafeMode(true)
++        CheckCore.require(
++            reloaded.dispatch(event) == event && reloaded.menuItems(location: .message, event: event).isEmpty,
++            "safe mode pauses callbacks")
++        CheckCore.require(
++            reloaded.performMenu(items[0], location: .message, event: event) == nil, "safe mode rejects stale menus")
++        try reloaded.setSafeMode(false)
++        try reloaded.setEnabled("aa", account: "77", enabled: false)
++        CheckCore.require(reloaded.dispatch(event)?.text == "xBC", "disable removes callbacks")
++        try reloaded.setEnabled("aa", account: "77", enabled: true)
++        try reloaded.remove("aa")
++        CheckCore.require(
++            reloaded.performMenu(items[0], location: .message, event: event) == nil, "uninstall rejects stale menus")
++
++        try reloaded.install(
++            source(
++                "overflow", hooks: "[{'event':'message','name':'message','priority':100}]",
++                methods:
++                    "    def on_message(self, event):\n        return HookResult(HookStrategy.MODIFY, text='x' * 65537)"
++            ))
++        try reloaded.setEnabled("overflow", account: "77", enabled: true)
++        CheckCore.require(
++            reloaded.dispatch(event)?.text == "xBC", "failed callback preserves preceding value and continues")
++        CheckCore.require(
++            reloaded.records().first { $0.manifest.id == "overflow" }?.error != nil, "runtime failure disables plugin")
++        CheckCore.require(
++            PluginRegistry(directory: directory, hostVersion: "13.0.1").records().first {
++                $0.manifest.id == "overflow"
++            }?.error != nil, "runtime failure persists")
++
++        let post = source(
++            "network", permissions: "['network']", hooks: "[{'event':'postRequest','name':'messages.sendMessage'}]",
++            methods:
++                "    def post_request_hook(self, event):\n        return HookResult(HookStrategy.MODIFY, error=(event.error or '') + ' local')"
++        )
++        try reloaded.install(post)
++        try reloaded.setEnabled("network", account: "77", enabled: true)
++        let error = PluginEvent(kind: .postRequest, name: "messages.sendMessage", account: "77", error: "FAILED")
++        CheckCore.require(reloaded.dispatch(error)?.error == "FAILED local", "Python changes existing request errors")
++        let success = PluginEvent(kind: .postRequest, name: error.name, account: "77")
++        CheckCore.require(
++            reloaded.dispatch(success)?.error == nil, "post-request callback cannot turn success into failure")
++        try reloaded.install(
++            source(
++                "network", permissions: "['network']", hooks: "[{'event':'postRequest','name':'messages.sendMessage'}]",
++                methods: "    def post_request_hook(self, event):\n        return HookResult(HookStrategy.CANCEL)"))
++        CheckCore.require(reloaded.dispatch(error) == error, "post-request cancellation is rejected at runtime")
++        try reloaded.install(
++            source(
++                "block", permissions: "['network']", hooks: "[{'event':'preRequest','name':'account.updateStatus'}]",
++                methods: "    def pre_request_hook(self, event):\n        return HookResult(HookStrategy.CANCEL)"))
++        try reloaded.setEnabled("block", account: "77", enabled: true)
++        CheckCore.require(
++            reloaded.dispatch(PluginEvent(kind: .preRequest, name: "account.updateStatus", account: "77")) == nil,
++            "Python pre-request cancellation")
++        try reloaded.install(
++            source(
++                "send", permissions: "['outgoingMessages']", hooks: "[{'event':'sendMessage','name':'send_message'}]",
++                methods:
++                    "    def on_send_message(self, event):\n        return HookResult(HookStrategy.MODIFY, text='x' * 4097)"
++            ))
++        try reloaded.setEnabled("send", account: "77", enabled: true)
++        let send = PluginEvent(kind: .sendMessage, name: "send_message", account: "77", text: "original")
++        CheckCore.require(reloaded.dispatch(send) == send, "outgoing text limit preserves original message")
++
++        let file = directory.appendingPathComponent("registry.json")
++        let backup = directory.appendingPathComponent("io-fixture.json")
++        let savedRecords = reloaded.records()
++        try FileManager.default.moveItem(at: file, to: backup)
++        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
++        rejects("failed replacement write") { try reloaded.install(source("bb")) }
++        CheckCore.require(reloaded.records() == savedRecords, "I/O failure preserves source, settings, and enablement")
++        try FileManager.default.removeItem(at: file)
++        try FileManager.default.moveItem(at: backup, to: file)
++        let recovered = PluginRegistry(directory: directory, hostVersion: "13.0.1")
++        CheckCore.require(
++            recovered.safeMode() && recovered.dispatch(event) == event, "interrupted mutation enters safe mode")
++        try recovered.setSafeMode(false)
++        CheckCore.require(
++            !PluginRegistry(directory: directory, hostVersion: "13.0.1").safeMode(),
++            "explicit recovery survives restart")
++
++        let corruptDirectory = root.appendingPathComponent("corrupt-plugins")
++        try FileManager.default.createDirectory(at: corruptDirectory, withIntermediateDirectories: false)
++        try Data("broken".utf8).write(to: corruptDirectory.appendingPathComponent("registry.json"))
++        let corrupt = PluginRegistry(directory: corruptDirectory, hostVersion: "13.0.1")
++        CheckCore.require(corrupt.safeMode() && corrupt.status() != nil, "corrupt storage leaves recovery available")
++        rejects("overwrite damaged registry") { try corrupt.install(source()) }
++        try corrupt.reset()
++        CheckCore.require(corrupt.records().isEmpty && !corrupt.safeMode(), "reset repairs registry")
++        let recoveredFiles = try FileManager.default.contentsOfDirectory(atPath: corruptDirectory.path)
++        CheckCore.require(recoveredFiles.contains { $0.hasSuffix(".bak") }, "reset backs up damaged storage")
++
++        let sourceRequiredDirectory = root.appendingPathComponent("source-required")
++        try FileManager.default.createDirectory(at: sourceRequiredDirectory, withIntermediateDirectories: false)
++        var storedDocument = try JSONSerialization.jsonObject(with: stored) as! [String: Any]
++        var storedRecords = storedDocument["records"] as! [String: [String: Any]]
++        var storedRecord = storedRecords["aa"]!
++        var storedManifest = storedRecord["manifest"] as! [String: Any]
++        storedManifest.removeValue(forKey: "pythonSource")
++        storedRecord["manifest"] = storedManifest
++        storedRecords["aa"] = storedRecord
++        storedDocument["records"] = storedRecords
++        try JSONSerialization.data(withJSONObject: storedDocument).write(
++            to: sourceRequiredDirectory.appendingPathComponent("registry.json"))
++        let sourceRequired = PluginRegistry(directory: sourceRequiredDirectory, hostVersion: "13.0.1")
++        CheckCore.require(
++            sourceRequired.safeMode() && sourceRequired.records().isEmpty,
++            "stored plugins without Python source cannot become active")
++
++        let migration = PluginRegistry(
++            directory: root.appendingPathComponent("plugin-migration"), hostVersion: "13.0.1")
++        try migration.install(source(settings: settings))
++        try migration.setEnabled("aa", account: "77", enabled: true)
++        try migration.saveSettings("aa", account: "77", values: ["caption": .string("B"), "amount": .integer(7)])
++        try migration.install(
++            source(
++                settings:
++                    "[{'key':'caption','title':'Caption','defaultValue':'A','choices':['A','B']},{'key':'amount','title':'Amount','defaultValue':'new'}]"
++            ))
++        let migrated = migration.records()[0]
++        CheckCore.require(migrated.isEnabled(account: "77"), "update preserves activation without added permissions")
++        CheckCore.require(
++            migrated.values(account: "77")["caption"] == .string("B"), "update preserves compatible settings")
++        CheckCore.require(migrated.values(account: "77")["amount"] == .string("new"), "changed types reset settings")
++        CheckCore.require(migrated.values(account: "77")["enabled"] == nil, "removed setting is pruned")
++        rejects("invalid account") { try migration.setEnabled("aa", account: "other", enabled: true) }
++
++        let concurrent = PluginRegistry(directory: root.appendingPathComponent("plugin-races"), hostVersion: "13.0.1")
++        try concurrent.install(source())
++        let group = DispatchGroup()
++        for _ in 0..<4 {
++            group.enter()
++            DispatchQueue.global().async {
++                do {
++                    try concurrent.setEnabled("aa", account: "77", enabled: true)
++                    _ = concurrent.dispatch(event)
++                    try concurrent.setEnabled("aa", account: "77", enabled: false)
++                } catch { fatalError("Concurrent lifecycle failed: \(error)") }
++                group.leave()
++            }
++        }
++        group.wait()
++        try concurrent.setEnabled("aa", account: "77", enabled: false)
++        CheckCore.require(concurrent.dispatch(event) == event, "disable race leaves no registrations")
++        try concurrent.setEnabled("aa", account: "77", enabled: true)
++        CheckCore.require(concurrent.dispatch(event)?.text == "xA", "enable race does not duplicate callbacks")
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..120e4a1087cb7e78127ac1e610289f9ef753f729
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
+@@ -0,0 +1,98 @@
++import Foundation
++
++enum PythonPluginChecks {
++    static func run(root: URL) throws {
++        let registry = PluginRegistry(directory: root.appendingPathComponent("python-core"), hostVersion: "13.0.1")
++        guard let examples = ProcessInfo.processInfo.environment["SGA_PLUGIN_EXAMPLES"] else {
++            throw SettingsError.invalid("Run Python checks using tools/test-core.sh.")
++        }
++        let example = URL(fileURLWithPath: examples).appendingPathComponent("uppercase.py")
++        let uppercase = try registry.install(Data(contentsOf: example))
++        try registry.setEnabled(uppercase.id, account: "77", enabled: true)
++        let send = PluginEvent(kind: .sendMessage, name: "send_message", account: "77", text: "Hello")
++        CheckCore.require(
++            registry.dispatch(send)?.text == "HELLO", "shipped Python example executes without dependencies")
++        try registry.remove(uppercase.id)
++        let source = """
++            __id__ = "real-python"
++            __name__ = "Real Python"
++            __permissions__ = ["incomingMessages", "menus"]
++            __hooks__ = [{"event": "message", "name": "message"}]
++            __settings__ = [{"key": "counter", "title": "Counter", "defaultValue": 0}]
++            __menus__ = [{"id": "copy", "title": "Python copy", "location": "message", "action": "copyText"}]
++            import json
++            import math
++            import sys
++            from swiftgram import BasePlugin, HookResult, HookStrategy
++            class Plugin(BasePlugin):
++                def on_plugin_load(self):
++                    if any("site-packages" in path for path in sys.path):
++                        raise RuntimeError("Third-party search path was enabled")
++                def on_message(self, event):
++                    self.settings["counter"] += 1
++                    numbers = [math.factorial(number) for number in range(5)]
++                    return HookResult(HookStrategy.MODIFY, text=event.text.upper() + ":" + str(sum(numbers)))
++                def on_menu(self, event, menu_id):
++                    return json.dumps([event.account, event.chat, event.text])
++            """
++        let manifest = try registry.install(Data(source.utf8))
++        CheckCore.require(manifest.pythonSource == source, "Python source is preserved")
++        let event = PluginEvent(kind: .message, name: "message", account: "77", chat: "user:42", text: "hello")
++        CheckCore.require(registry.dispatch(event) == event, "Python installation is separate from execution")
++        try registry.setEnabled(manifest.id, account: "77", enabled: true)
++        CheckCore.require(
++            registry.dispatch(event)?.text == "HELLO:34", "Swift invokes real Python functions and stdlib")
++        CheckCore.require(
++            registry.records()[0].values(account: "77")["counter"] == .integer(1), "Python setting changes persist")
++        CheckCore.require(
++            registry.records()[0].values(account: "88")["counter"] == .integer(0), "Python settings are account scoped")
++        let items = registry.menuItems(location: .message, event: event)
++        CheckCore.require(items.count == 1, "Python menu metadata registers a native item")
++        CheckCore.require(
++            registry.performMenu(items[0], location: .message, event: event)?.text
++                == "[\"77\", \"user:42\", \"hello\"]", "Python menu callback returns native action content")
++
++        let broken = source.replacingOccurrences(
++            of: "import json", with: "raise RuntimeError('bad update')\nimport json")
++        do {
++            try registry.install(Data(broken.utf8))
++            fatalError("Broken Python update accepted")
++        } catch {}
++        CheckCore.require(
++            registry.records()[0].manifest.pythonSource == source, "failed import restores previous source")
++        CheckCore.require(
++            registry.dispatch(event)?.text == "HELLO:34", "failed update restores previous Python behavior")
++        try registry.setEnabled(manifest.id, account: "77", enabled: false)
++        CheckCore.require(registry.dispatch(event) == event, "Python disable removes active hooks")
++        CheckCore.require(
++            registry.performMenu(items[0], location: .message, event: event) == nil, "stale Python menu cannot execute")
++
++        for declaration in ["__requirements__ = []", "__dependencies__ = ['requests']"] {
++            do {
++                _ = try registry.install(Data((source + "\n" + declaration).utf8))
++                fatalError("Python dependency declaration accepted")
++            } catch {
++                CheckCore.require(
++                    error.localizedDescription.contains("Third-party dependencies are unsupported"),
++                    "dependency error is explicit")
++            }
++        }
++        let missing = """
++            __id__ = "missing-import"
++            __name__ = "Missing import"
++            import swiftgram_missing_third_party_package_987654321
++            """
++        try registry.install(Data(missing.utf8))
++        do {
++            try registry.setEnabled("missing-import", account: "77", enabled: true)
++            fatalError("Missing dependency installed implicitly")
++        } catch {
++            CheckCore.require(
++                error.localizedDescription.contains("ModuleNotFoundError"),
++                "missing dependency fails without resolution")
++        }
++        CheckCore.require(
++            registry.records().first { $0.manifest.id == "missing-import" }?.isEnabled(account: "77") == false,
++            "failed activation stays inactive")
++    }
++}
+diff --git a/Swiftgram/SGPython/.gitignore b/Swiftgram/SGPython/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a60b85e148f80966a550e5ab6a762a907c69ca6
+--- /dev/null
++++ b/Swiftgram/SGPython/.gitignore
+@@ -0,0 +1,2 @@
++__pycache__/
++*.pyc
+diff --git a/Swiftgram/SGPython/BUILD b/Swiftgram/SGPython/BUILD
+new file mode 100644
+index 0000000000000000000000000000000000000000..df21db236fd5f779e9a354676a41634f762dfe68
+--- /dev/null
++++ b/Swiftgram/SGPython/BUILD
+@@ -0,0 +1,22 @@
++load("@rules_cc//cc:objc_library.bzl", "objc_library")
++load("@build_bazel_rules_apple//apple:resources.bzl", "apple_resource_bundle")
++
++exports_files(["prepare_runtime.py"])
++
++apple_resource_bundle(
++    name = "SDK",
++    bundle_name = "SwiftgramPythonSDK",
++    resources = glob(["SDK/*.py"]),
++    visibility = ["//visibility:public"],
++)
++
++objc_library(
++    name = "SGPythonBridge",
++    module_name = "SGPythonBridge",
++    srcs = ["Bridge/SGPythonBridge.c"],
++    hdrs = ["Bridge/SGPythonBridge.h"],
++    copts = ["-Wall", "-Wextra", "-Werror"],
++    enable_modules = True,
++    deps = ["@swiftgram_python//:Python", ":SDK"],
++    visibility = ["//visibility:public"],
++)
+diff --git a/Swiftgram/SGPython/Bridge/SGPythonBridge.c b/Swiftgram/SGPython/Bridge/SGPythonBridge.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..53750522182d4f596eb1fd7a93e98c4e23c5402e
+--- /dev/null
++++ b/Swiftgram/SGPython/Bridge/SGPythonBridge.c
+@@ -0,0 +1,80 @@
++#include "SGPythonBridge.h"
++#if __has_include(<Python/Python.h>)
++#include <Python/Python.h>
++#else
++#include <Python.h>
++#endif
++#include <stdlib.h>
++#include <string.h>
++
++static PyObject *handler;
++
++static char *python_error(void) {
++  PyObject *exception = PyErr_GetRaisedException();
++  PyObject *text = exception ? PyObject_Str(exception) : NULL;
++  const char *message = text ? PyUnicode_AsUTF8(text) : NULL;
++  char *copy = strdup(message ? message : "CPython execution failed");
++  Py_XDECREF(text);
++  Py_XDECREF(exception);
++  PyErr_Clear();
++  return copy;
++}
++
++int SGPythonInitialize(const char *home, const char *sdk, char **error) {
++  if (handler)
++    return 1;
++  if (Py_IsInitialized()) {
++    *error = strdup("An unmanaged Python interpreter is already running");
++    return 0;
++  }
++  PyConfig config;
++  PyConfig_InitIsolatedConfig(&config);
++  config.install_signal_handlers = 0;
++  config.write_bytecode = 0;
++  config.parse_argv = 0;
++  config.site_import = 0;
++  config.user_site_directory = 0;
++  config.safe_path = 1;
++  PyStatus status = PyStatus_Ok();
++  if (home && *home)
++    status = PyConfig_SetBytesString(&config, &config.home, home);
++  if (!PyStatus_Exception(status))
++    status = Py_InitializeFromConfig(&config);
++  PyConfig_Clear(&config);
++  if (PyStatus_Exception(status)) {
++    *error = strdup(status.err_msg ? status.err_msg
++                                   : "CPython initialization failed");
++    return 0;
++  }
++  PyObject *path = PyUnicode_DecodeFSDefault(sdk);
++  int inserted = path ? PyList_Insert(PySys_GetObject("path"), 0, path) : -1;
++  Py_XDECREF(path);
++  PyObject *module =
++      inserted == 0 ? PyImport_ImportModule("_swiftgram_runtime") : NULL;
++  if (module)
++    handler = PyObject_GetAttrString(module, "handle");
++  Py_XDECREF(module);
++  int success = handler && PyCallable_Check(handler);
++  if (!success)
++    *error = python_error();
++  (void)PyEval_SaveThread();
++  return success;
++}
++
++char *SGPythonCall(const char *request, char **error) {
++  if (!handler) {
++    *error = strdup("CPython is not initialized");
++    return NULL;
++  }
++  PyGILState_STATE gil = PyGILState_Ensure();
++  PyObject *response = PyObject_CallFunction(handler, "s", request);
++  const char *text = response ? PyUnicode_AsUTF8(response) : NULL;
++  char *result = text ? strdup(text) : NULL;
++  if (!result)
++    *error = python_error();
++  Py_XDECREF(response);
++  PyGILState_Release(gil);
++  return result;
++}
++
++void SGPythonFree(char *value) { free(value); }
+diff --git a/Swiftgram/SGPython/Bridge/SGPythonBridge.h b/Swiftgram/SGPython/Bridge/SGPythonBridge.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6933d38796ee595933582606fb2bd4a6c1dbdf93
+--- /dev/null
++++ b/Swiftgram/SGPython/Bridge/SGPythonBridge.h
+@@ -0,0 +1,9 @@
++#ifndef SG_PYTHON_BRIDGE_H
++#define SG_PYTHON_BRIDGE_H
++
++// Results are owned by the caller and released with SGPythonFree.
++int SGPythonInitialize(const char *home, const char *sdk, char **error);
++char *SGPythonCall(const char *request, char **error);
++void SGPythonFree(char *value);
++
++#endif
+diff --git a/Swiftgram/SGPython/SDK/_swiftgram_runtime.py b/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..81081f82023c9b9fba90e1ff06b3417ec21dba4a
+--- /dev/null
++++ b/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
+@@ -0,0 +1,217 @@
++"""Trusted CPython bootstrap and value-only protocol used by the native bridge."""
++
++from __future__ import annotations
++
++import ast
++import io
++import json
++import sys
++import time
++import tokenize
++import types
++from typing import TYPE_CHECKING, Any, cast
++
++if TYPE_CHECKING:
++    from _typeshed import TraceFunction
++
++from swiftgram import BasePlugin, Event, HookResult, HookStrategy, SettingValue
++
++_sessions: dict[tuple[str, str], tuple[str, types.ModuleType, BasePlugin]] = {}
++_generation = 0
++_callbacks = {
++    "message": "on_message",
++    "sendMessage": "on_send_message",
++    "preRequest": "pre_request_hook",
++    "postRequest": "post_request_hook",
++}
++
++
++def metadata(source: str) -> dict[str, object]:
++    """Read only literal top-level declarations; importing is a separate operation."""
++    for token in tokenize.generate_tokens(io.StringIO(source.lstrip("\ufeff")).readline):
++        if token.type == tokenize.COMMENT and token.string.strip() == "# /// script":
++            raise ValueError("Inline script dependencies are unsupported; use the bundled SDK")
++    tree = ast.parse(source.lstrip("\ufeff"), filename="<plugin>")
++    fields = {
++        "__id__": "id",
++        "__name__": "name",
++        "__version__": "version",
++        "__author__": "author",
++        "__description__": "description",
++        "__sdk_version__": "sdkVersion",
++        "__app_version__": "appVersion",
++        "__permissions__": "permissions",
++        "__hooks__": "hooks",
++        "__settings__": "settings",
++        "__menus__": "menus",
++    }
++    result: dict[str, object] = {
++        "schemaVersion": 1,
++        "version": "1.0",
++        "permissions": [],
++        "hooks": [],
++        "pythonSource": "",
++        "settings": [],
++        "menus": [],
++    }
++    seen: set[str] = set()
++    for node in tree.body:
++        targets = (
++            node.targets
++            if isinstance(node, ast.Assign)
++            else ([node.target] if isinstance(node, ast.AnnAssign | ast.AugAssign) else [])
++        )
++        for target in targets:
++            if isinstance(target, ast.Name) and target.id in {
++                "__requirements__",
++                "__dependencies__",
++                "requirements",
++                "dependencies",
++            }:
++                raise ValueError("Third-party dependencies are unsupported; use the bundled SDK")
++            if isinstance(target, ast.Name) and target.id in fields:
++                if target.id in seen:
++                    raise ValueError(f"Duplicate metadata declaration: {target.id}")
++                seen.add(target.id)
++                if not isinstance(node, ast.Assign | ast.AnnAssign) or node.value is None:
++                    raise ValueError("Metadata must use literal assignments")
++                result[fields[target.id]] = ast.literal_eval(node.value)
++    if "id" not in result or "name" not in result:
++        raise ValueError("Python plugins require literal __id__ and __name__ declarations")
++    for key in ("hooks", "menus"):
++        registrations = result[key]
++        if not isinstance(registrations, list) or any(
++            not isinstance(item, dict) for item in registrations
++        ):
++            raise ValueError(f"{key} must be a list of dictionaries")
++        for entry in registrations:
++            allowed = (
++                {"event", "name", "substring", "priority", "callback"}
++                if key == "hooks"
++                else {"id", "title", "location", "action", "callback"}
++            )
++            if set(entry) - allowed:
++                raise ValueError(
++                    f"Unsupported {key} fields; implement behavior in Python callbacks"
++                )
++            if key == "hooks":
++                entry.setdefault("callback", _callbacks.get(entry.get("event", ""), ""))
++            else:
++                entry.setdefault("callback", "on_menu")
++    return result
++
++
++def _settings(instance: BasePlugin) -> dict[str, SettingValue]:
++    values = instance.settings
++    if type(values) is not dict or len(values) > 32:
++        raise ValueError("Plugin settings must be a dictionary with at most 32 entries")
++    for key, value in values.items():
++        if type(key) is not str or type(value) not in (bool, int, str):
++            raise TypeError("Settings support boolean, integer, and text values")
++        if isinstance(value, str) and len(value.encode()) > 2048:
++            raise ValueError("Setting text exceeds 2048 bytes")
++        if type(value) is int and not -1_000_000 <= value <= 1_000_000:
++            raise ValueError("Setting integer is out of range")
++    return values
++
++
++def _unload(key: tuple[str, str]) -> None:
++    session = _sessions.pop(key, None)
++    if session is not None:
++        _, module, instance = session
++        try:
++            instance.on_plugin_unload()
++        finally:
++            sys.modules.pop(module.__name__, None)
++
++
++def _load(request: dict[str, Any]) -> BasePlugin:
++    global _generation
++    key = (str(request["id"]), str(request["account"]))
++    source = str(request["source"])
++    previous = _sessions.get(key)
++    if previous is not None and previous[0] == source:
++        instance = previous[2]
++        instance.settings = dict(request["settings"])
++        return instance
++    metadata(source)
++    _generation += 1
++    module = types.ModuleType(f"_swiftgram_plugin_{_generation}")
++    module.__file__ = f"swiftgram-plugin:{key[0]}"
++    sys.modules[module.__name__] = module
++    candidate: BasePlugin | None = None
++    try:
++        exec(compile(source.lstrip("\ufeff"), module.__file__, "exec"), module.__dict__)
++        plugin_class = module.__dict__.get("Plugin")
++        if not isinstance(plugin_class, type) or not issubclass(plugin_class, BasePlugin):
++            raise TypeError("Define class Plugin(BasePlugin)")
++        candidate = plugin_class()
++        candidate.account = key[1]
++        candidate.settings = dict(request["settings"])
++        candidate.on_plugin_load()
++        _settings(candidate)
++        _unload(key)
++        _sessions[key] = (source, module, candidate)
++        return candidate
++    except BaseException:
++        try:
++            if candidate is not None:
++                candidate.on_plugin_unload()
++        finally:
++            sys.modules.pop(module.__name__, None)
++        raise
++
++
++def _execute(request: dict[str, Any]) -> dict[str, object]:
++    operation = request["operation"]
++    if operation == "inspect":
++        return {"manifest": metadata(request["source"])}
++    key = (str(request["id"]), str(request["account"]))
++    if operation == "unload":
++        _unload(key)
++        return {}
++    instance = _load(request)
++    if operation == "load":
++        return {"settings": _settings(instance)}
++    event = Event(request["event"])
++    callback = getattr(instance, request["callback"])
++    if operation == "menu":
++        text = callback(event, request["menuID"])
++        if type(text) is not str or len(text.encode()) > 65536:
++            raise ValueError("Menu callback must return text up to 64 KB")
++        return {"text": text, "settings": _settings(instance)}
++    result = callback(event)
++    if result is None:
++        result = HookResult()
++    if not isinstance(result, HookResult):
++        raise TypeError("Hook callbacks must return HookResult or None")
++    strategy = HookStrategy(result.strategy)
++    for value in (result.text, result.error):
++        if value is not None and (type(value) is not str or len(value.encode()) > 65536):
++            raise ValueError("Hook output must be text up to 64 KB")
++    return {
++        "strategy": strategy.value,
++        "text": result.text,
++        "error": result.error,
++        "settings": _settings(instance),
++    }
++
++
++def handle(payload: str) -> str:
++    request = cast(dict[str, Any], json.loads(payload))
++    deadline = time.monotonic() + (0.1 if request["operation"] in ("hook", "menu") else 0.5)
++
++    def trace(frame: types.FrameType, event: str, arg: object) -> TraceFunction:
++        if time.monotonic() > deadline:
++            raise TimeoutError("Python plugin exceeded its execution deadline")
++        return trace
++
++    response: dict[str, object]
++    sys.settrace(trace)
++    try:
++        response = {"result": _execute(request)}
++    except BaseException as error:
++        response = {"failure": f"{type(error).__name__}: {error}"[:2048]}
++    finally:
++        sys.settrace(None)
++    return json.dumps(response, ensure_ascii=True, allow_nan=False)
+diff --git a/Swiftgram/SGPython/SDK/swiftgram.py b/Swiftgram/SGPython/SDK/swiftgram.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..737e6aabcdf069f345284e9ba6134f6c51733b78
+--- /dev/null
++++ b/Swiftgram/SGPython/SDK/swiftgram.py
+@@ -0,0 +1,75 @@
++"""Swiftgram's Python plugin API. Host objects never cross this boundary."""
++
++from __future__ import annotations
++
++from enum import StrEnum
++
++SettingValue = bool | int | str
++
++
++class HookStrategy(StrEnum):
++    DEFAULT = "default"
++    MODIFY = "modify"
++    MODIFY_FINAL = "modifyFinal"
++    CANCEL = "cancel"
++
++
++class HookResult:
++    def __init__(
++        self,
++        strategy: HookStrategy = HookStrategy.DEFAULT,
++        *,
++        text: str | None = None,
++        error: str | None = None,
++    ) -> None:
++        self.strategy = strategy
++        self.text = text
++        self.error = error
++
++
++class Event:
++    def __init__(self, payload: dict[str, object]) -> None:
++        def string(key: str) -> str:
++            value = payload[key]
++            if not isinstance(value, str):
++                raise TypeError(f"Event {key} must be a string")
++            return value
++
++        self.kind = string("kind")
++        self.name = string("name")
++        self.account = string("account")
++        self.text = string("text")
++        chat, error = payload.get("chat"), payload.get("error")
++        if chat is not None and not isinstance(chat, str):
++            raise TypeError("Event chat must be a string")
++        if error is not None and not isinstance(error, str):
++            raise TypeError("Event error must be a string")
++        self.chat = chat
++        self.error = error
++
++
++class BasePlugin:
++    def __init__(self) -> None:
++        self.account = ""
++        self.settings: dict[str, SettingValue] = {}
++
++    def on_plugin_load(self) -> None:
++        """Initialize this account's instance; raise to reject activation."""
++
++    def on_plugin_unload(self) -> None:
++        """Release plugin-owned resources. Host registration cleanup is automatic."""
++
++    def on_message(self, event: Event) -> HookResult | None:
++        return None
++
++    def on_send_message(self, event: Event) -> HookResult | None:
++        return None
++
++    def pre_request_hook(self, event: Event) -> HookResult | None:
++        return None
++
++    def post_request_hook(self, event: Event) -> HookResult | None:
++        return None
++
++    def on_menu(self, event: Event, menu_id: str) -> str:
++        return event.text
+diff --git a/Swiftgram/SGPython/Tests/test_runtime.py b/Swiftgram/SGPython/Tests/test_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..abf9867b0e9918578487e8850a49072444b1e5ca
+--- /dev/null
++++ b/Swiftgram/SGPython/Tests/test_runtime.py
+@@ -0,0 +1,137 @@
++"""Behavioral checks for the bundled Python SDK and import contract."""
++
++from __future__ import annotations
++
++import json
++import sys
++import unittest
++
++from _swiftgram_runtime import handle, metadata
++
++HEADER = '__id__ = "python-test"\n__name__ = "Python test"\n'
++
++
++class RuntimeTests(unittest.TestCase):
++    def call(self, operation: str, **values: object) -> dict[str, object]:
++        reply: dict[str, object] = json.loads(
++            handle(
++                json.dumps(
++                    {
++                        "operation": operation,
++                        "id": "python-test",
++                        "account": "77",
++                        **values,
++                    }
++                )
++            )
++        )
++        return reply
++
++    def tearDown(self) -> None:
++        self.call("unload")
++
++    def test_inspection_never_executes_plugin_code(self) -> None:
++        source = HEADER + 'raise RuntimeError("must not execute")\n'
++        self.assertEqual(metadata(source)["id"], "python-test")
++
++    def test_only_python_metadata_is_accepted(self) -> None:
++        for source in ("{}", "[]", '{"id":"json-plugin","name":"JSON","rules":[]}'):
++            with self.subTest(source=source), self.assertRaisesRegex(ValueError, "Python plugins"):
++                metadata(source)
++            response = self.call("load", source=source, settings={})
++            self.assertIn("Python plugins", str(response.get("failure")))
++
++    def test_registrations_use_python_callbacks(self) -> None:
++        result = metadata(HEADER + "__hooks__ = [{'event': 'sendMessage', 'name': 'send_message'}]")
++        self.assertEqual(
++            result["hooks"],
++            [{"event": "sendMessage", "name": "send_message", "callback": "on_send_message"}],
++        )
++        for declaration in (
++            "__hooks__ = [{'event':'message','name':'message','strategy':'cancel'}]",
++            "__hooks__ = [{'event':'message','name':'message','condition':{}}]",
++            "__menus__ = [{'id':'copy','text':'${text}'}]",
++        ):
++            with (
++                self.subTest(declaration=declaration),
++                self.assertRaisesRegex(ValueError, "Python callbacks"),
++            ):
++                metadata(HEADER + declaration)
++
++    def test_dependency_declarations_rejected_before_evaluation(self) -> None:
++        for name in ("__requirements__", "__dependencies__", "requirements", "dependencies"):
++            for declaration in (
++                f"{name} = []",
++                f"{name}: list[str] = []",
++                f"{name} += []",
++                f"{name} = unexpected_network_request()",
++            ):
++                with (
++                    self.subTest(declaration=declaration),
++                    self.assertRaisesRegex(ValueError, "Third-party dependencies are unsupported"),
++                ):
++                    metadata(HEADER + declaration)
++
++    def test_inline_dependency_metadata_rejected(self) -> None:
++        with self.assertRaisesRegex(ValueError, "Inline script dependencies are unsupported"):
++            metadata('# /// script\n# dependencies = ["requests"]\n# ///\n' + HEADER)
++        # Text mentioning the format does not become a dependency declaration.
++        self.assertEqual(metadata(HEADER + 'description = "# /// script"')["id"], "python-test")
++
++    def test_restored_sources_are_validated_before_execution(self) -> None:
++        response = self.call("load", source=HEADER + '__requirements__ = ["requests"]', settings={})
++        self.assertIn("Third-party dependencies are unsupported", str(response.get("failure")))
++
++    def test_missing_import_fails_without_installing_or_changing_search_paths(self) -> None:
++        source = HEADER + "\nimport swiftgram_missing_third_party_package_987654321\n"
++        paths = sys.path.copy()
++        response = self.call("load", source=source, settings={})
++        self.assertIn("ModuleNotFoundError", str(response.get("failure")))
++        self.assertEqual(sys.path, paths)
++
++    def test_real_python_and_bundled_sdk(self) -> None:
++        source = (
++            HEADER
++            + """
++import math
++from swiftgram import BasePlugin, HookResult, HookStrategy
++class Plugin(BasePlugin):
++    def on_plugin_load(self):
++        self.calls = 0
++    def on_message(self, event):
++        self.calls += 1
++        total = sum(math.factorial(number) for number in range(5))
++        return HookResult(HookStrategy.MODIFY, text=f"{event.text}:{total}:{self.calls}")
++"""
++        )
++        event = {"kind": "message", "name": "message", "account": "77", "text": "hello"}
++        first = self.call("hook", source=source, settings={}, event=event, callback="on_message")
++        second = self.call("hook", source=source, settings={}, event=event, callback="on_message")
++        self.assertEqual(
++            first["result"],
++            {"strategy": "modify", "text": "hello:34:1", "error": None, "settings": {}},
++        )
++        self.assertEqual(
++            second["result"],
++            {"strategy": "modify", "text": "hello:34:2", "error": None, "settings": {}},
++        )
++        self.call("unload")
++        reloaded = self.call("hook", source=source, settings={}, event=event, callback="on_message")
++        self.assertEqual(first, reloaded)
++
++    def test_exception_and_infinite_loop_return_failures(self) -> None:
++        for body, message in (
++            ("raise RuntimeError('failed')", "RuntimeError: failed"),
++            ("while True: pass", "TimeoutError"),
++        ):
++            source = (
++                HEADER
++                + "\nfrom swiftgram import BasePlugin\nclass Plugin(BasePlugin):\n"
++                + f"    def on_plugin_load(self):\n        {body}\n"
++            )
++            reply = self.call("load", source=source, settings={})
++            self.assertIn(message, str(reply.get("failure")))
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/Swiftgram/SGPython/prepare_runtime.py b/Swiftgram/SGPython/prepare_runtime.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..44661a557c4f95e30a3979728ee6c8ce6c4fad79
+--- /dev/null
++++ b/Swiftgram/SGPython/prepare_runtime.py
+@@ -0,0 +1,121 @@
++"""Package pinned CPython slices as signed-by-the-app Bazel framework imports."""
++
++from __future__ import annotations
++
++import plistlib
++import shutil
++import sys
++from pathlib import Path
++
++
++def prepare(root: Path) -> None:
++    python = root / "Python.xcframework"
++    bundle = root / "SwiftgramPython.bundle"
++    library = bundle / "lib/python3.14"
++    shutil.copytree(
++        python / "lib/python3.14",
++        library,
++        ignore=shutil.ignore_patterns("__pycache__", "site-packages", "ensurepip", "venv", "*.whl"),
++    )
++    with (bundle / "Info.plist").open("wb") as stream:
++        plistlib.dump(
++            {"CFBundleIdentifier": "org.swiftgram.python.stdlib", "CFBundlePackageType": "BNDL"},
++            stream,
++        )
++    slices = [
++        ("ios-arm64", "ios-arm64", "arm64", False),
++        ("ios-arm64_x86_64-simulator", "ios-arm64-simulator", "arm64", True),
++        ("ios-arm64_x86_64-simulator", "ios-x86_64-simulator", "x86_64", True),
++    ]
++    modules: dict[str, list[dict[str, object]]] = {}
++    for source_slice, identifier, arch, simulator in slices:
++        # These names include their architecture; copying them does not choose packages.
++        config_directory = python / source_slice / f"lib-{arch}/python3.14"
++        for config in config_directory.glob("_sysconfig*"):
++            shutil.copy2(config, library / config.name)
++        for binary in sorted(
++            (python / source_slice / f"lib-{arch}/python3.14/lib-dynload").glob("*.so")
++        ):
++            module = binary.name.split(".")[0]
++            if module.startswith(("_test", "_xx", "xx", "_interp")):
++                continue
++            name = "sgpython." + module
++            framework = root / f"Extensions/{name}.xcframework/{identifier}/{name}.framework"
++            framework.mkdir(parents=True)
++            shutil.copy2(binary, framework / name)
++            marker = binary.with_suffix(".fwork").name
++            marker_path = f"SwiftgramPython.bundle/lib/python3.14/lib-dynload/{marker}"
++            (framework / f"{name}.origin").write_text(marker_path + "\n")
++            destination = library / "lib-dynload" / marker
++            destination.parent.mkdir(exist_ok=True)
++            destination.write_text(f"Frameworks/{name}.framework/{name}\n")
++            with (framework / "Info.plist").open("wb") as stream:
++                plistlib.dump(
++                    {
++                        "CFBundleExecutable": name,
++                        "CFBundleName": name,
++                        "CFBundleIdentifier": "org.swiftgram.python." + module.replace("_", "-"),
++                        "CFBundlePackageType": "FMWK",
++                        "CFBundleVersion": "1",
++                        "CFBundleShortVersionString": "3.14.6",
++                        "MinimumOSVersion": "13.0",
++                        "CFBundleSupportedPlatforms": [
++                            "iPhoneSimulator" if simulator else "iPhoneOS"
++                        ],
++                    },
++                    stream,
++                )
++            entry: dict[str, object] = {
++                "LibraryIdentifier": identifier,
++                "LibraryPath": f"{name}.framework",
++                "SupportedArchitectures": [arch],
++                "SupportedPlatform": "ios",
++            }
++            if simulator:
++                entry["SupportedPlatformVariant"] = "simulator"
++            modules.setdefault(name, []).append(entry)
++    for name, entries in modules.items():
++        if len(entries) != 3:
++            raise ValueError(f"Missing architecture for {name}")
++        with (root / f"Extensions/{name}.xcframework/Info.plist").open("wb") as stream:
++            plistlib.dump(
++                {
++                    "AvailableLibraries": entries,
++                    "CFBundlePackageType": "XFWK",
++                    "XCFrameworkFormatVersion": "1.0",
++                },
++                stream,
++            )
++    targets = []
++    for name in sorted(modules):
++        targets.append(f'''
++apple_dynamic_xcframework_import(
++    name = "{name}",
++    xcframework_imports = glob(["Extensions/{name}.xcframework/**"]),
++    bundle_only = True,
++)
++''')
++    deps = [":" + name for name in sorted(modules)]
++    (root / "BUILD.bazel").write_text(
++        """
++load("@build_bazel_rules_apple//apple:apple.bzl", "apple_dynamic_xcframework_import")
++load("@build_bazel_rules_apple//apple:resources.bzl", "apple_bundle_import")
++package(default_visibility = ["//visibility:public"])
++apple_bundle_import(name = "stdlib", bundle_imports = glob(["SwiftgramPython.bundle/**"]))
++apple_dynamic_xcframework_import(
++    name = "Python",
++    xcframework_imports = glob([
++        "Python.xcframework/Info.plist",
++        "Python.xcframework/*/Python.framework/**",
++    ]),
++    deps = [":stdlib"] + """
++        + repr(deps)
++        + """,
++)
++"""
++        + "".join(targets)
++    )
++
++
++if __name__ == "__main__":
++    prepare(Path(sys.argv[1]))
+diff --git a/Swiftgram/SGPython/python_repository.bzl b/Swiftgram/SGPython/python_repository.bzl
+new file mode 100644
+index 0000000000000000000000000000000000000000..92a75cf2cfdfbf0111aae754445e39151e4640c8
+--- /dev/null
++++ b/Swiftgram/SGPython/python_repository.bzl
+@@ -0,0 +1,13 @@
++def _python_ios_repository_impl(ctx):
++    ctx.download_and_extract(
++        url = "https://github.com/beeware/Python-Apple-support/releases/download/3.14-b10/Python-3.14-iOS-support.b10.tar.gz",
++        sha256 = "200ef60eb67be0483ceb638daa9048f84f41a9a952707a5ad4c3198037c7b583",
++    )
++    result = ctx.execute(["python3", str(ctx.path(ctx.attr.prepare_script)), str(ctx.path("."))])
++    if result.return_code:
++        fail("Preparing CPython frameworks failed: " + result.stderr)
++
++python_ios_repository = repository_rule(
++    implementation = _python_ios_repository_impl,
++    attrs = {"prepare_script": attr.label(default = Label("//Swiftgram/SGPython:prepare_runtime.py"), allow_single_file = True)},
++)
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+index a4f4355726997d56ec55e57816b0dc2da6e5051b..87e0e65ce8f7d2082263e95a9037cced3726bf22 100644
+--- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+@@ -15,10 +15,13 @@ import SGStrings
+ func additionalSettingsChanges() -> Signal<Int, NoError> {
+     Signal { subscriber in
+         subscriber.putNext(AddonSettings.shared.version())
++        let plugins = NotificationCenter.default.addObserver(forName: .pluginsChanged, object: nil, queue: .main) { _ in
++            subscriber.putNext(AddonSettings.shared.version())
++        }
+         let token = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: .main) { _ in
+             subscriber.putNext(AddonSettings.shared.version())
+         }
+-        return ActionDisposable { NotificationCenter.default.removeObserver(token) }
++        return ActionDisposable { NotificationCenter.default.removeObserver(token); NotificationCenter.default.removeObserver(plugins) }
+     }
+ }
+ 
+@@ -27,7 +30,7 @@ func additionalError(context: AccountContext, error: Error) -> ViewController {
+     return textAlertController(context: context, title: nil, text: error.localizedDescription, actions: [TextAlertAction(type: .defaultAction, title: data.strings.Common_OK, action: {})])
+ }
+ 
+-private struct AdditionalFormEntry: ItemListNodeEntry {
++struct AdditionalFormEntry: ItemListNodeEntry {
+     enum Kind: Equatable { case input, toggle, action, disclosure, notice }
+     let stableId: Int
+     let section: ItemListSectionId
+@@ -52,14 +55,14 @@ private struct AdditionalFormEntry: ItemListNodeEntry {
+     }
+ }
+ 
+-private final class AdditionalForm {
++final class AdditionalForm {
+     let context: AccountContext
+     let revision = ValuePromise<Int>(0, ignoreRepeated: false)
+     weak var controller: ItemListController?
+     var entries: (String) -> [AdditionalFormEntry] = { _ in [] }
+     var input: (Int, String) -> Void = { _, _ in }
+     var action: (Int) -> Void = { _ in }
+-    var documentDelegate: AdditionalDocuments?
++    var documentDelegate: NSObject?
+     init(context: AccountContext) { self.context = context }
+     func refresh() { revision.set(0) }
+     func error(_ error: Error) { controller?.present(additionalError(context: context, error: error), in: .window(.root)) }
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..7267fb5847d0200af2d8678ef7d4df5f9b0464d2
+--- /dev/null
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift
+@@ -0,0 +1,296 @@
++import AccountContext
++import Display
++import Foundation
++import ItemListUI
++import PresentationDataUtils
++import SGAdditionalCore
++import SGStrings
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import UIKit
++import UniformTypeIdentifiers
++
++func additionalPluginsController(context: AccountContext, account selected: String?) -> ViewController {
++    let model = AdditionalForm(context: context)
++    let account = selected ?? additionalAccountKey(context.account.peerId)
++    var records: [PluginRecord] = []
++    model.entries = { lang in
++        records = PluginRegistry.shared.records()
++        var entries = [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .notice, title: i18n("Additional.PluginAccount", lang) + ": " + account),
++            AdditionalFormEntry(
++                stableId: 1, section: 0, kind: .toggle, title: i18n("Additional.PluginSafeMode", lang),
++                value: PluginRegistry.shared.safeMode() ? "1" : "0"),
++            AdditionalFormEntry(stableId: 2, section: 1, kind: .action, title: i18n("Additional.PluginImport", lang)),
++            AdditionalFormEntry(stableId: 3, section: 1, kind: .notice, title: i18n("Additional.PluginFormat", lang)),
++        ]
++        if let status = PluginRegistry.shared.status() {
++            entries.append(AdditionalFormEntry(stableId: 4, section: 1, kind: .notice, title: status))
++        }
++        for (index, record) in records.enumerated() {
++            let status =
++                record.error != nil
++                ? "PluginFailed" : record.isEnabled(account: account) ? "PluginEnabled" : "PluginDisabled"
++            entries.append(
++                AdditionalFormEntry(
++                    stableId: index + 10, section: 2, kind: .disclosure,
++                    title: record.manifest.name, value: i18n("Additional." + status, lang)))
++        }
++        entries.append(
++            AdditionalFormEntry(stableId: 100, section: 3, kind: .action, title: i18n("Additional.PluginReset", lang)))
++        return entries
++    }
++    model.input = { [weak model] id, value in
++        guard id == 1, let model else { return }
++        do {
++            try PluginRegistry.shared.setSafeMode(value == "1")
++            model.refresh()
++        } catch { model.error(error) }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 2 {
++            let delegate = AdditionalPluginDocument(model: model)
++            model.documentDelegate = delegate
++            delegate.open()
++        } else if id == 100 {
++            pluginConfirm(model: model, titleKey: "PluginReset", noticeKey: "PluginResetNotice") {
++                try PluginRegistry.shared.reset()
++                model.refresh()
++            }
++        } else if id >= 10, records.indices.contains(id - 10) {
++            model.push(additionalPluginController(context: context, record: records[id - 10], account: account))
++        }
++    }
++    return model.make(
++        title: i18n(
++            "Additional.Plugins", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++}
++
++private func additionalPluginController(context: AccountContext, record: PluginRecord, account: String)
++    -> ViewController
++{
++    let model = AdditionalForm(context: context)
++    let manifest = record.manifest
++    var values = record.values(account: account)
++    var menus: [PluginMenuItem] = []
++    let event = PluginEvent(kind: .message, name: "settings", account: account)
++    model.entries = { lang in
++        let current = PluginRegistry.shared.records().first { $0.manifest.id == manifest.id }
++        var entries = [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .toggle, title: i18n("Additional.PluginEnabled", lang),
++                value: current?.isEnabled(account: account) == true ? "1" : "0"),
++            AdditionalFormEntry(
++                stableId: 1, section: 0, kind: .notice,
++                title: manifest.id + " · " + manifest.version + "\n" + (manifest.description ?? "")),
++            AdditionalFormEntry(
++                stableId: 2, section: 0, kind: .notice,
++                title: manifest.permissions.map { i18n("Additional.PluginPermission." + $0.rawValue, lang) }.joined(
++                    separator: "\n")),
++        ]
++        if let error = current?.error {
++            entries.append(AdditionalFormEntry(stableId: 3, section: 0, kind: .notice, title: error))
++        }
++        for (index, setting) in manifest.settings.enumerated() {
++            let value = values[setting.key] ?? setting.defaultValue
++            let kind: AdditionalFormEntry.Kind
++            let text: String
++            if case .bool(let enabled) = value {
++                kind = .toggle
++                text = enabled ? "1" : "0"
++            } else {
++                kind = setting.choices == nil ? .input : .disclosure
++                text = value.text
++            }
++            entries.append(
++                AdditionalFormEntry(stableId: index + 10, section: 1, kind: kind, title: setting.title, value: text))
++        }
++        if !manifest.settings.isEmpty {
++            entries.append(
++                AdditionalFormEntry(stableId: 50, section: 1, kind: .action, title: i18n("Additional.Save", lang)))
++        }
++        menus = PluginRegistry.shared.menuItems(location: .settings, event: event).filter { $0.pluginID == manifest.id }
++        for (index, menu) in menus.enumerated() {
++            entries.append(AdditionalFormEntry(stableId: index + 60, section: 2, kind: .action, title: menu.title))
++        }
++        entries.append(
++            AdditionalFormEntry(stableId: 100, section: 3, kind: .action, title: i18n("Additional.Remove", lang)))
++        return entries
++    }
++    model.input = { [weak model] id, text in
++        guard let model else { return }
++        if id == 0 {
++            do {
++                try PluginRegistry.shared.setEnabled(manifest.id, account: account, enabled: text == "1")
++                model.refresh()
++            } catch { model.error(error) }
++        } else if manifest.settings.indices.contains(id - 10) {
++            let setting = manifest.settings[id - 10]
++            switch setting.defaultValue {
++            case .bool: values[setting.key] = .bool(text == "1")
++            case .integer:
++                // Keep invalid draft text so Save reports the error instead of silently reverting it.
++                values[setting.key] = Int(text).map(PluginValue.integer) ?? .string(text)
++            case .string: values[setting.key] = .string(text)
++            }
++        }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 50 {
++            do {
++                guard
++                    PluginRegistry.shared.records().first(where: { $0.manifest.id == manifest.id })?.manifest
++                        == manifest
++                else {
++                    throw SettingsError.invalid("Plugin changed. Reopen its settings.")
++                }
++                try PluginRegistry.shared.saveSettings(manifest.id, account: account, values: values)
++                model.refresh()
++            } catch { model.error(error) }
++        } else if id == 100 {
++            pluginConfirm(model: model, titleKey: "Remove", noticeKey: "PluginRemoveNotice") {
++                try PluginRegistry.shared.remove(manifest.id)
++                model.controller?.navigationController?.popViewController(animated: true)
++            }
++        } else if id >= 60, menus.indices.contains(id - 60),
++            let result = PluginRegistry.shared.performMenu(menus[id - 60], location: .settings, event: event)
++        {
++            showPluginMenuResult(model: model, result: result)
++        } else if manifest.settings.indices.contains(id - 10), let choices = manifest.settings[id - 10].choices {
++            let setting = manifest.settings[id - 10]
++            let data = context.sharedContext.currentPresentationData.with { $0 }
++            let sheet = ActionSheetController(presentationData: data)
++            sheet.setItemGroups([
++                ActionSheetItemGroup(
++                    items: choices.map { choice in
++                        ActionSheetButtonItem(
++                            title: choice, color: .accent,
++                            action: { [weak sheet, weak model] in
++                                sheet?.dismissAnimated()
++                                values[setting.key] = .string(choice)
++                                model?.refresh()
++                            })
++                    }),
++                ActionSheetItemGroup(items: [
++                    ActionSheetButtonItem(
++                        title: data.strings.Common_Cancel, color: .accent,
++                        action: { [weak sheet] in sheet?.dismissAnimated() })
++                ]),
++            ])
++            model.controller?.present(sheet, in: .window(.root))
++        }
++    }
++    return model.make(title: manifest.name)
++}
++
++private func showPluginMenuResult(model: AdditionalForm, result: PluginMenuResult) {
++    if result.action == .copyText {
++        UIPasteboard.general.string = result.text
++    } else {
++        let data = model.context.sharedContext.currentPresentationData.with { $0 }
++        model.controller?.present(
++            textAlertController(
++                context: model.context, title: nil, text: result.text,
++                actions: [TextAlertAction(type: .defaultAction, title: data.strings.Common_OK, action: {})]),
++            in: .window(.root))
++    }
++}
++
++private func pluginConfirm(
++    model: AdditionalForm, titleKey: String, noticeKey: String, action: @escaping () throws -> Void
++) {
++    let data = model.context.sharedContext.currentPresentationData.with { $0 }
++    let lang = data.strings.baseLanguageCode
++    let sheet = ActionSheetController(presentationData: data)
++    sheet.setItemGroups([
++        ActionSheetItemGroup(items: [
++            ActionSheetTextItem(title: i18n("Additional." + noticeKey, lang)),
++            ActionSheetButtonItem(
++                title: i18n("Additional." + titleKey, lang), color: .destructive,
++                action: { [weak sheet, weak model] in
++                    sheet?.dismissAnimated()
++                    do { try action() } catch { model?.error(error) }
++                }),
++        ]),
++        ActionSheetItemGroup(items: [
++            ActionSheetButtonItem(
++                title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })
++        ]),
++    ])
++    model.controller?.present(sheet, in: .window(.root))
++}
++
++private final class AdditionalPluginDocument: NSObject, UIDocumentPickerDelegate {
++    private weak var model: AdditionalForm?
++    init(model: AdditionalForm) { self.model = model }
++
++    func open() {
++        let picker = UIDocumentPickerViewController(
++            forOpeningContentTypes: [
++                UTType(filenameExtension: "py") ?? .plainText, UTType(filenameExtension: "plugin") ?? .data,
++            ], asCopy: false)
++        picker.allowsMultipleSelection = false
++        picker.delegate = self
++        model?.controller?.present(picker, animated: true)
++    }
++
++    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
++        guard let url = urls.first else { return }
++        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
++            let result = Result { () throws -> (Data, PluginManifest) in
++                let access = url.startAccessingSecurityScopedResource()
++                defer { if access { url.stopAccessingSecurityScopedResource() } }
++                let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
++                try pluginFileSize(size)
++                let data = try Data(contentsOf: url)
++                return (data, try PluginRegistry.shared.inspect(data))
++            }
++            DispatchQueue.main.async { [weak self] in
++                guard let model = self?.model else { return }
++                switch result {
++                case .success((let data, let manifest)):
++                    model.push(pluginInstallController(context: model.context, data: data, manifest: manifest))
++                case .failure(let error): model.error(error)
++                }
++            }
++        }
++    }
++}
++
++private func pluginFileSize(_ size: Int) throws {
++    guard size <= 256 * 1024 else { throw SettingsError.invalid("Plugin exceeds 256 KB.") }
++}
++
++private func pluginInstallController(context: AccountContext, data: Data, manifest: PluginManifest) -> ViewController {
++    let model = AdditionalForm(context: context)
++    model.entries = { lang in
++        [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .notice,
++                title: manifest.name + " · " + manifest.version + "\n" + (manifest.author ?? "") + "\n"
++                    + (manifest.description ?? "")),
++            AdditionalFormEntry(
++                stableId: 1, section: 1, kind: .notice,
++                title: manifest.permissions.map { i18n("Additional.PluginPermission." + $0.rawValue, lang) }.joined(
++                    separator: "\n")),
++            AdditionalFormEntry(
++                stableId: 2, section: 1, kind: .notice,
++                title: i18n(
++                    "Additional.PluginPythonNotice",
++                    lang)),
++            AdditionalFormEntry(stableId: 3, section: 2, kind: .action, title: i18n("Additional.PluginInstall", lang)),
++        ]
++    }
++    model.action = { [weak model] _ in
++        guard let model else { return }
++        do {
++            try PluginRegistry.shared.install(data)
++            model.controller?.navigationController?.popViewController(animated: true)
++        } catch { model.error(error) }
++    }
++    return model.make(title: manifest.name)
++}
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index 445502d00093a092ea8131dbc3cd8980c7e16ba1..e7c7ccdf6999869c3471720bde3860f3d274c3a0 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -143,7 +143,7 @@ private enum SGSliderSetting: String {
+ }
+ 
+ private enum SGDisclosureLink: String {
+-    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics
++    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
+ 
+     case contentSettings
+     case languageSettings
+@@ -205,6 +205,7 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.header(id: id.count, section: .additionalPremium, text: text("Premium"), badge: nil))
+     entries.append(.toggle(id: id.count, section: .additionalPremium, settingName: .additionalLocalPremium, value: profile.localPremium, text: text("localPremium"), enabled: true))
+     entries.append(.notice(id: id.count, section: .additionalPremium, text: text("PremiumNotice")))
++    entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalPlugins, text: text("Plugins")))
+     entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalDiagnostics, text: text("Diagnostics")))
+ 
+     if SGSimpleSettings.shared.canUseNY {
+@@ -794,6 +795,8 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+                 }
+             })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
+             presentControllerImpl?(sheet, nil)
++        case .additionalPlugins:
++            pushControllerImpl?(additionalPluginsController(context: context, account: account))
+         case .additionalDiagnostics:
+             pushControllerImpl?(additionalDiagnosticsController(context: context))
+             case .languageSettings:
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index f8001ad7f927da76a2cbb13902964399aeb6f270..d83f3e35dbbc43c2e0e6e0332b1b6be8f63c2712 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -335,3 +335,20 @@
+ 
+ "Additional.saveDisappearing" = "Save disappearing media";
+ "Additional.DisappearingNotice" = "Also keep observed timed and view-once photos, videos, and voice messages when saving deleted messages. Media is downloaded while available. Secret chats are excluded.";
++"Additional.Plugins" = "Plugins";
++"Additional.PluginAccount" = "Active account for plugin settings";
++"Additional.PluginSafeMode" = "Safe mode (pause all plugins)";
++"Additional.PluginImport" = "Import plugin";
++"Additional.PluginFormat" = "Python .py / .plugin files. Enable each plugin separately for each account. Android and Java APIs require porting.";
++"Additional.PluginEnabled" = "Enabled";
++"Additional.PluginDisabled" = "Disabled";
++"Additional.PluginFailed" = "Failed";
++"Additional.PluginReset" = "Reset plugin registry";
++"Additional.PluginResetNotice" = "Remove all installed plugins and their settings? A local backup of the registry will be kept.";
++"Additional.PluginRemoveNotice" = "Remove this plugin and its settings from all accounts?";
++"Additional.PluginInstall" = "Install / update";
++"Additional.PluginPermission.incomingMessages" = "Read and change locally displayed cloud-message text";
++"Additional.PluginPermission.outgoingMessages" = "Change or block outgoing cloud-message text";
++"Additional.PluginPermission.network" = "Block account requests and change displayed request errors";
++"Additional.PluginPermission.menus" = "Add copy and information actions to native menus";
++"Additional.PluginPythonNotice" = "Python plugins execute real code inside Swiftgram and can access app data and the network. Permissions describe SDK access, not a Python sandbox. Install only source you trust. New plugins are disabled until enabled for an account.";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index e7e25e87e151f8018f6036ddc668ad5466d07818..b455331413f0c626f1c90a63a6c94bff4ede60da 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -330,3 +330,20 @@
+ 
+ "Additional.saveDisappearing" = "Сохранять исчезающие медиа";
+ "Additional.DisappearingNotice" = "При сохранении удалённых сообщений сохранять также полученные фото, видео и голосовые сообщения с таймером или однократным просмотром. Медиа загружаются, пока доступны. Секретные чаты исключены.";
++"Additional.Plugins" = "Плагины";
++"Additional.PluginAccount" = "Аккаунт для настроек плагинов";
++"Additional.PluginSafeMode" = "Безопасный режим (приостановить плагины)";
++"Additional.PluginImport" = "Импортировать плагин";
++"Additional.PluginFormat" = "Python-файлы .py / .plugin. Включайте плагины отдельно для каждого аккаунта. Android- и Java-API требуют адаптации.";
++"Additional.PluginEnabled" = "Включён";
++"Additional.PluginDisabled" = "Выключен";
++"Additional.PluginFailed" = "Ошибка";
++"Additional.PluginReset" = "Сбросить реестр плагинов";
++"Additional.PluginResetNotice" = "Удалить все установленные плагины и их настройки? Локальная резервная копия реестра будет сохранена.";
++"Additional.PluginRemoveNotice" = "Удалить этот плагин и его настройки для всех аккаунтов?";
++"Additional.PluginInstall" = "Установить / обновить";
++"Additional.PluginPermission.incomingMessages" = "Читать и изменять локальный текст облачных сообщений";
++"Additional.PluginPermission.outgoingMessages" = "Изменять или блокировать исходящие облачные сообщения";
++"Additional.PluginPermission.network" = "Блокировать запросы аккаунта и изменять текст ошибок";
++"Additional.PluginPermission.menus" = "Добавлять действия копирования и информации в меню";
++"Additional.PluginPythonNotice" = "Python-плагины исполняют код внутри Swiftgram и могут обращаться к данным приложения и сети. Разрешения описывают SDK, а не изоляцию Python. Устанавливайте только код, которому доверяете. Новые плагины выключены до включения для аккаунта.";
+diff --git a/Telegram/BUILD b/Telegram/BUILD
+index ebe01b2f693d93f247670fb20fccc15cb089b132..1659da3b335d85c050ab284216d6f6bfd69ef551 100644
+--- a/Telegram/BUILD
++++ b/Telegram/BUILD
+@@ -2045,6 +2045,8 @@ ios_application(
+     ],
+     resources = [
+         ":LaunchScreen",
++        "//Swiftgram/SGPython:SDK",
++        "@swiftgram_python//:stdlib",
+         #":DefaultAppIcon",
+     ],
+     frameworks = [
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+index c7c1040610143c006cae764602789a840426b660..299b9cc23810016d29f38d388d969ab3a5436108 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -131,7 +131,9 @@ final class AdditionalMessageProcessor {
+                 return nil
+             }
+         }
+-        return message
++        let processed = additionalPluginStoreMessage(message, previous: previous, account: account)
++        if processed == nil { disappearing.deleted([id]) }
++        return processed
+     }
+ }
+ 
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
+new file mode 100644
+index 0000000000000000000000000000000000000000..a351b01c6c8e80f281482f631ad34a68cc5819eb
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
+@@ -0,0 +1,57 @@
++import Foundation
++import MtProtoKit
++import Postbox
++import SGAdditionalCore
++import SwiftSignalKit
++
++func additionalPluginStoreMessage(_ message: StoreMessage, previous: Message?, account: PeerId) -> StoreMessage? {
++    guard message.flags.contains(.Incoming), case .Id(let id) = message.id,
++        let chat = additionalChatKey(id.peerId), id.namespace == Namespaces.Message.Cloud,
++        previous?.text != message.text
++    else { return message }
++    let event = PluginEvent(
++        kind: .message, name: "message", account: additionalAccountKey(account), chat: chat, text: message.text)
++    guard let result = PluginRegistry.shared.dispatch(event) else { return nil }
++    guard result.text != message.text else { return message }
++    // Text offsets and inline emoji entities refer to the original UTF-16 text.
++    return StoreMessage(
++        id: message.id, customStableId: message.customStableId, globallyUniqueId: message.globallyUniqueId,
++        groupingKey: message.groupingKey, threadId: message.threadId, timestamp: message.timestamp,
++        flags: message.flags,
++        tags: message.tags, globalTags: message.globalTags, localTags: message.localTags,
++        forwardInfo: message.forwardInfo,
++        authorId: message.authorId, text: result.text,
++        attributes: message.attributes.filter { !($0 is TextEntitiesMessageAttribute) }, media: message.media)
++}
++
++func additionalPluginEnqueue(_ message: EnqueueMessage, account: PeerId, peerId: PeerId) -> EnqueueMessage? {
++    guard let chat = additionalChatKey(peerId) else { return message }
++    guard
++        case .message(
++            let text, let attributes, _, let mediaReference, let threadId, let replyToMessageId,
++            let
++                replyToStoryId, let localGroupingKey, let correlationId, let bubbleUpEmojiOrStickersets) = message
++    else { return message }
++    let event = PluginEvent(
++        kind: .sendMessage, name: "send_message", account: additionalAccountKey(account), chat: chat, text: text)
++    guard let result = PluginRegistry.shared.dispatch(event) else { return nil }
++    guard result.text != text else { return message }
++    return .message(
++        text: result.text, attributes: attributes.filter { !($0 is TextEntitiesMessageAttribute) },
++        inlineStickers: [:], mediaReference: mediaReference, threadId: threadId,
++        replyToMessageId: replyToMessageId, replyToStoryId: replyToStoryId, localGroupingKey: localGroupingKey,
++        correlationId: correlationId, bubbleUpEmojiOrStickersets: bubbleUpEmojiOrStickersets)
++}
++
++func additionalPluginAllowRequest(account: String?, name: String) -> Bool {
++    guard let account else { return true }
++    return PluginRegistry.shared.dispatch(PluginEvent(kind: .preRequest, name: name, account: account)) != nil
++}
++
++@discardableResult func additionalPluginPostRequest(account: String?, name: String, error: MTRpcError?) -> MTRpcError? {
++    guard let account else { return error }
++    let event = PluginEvent(kind: .postRequest, name: name, account: account, error: error?.errorDescription)
++    let dispatched = PluginRegistry.shared.dispatch(event)
++    guard let error, let result = dispatched, let description = result.error else { return error }
++    return MTRpcError(errorCode: error.errorCode, errorDescription: description)
++}
+diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
+index e8f3012ff53f7f3647de1fbaeae0ba073ceb228c..0badd1589fc6bf3ecc7051e75ba95205382749fa 100644
+--- a/submodules/TelegramCore/Sources/Network/Network.swift
++++ b/submodules/TelegramCore/Sources/Network/Network.swift
+@@ -1264,7 +1264,12 @@ public final class Network: NSObject {
+     
+     public func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
+         let requestService = self.requestService
++        let pluginAccount = self.additionalAccountId
+         return Signal { [requestService] subscriber in
++            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
++                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
++                return EmptyDisposable
++            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1291,6 +1296,7 @@ public final class Network: NSObject {
+                 completed: { result in
+                     switch result {
+                     case let .success(response):
++                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
+                         if let result = (response.result as! BoxedMessage).body as? T {
+                             subscriber.putNext(.result(result))
+                             subscriber.putCompletion()
+@@ -1299,7 +1305,7 @@ public final class Network: NSObject {
+                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
+                         }
+                     case let .failure(failure):
+-                        subscriber.putError(failure.error)
++                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
+                     }
+                 }
+             )
+@@ -1310,7 +1316,12 @@ public final class Network: NSObject {
+     
+     public func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
+         let requestService = self.requestService
++        let pluginAccount = self.additionalAccountId
+         return Signal { [requestService] subscriber in
++            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
++                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
++                return EmptyDisposable
++            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1329,6 +1340,7 @@ public final class Network: NSObject {
+                 completed: { result in
+                     switch result {
+                     case let .success(response):
++                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
+                         if let result = (response.result as! BoxedMessage).body as? T {
+                             subscriber.putNext(result)
+                             subscriber.putCompletion()
+@@ -1337,7 +1349,7 @@ public final class Network: NSObject {
+                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
+                         }
+                     case let .failure(failure):
+-                        subscriber.putError(failure.error)
++                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
+                     }
+                 }
+             )
+diff --git a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
+index 8ae2e4e7a570f183cb9bb2b46cf54be20a69c2bd..6bbe51c7b724579a80f78ade11f981fe388e5f95 100644
+--- a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
++++ b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
+@@ -539,6 +539,7 @@ private func generateEphemeralOutgoingRandomId() -> Int64 {
+ }
+ 
+ private func enqueueEphemeralOutgoingMessage(transaction: Transaction, account: Account, peerId: PeerId, transformedMedia: Bool, message: EnqueueMessage, botPeerId: PeerId, isWelcomeTemplate: Bool = false) -> MessageId? {
++    guard let message = additionalPluginEnqueue(message, account: account.peerId, peerId: peerId) else { return nil }
+     guard case let .message(text, requestedAttributes, inlineStickers, mediaReference, threadId, replyToMessageId, _, _, correlationId, bubbleUpEmojiOrStickersets) = message else {
+         return nil
+     }
+@@ -830,6 +831,22 @@ public func resendMessages(account: Account, messageIds: [MessageId]) -> Signal<
+ }
+ 
+ func enqueueMessages(transaction: Transaction, account: Account, peerId: PeerId, messages: [(Bool, EnqueueMessage)], disableAutoremove: Bool = false, transformGroupingKeysWithPeerId: Bool = false) -> [MessageId?] {
++    var accepted: [(Bool, EnqueueMessage)] = []
++    var indices: [Int] = []
++    for (index, entry) in messages.enumerated() {
++        if let message = additionalPluginEnqueue(entry.1, account: account.peerId, peerId: peerId) {
++            accepted.append((entry.0, message)); indices.append(index)
++        }
++    }
++    guard !accepted.isEmpty else { return Array(repeating: nil, count: messages.count) }
++    let ids = enqueuePluginProcessedMessages(transaction: transaction, account: account, peerId: peerId,
++        messages: accepted, disableAutoremove: disableAutoremove, transformGroupingKeysWithPeerId: transformGroupingKeysWithPeerId)
++    var result = Array<MessageId?>(repeating: nil, count: messages.count)
++    for (index, id) in zip(indices, ids) { result[index] = id }
++    return result
++}
++
++private func enqueuePluginProcessedMessages(transaction: Transaction, account: Account, peerId: PeerId, messages: [(Bool, EnqueueMessage)], disableAutoremove: Bool = false, transformGroupingKeysWithPeerId: Bool = false) -> [MessageId?] {
+     /**
+      * If it is a support account, mark messages as read here as they are
+      * not marked as read when chat is opened.
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 8383ea1b3a3d24119df114aaa06a8e5b11caa606..89bdca456c68a05314f8afebf037c02d6540725c 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -2302,6 +2302,25 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+             return false
+         })
+ 
++        if message.id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(message.id.peerId) {
++            let event = PluginEvent(kind: .message, name: "message_menu", account: additionalAccountKey(context.account.peerId), chat: chat, text: message.text)
++            for item in PluginRegistry.shared.menuItems(location: .message, event: event) {
++                actions.append(.action(ContextMenuActionItem(text: item.title, icon: { theme in
++                    UIImage(systemName: "puzzlepiece.extension")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)
++                }, action: { controller, _ in
++                    controller?.dismiss(completion: {
++                        guard let result = PluginRegistry.shared.performMenu(item, location: .message, event: event) else { return }
++                        if result.action == .copyText { UIPasteboard.general.string = result.text }
++                        else {
++                            controllerInteraction.presentController(textAlertController(context: context, title: item.title,
++                                text: result.text, actions: [TextAlertAction(type: .defaultAction,
++                                    title: chatPresentationInterfaceState.strings.Common_OK, action: {})]), nil)
++                        }
++                    })
++                })))
++            }
++        }
++
+         if isEdited,
+            let key = additionalMessageKey(account: context.account.peerId, id: message.id),
+            additionalCanArchive(attributes: message.attributes, media: message.media),

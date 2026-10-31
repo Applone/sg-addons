@@ -11,5 +11,18 @@ check:
 prepare:
     uv run --frozen python tools/patches.py prepare build/source
 
-test:
-    bash tools/test-core.sh build/source
+test: test-python test-core
+
+test-python source_dir="build/source":
+    uv run --frozen ruff check --no-respect-gitignore "{{ source_dir }}/Swiftgram/SGPython" examples/plugins
+    uv run --frozen ruff format --check --no-respect-gitignore "{{ source_dir }}/Swiftgram/SGPython" examples/plugins
+    uv run --frozen mypy --strict "{{ source_dir }}/Swiftgram/SGPython/SDK" \
+        "{{ source_dir }}/Swiftgram/SGPython/prepare_runtime.py" \
+        "{{ source_dir }}/Swiftgram/SGPython/Tests" examples/plugins/uppercase.py
+    clang-format --dry-run --Werror "{{ source_dir }}/Swiftgram/SGPython/Bridge/SGPythonBridge.c" \
+        "{{ source_dir }}/Swiftgram/SGPython/Bridge/SGPythonBridge.h"
+    PYTHONPATH="{{ source_dir }}/Swiftgram/SGPython/SDK" uv run --frozen python -m unittest discover \
+        -s "{{ source_dir }}/Swiftgram/SGPython/Tests" -v
+
+test-core source_dir="build/source":
+    uv run --frozen bash tools/test-core.sh "{{ source_dir }}"
