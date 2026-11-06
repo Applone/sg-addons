@@ -1,0 +1,143 @@
+diff --git a/Swiftgram/SGPython/SDK/_swiftgram_runtime.py b/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
+index bb14e64d..dffd5d9b 100644
+--- a/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
++++ b/Swiftgram/SGPython/SDK/_swiftgram_runtime.py
+@@ -301,17 +301,21 @@ def _execute(request: dict[str, Any]) -> dict[str, object]:
+ 
+ def handle(payload: str) -> str:
+     request = cast(dict[str, Any], json.loads(payload))
+-    deadline = time.monotonic() + (
++    # Scheduling and import I/O must not consume the cooperative CPU budget.
++    # The native host separately bounds the total wall-clock wait for each call.
++    deadline = time.thread_time() + (
+         0.1 if request["operation"] in ("hook", "menu", "actionResult", "actionProgress") else 0.5
+     )
+ 
+     def trace(frame: types.FrameType, event: str, arg: object) -> TraceFunction:
+-        if time.monotonic() > deadline:
++        if time.thread_time() > deadline:
+             raise TimeoutError("Python plugin exceeded its execution deadline")
+         return trace
+ 
+     response: dict[str, object]
+-    if request["operation"] not in ("resolve", "install", "discard", "verify"):
++    # Inspection parses metadata without executing plugin code. Its cold imports
++    # belong to the native inspection deadline, not a plugin execution budget.
++    if request["operation"] not in ("inspect", "resolve", "install", "discard", "verify"):
+         sys.settrace(trace)
+     try:
+         response = {"result": _execute(request)}
+diff --git a/Swiftgram/SGPython/Tests/test_runtime.py b/Swiftgram/SGPython/Tests/test_runtime.py
+index 7262343a..f628308d 100644
+--- a/Swiftgram/SGPython/Tests/test_runtime.py
++++ b/Swiftgram/SGPython/Tests/test_runtime.py
+@@ -4,7 +4,9 @@ from __future__ import annotations
+ 
+ import json
+ import sys
++import time
+ import unittest
++from unittest.mock import patch
+ 
+ from _swiftgram_runtime import handle, metadata
+ 
+@@ -144,6 +146,78 @@ class Plugin(BasePlugin):
+             reply = self.call("load", source=source, settings={})
+             self.assertIn(message, str(reply.get("failure")))
+ 
++    def test_inspection_waits_do_not_consume_the_cpu_budget(self) -> None:
++        def delayed_metadata(source: str) -> dict[str, object]:
++            time.sleep(0.6)
++            return metadata(source)
++
++        with patch("_swiftgram_runtime.metadata", side_effect=delayed_metadata):
++            reply = self.call("inspect", source=HEADER)
++        self.assertEqual(reply["result"], {"manifest": metadata(HEADER)})
++        self.assertIsNone(sys.gettrace())
++
++    def test_inspection_does_not_spend_the_plugin_execution_budget(self) -> None:
++        cpu_time = 0.0
++
++        def inspected_metadata(source: str) -> dict[str, object]:
++            nonlocal cpu_time
++            # Simulate cold parser imports that exceed a plugin's CPU allowance.
++            cpu_time = 1.0
++            return metadata(source)
++
++        with (
++            patch("_swiftgram_runtime.time.thread_time", side_effect=lambda: cpu_time),
++            patch("_swiftgram_runtime.metadata", side_effect=inspected_metadata),
++        ):
++            reply = self.call("inspect", source=HEADER)
++        self.assertEqual(reply["result"], {"manifest": metadata(HEADER)})
++        self.assertIsNone(sys.gettrace())
++
++    def test_hook_waits_do_not_consume_the_cpu_budget(self) -> None:
++        source = (
++            HEADER
++            + """
++import time
++from swiftgram import BasePlugin, HookResult, HookStrategy
++class Plugin(BasePlugin):
++    def on_message(self, event):
++        time.sleep(0.12)
++        return HookResult(HookStrategy.MODIFY, text="finished")
++"""
++        )
++        reply = self.call(
++            "hook",
++            source=source,
++            settings={},
++            event={"kind": "message", "name": "message", "account": "77", "text": "hello"},
++            callback="on_message",
++        )
++        self.assertEqual(
++            reply["result"],
++            {"strategy": "modify", "text": "finished", "error": None, "settings": {}},
++        )
++        self.assertIsNone(sys.gettrace())
++
++    def test_hook_cpu_limit_still_stops_busy_plugins(self) -> None:
++        source = (
++            HEADER
++            + """
++from swiftgram import BasePlugin
++class Plugin(BasePlugin):
++    def on_message(self, event):
++        while True: pass
++"""
++        )
++        reply = self.call(
++            "hook",
++            source=source,
++            settings={},
++            event={"kind": "message", "name": "message", "account": "77", "text": "hello"},
++            callback="on_message",
++        )
++        self.assertIn("TimeoutError", str(reply.get("failure")))
++        self.assertIsNone(sys.gettrace())
++
+ 
+ if __name__ == "__main__":
+     unittest.main()
+diff --git a/Swiftgram/SGPython/prepare_runtime.py b/Swiftgram/SGPython/prepare_runtime.py
+index 985615fd..d2ca40e4 100644
+--- a/Swiftgram/SGPython/prepare_runtime.py
++++ b/Swiftgram/SGPython/prepare_runtime.py
+@@ -101,6 +101,7 @@ apple_dynamic_xcframework_import(
+     bundle_only = True,
+ )
+ ''')
++    # The app bundles stdlib as a resource; framework deps must provide CcInfo.
+     deps = [":" + name for name in sorted(modules)]
+     (root / "BUILD.bazel").write_text(
+         """
+@@ -115,7 +116,7 @@ apple_dynamic_xcframework_import(
+         "Python.xcframework/Info.plist",
+         "Python.xcframework/*/Python.framework/**",
+     ]),
+-    deps = [":stdlib"] + """
++    deps = """
+         + repr(deps)
+         + """,
+ )

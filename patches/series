@@ -15,3 +15,4 @@ ui/telegram-ads.patch
 core/disappearing-messages.patch
 core/addons.patch
 core/local-saved-tags.patch
+build/python-runtime-ci.patch

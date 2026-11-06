@@ -244,7 +244,11 @@ Package management has its own worker and manager thread state, so network waits
 do not occupy the callback worker. The host waits at most 250 ms for hook/menu
 calls, two seconds for inspection/lifecycle work, ten seconds for environment
 verification, and 120 seconds for package resolution/installation.
-Python tracing provides an earlier cooperative deadline for normal Python code.
+Python tracing provides an earlier cooperative CPU budget for normal Python code:
+100 ms for callbacks and 500 ms for lifecycle work. Metadata inspection parses
+source without executing it and uses the native two-second deadline instead.
+Time spent waiting for I/O or for the thread to be scheduled does not consume
+this CPU budget; the native host's wall-clock deadlines still apply.
 Native extension calls and deliberately altered tracing cannot be forcibly stopped
 safely; a host timeout quarantines the interpreter until application restart,
 preserves the current host event, and leaves recovery available in native UI.
