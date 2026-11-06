@@ -37,6 +37,8 @@ PYTHON
 # Keep new feature modules strict without reformatting the pinned upstream.
 swift format lint --strict --configuration "$repo_dir/tools/swift-format.json" \
     "$core_dir/Sources/DisappearingMessages.swift" \
+    "$core_dir/Sources/LocalSavedMessageTags.swift" \
+    "$core_dir/Tests/LocalSavedTagChecks.swift" \
     "$core_dir/Sources/PluginActions.swift" \
     "$core_dir/Tests/PluginActionChecks.swift" \
     "$core_dir/Sources/PluginManifest.swift" \
@@ -46,6 +48,7 @@ swift format lint --strict --configuration "$repo_dir/tools/swift-format.json" \
     "$core_dir/Tests/PluginChecks.swift" \
     "$core_dir/Tests/PythonPluginChecks.swift" \
     "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift" \
+    "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalSavedTags.swift" \
     "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift" \
     "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift" \
     "$source_dir/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift"
@@ -63,8 +66,19 @@ MODULE
 fi
 
 python_include="$(python3 -c 'import sysconfig; print(sysconfig.get_path("include"))')"
-python_libdir="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')"
-python_library="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LDLIBRARY"))')"
+python_library="$(python3 - <<'PYTHON'
+import sysconfig
+from pathlib import Path
+
+# Framework builds express LDLIBRARY relative to PYTHONFRAMEWORKPREFIX, not LIBDIR.
+prefix = "PYTHONFRAMEWORKPREFIX" if sysconfig.get_config_var("PYTHONFRAMEWORK") else "LIBDIR"
+library = Path(sysconfig.get_config_var(prefix)) / sysconfig.get_config_var("LDLIBRARY")
+if not library.is_file():
+    raise SystemExit(f"Python shared library does not exist: {library}")
+print(library.resolve())
+PYTHON
+)"
+python_libdir="$(dirname "$python_library")"
 mkdir "$temporary/SGPythonBridge"
 cat > "$temporary/SGPythonBridge/module.modulemap" <<MODULE
 module SGPythonBridge {
@@ -78,6 +92,6 @@ clang -std=c11 -Wall -Wextra -Werror -isystem "$python_include" \
 swiftc -swift-version 5 -warnings-as-errors -D TESTING \
     -I "$temporary" \
     "$core_dir"/Sources/*.swift "$core_dir"/Tests/*.swift \
-    "$temporary/python-bridge.o" "$python_libdir/$python_library" \
+    "$temporary/python-bridge.o" "$python_library" \
     -Xlinker -rpath -Xlinker "$python_libdir" -lsqlite3 -o "$temporary/core-checks"
 "$temporary/core-checks"

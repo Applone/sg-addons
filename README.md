@@ -18,7 +18,10 @@ and patched in `patches/series` order when preparing a build.
   and queued ads, without Premium. Enable **Block Telegram ads** under Swiftgram
   settings → **Additional functions** → **Telegram ads** for all accounts or an
   individual account. Changes take effect without restarting; off by default.
-- Local profile options and badge customization.
+- Local Premium for client features, including adding, naming, and filtering
+  Saved Messages tags on this device, plus local profile and badge customization.
+  Local tags apply to messages available in this client and do not sync to other
+  devices. Server features still require a Telegram Premium subscription.
 - Python plugins with per-account activation/settings, message/send/request hooks,
   menu actions, permission-controlled Telegram sending/editing and media transfer,
   atomic updates, and safe-mode recovery. Import `.py` / `.plugin` files

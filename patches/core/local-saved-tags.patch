@@ -1,0 +1,504 @@
+diff --git a/Swiftgram/SGAdditionalCore/Sources/LocalSavedMessageTags.swift b/Swiftgram/SGAdditionalCore/Sources/LocalSavedMessageTags.swift
+new file mode 100644
+index 00000000..76542bdd
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/LocalSavedMessageTags.swift
+@@ -0,0 +1,16 @@
++import Foundation
++
++public enum LocalSavedMessageTags {
++    public static func useLocalStorage(localPremium: Bool, serverPremium: Bool) -> Bool {
++        localPremium && !serverPremium
++    }
++
++    /// Keep the newest selections when the per-message limit is reached.
++    public static func updated<Reaction: Equatable>(
++        current: [Reaction], selected: [Reaction], add: Bool, limit: Int
++    ) -> [Reaction] {
++        var result = add ? current.filter { !selected.contains($0) } : []
++        for reaction in selected where !result.contains(reaction) { result.append(reaction) }
++        return Array(result.suffix(max(0, limit)))
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/LocalSavedTagChecks.swift b/Swiftgram/SGAdditionalCore/Tests/LocalSavedTagChecks.swift
+new file mode 100644
+index 00000000..59558eab
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/LocalSavedTagChecks.swift
+@@ -0,0 +1,32 @@
++import Foundation
++
++enum LocalSavedTagChecks {
++    static func run() throws {
++        CheckCore.require(
++            LocalSavedMessageTags.useLocalStorage(localPremium: true, serverPremium: false),
++            "local Premium uses local tags for an unsubscribed account")
++        CheckCore.require(
++            !LocalSavedMessageTags.useLocalStorage(localPremium: false, serverPremium: false),
++            "local tags are opt in")
++        for local in [false, true] {
++            CheckCore.require(
++                !LocalSavedMessageTags.useLocalStorage(localPremium: local, serverPremium: true),
++                "subscribed accounts retain server tag synchronization")
++        }
++        let updated = LocalSavedMessageTags.updated(
++            current: ["old", "keep"], selected: ["new", "new"], add: true, limit: 2)
++        CheckCore.require(updated == ["keep", "new"], "new tags survive the reaction limit without duplicates")
++        CheckCore.require(
++            LocalSavedMessageTags.updated(current: updated, selected: ["keep"], add: false, limit: 2) == ["keep"],
++            "replacement removes unselected tags")
++        CheckCore.require(
++            LocalSavedMessageTags.updated(current: updated, selected: [], add: false, limit: 2).isEmpty,
++            "clearing tags persists an empty selection")
++        CheckCore.require(
++            LocalSavedMessageTags.updated(current: updated, selected: [], add: true, limit: 0).isEmpty,
++            "zero limits cannot retain tags")
++        let bytes = try JSONEncoder().encode(updated)
++        let restored = try JSONDecoder().decode([String].self, from: bytes)
++        CheckCore.require(restored == updated, "tag selection survives the Postbox payload round trip")
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+index a7123460..d52d4732 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -33,6 +33,7 @@ struct CheckCore {
+         CheckCore.require(!AdditionalPrivacy.suppress(.read, account: "77", chat: "user:42"), "chat exception")
+         CheckCore.require(AdditionalPrivacy.suppress(.online, account: "77", chat: "user:42"), "online applies to account")
+         CheckCore.require(!AdditionalPrivacy.suppress(.cancel, account: "77"), "cancel is transmitted")
++        try LocalSavedTagChecks.run()
+         try AdsChecks.run(defaults: defaults)
+         try HistoryChecks.run(root: root)
+         let key = MessageKey(account: "77", chat: "user:42", id: 1)
+@@ -64,6 +65,6 @@ struct CheckCore {
+         try PythonPluginChecks.run(root: root)
+         try PluginActionChecks.run(root: root)
+         try DisappearingChecks.run(root: root)
+-        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media, plugins")
++        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, local Saved Messages tags, disappearing media, plugins")
+     }
+ }
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index f0355343..4ce7f9ea 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -296,7 +296,7 @@
+ "Additional.Clear" = "Clear saved history";
+ "Additional.HistoryNotice" = "Only versions observed while capture is enabled are saved. Secret chats are excluded. Timed media require Save disappearing media. Earlier edits cannot be recovered.";
+ "Additional.EditFilters" = "Edit filters";
+-"Additional.PremiumNotice" = "Changes affect this client only. Server features still require a subscription. Select your profile badge from your profile.";
++"Additional.PremiumNotice" = "Changes affect this client only. Saved Messages tags and their names stay on this device. Server features still require a subscription. Select your profile badge from your profile.";
+ "Additional.Diagnostics" = "Diagnostics";
+ "Additional.ClearAllNotice" = "Delete saved revisions for all accounts?";
+ "Additional.ClearAccountNotice" = "Delete saved revisions for this account?";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index 518a2b65..a2d88504 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -291,7 +291,7 @@
+ "Additional.Clear" = "Очистить сохранённую историю";
+ "Additional.HistoryNotice" = "Сохраняются только версии, полученные при включённой записи. Секретные чаты исключены. Медиа с таймером требуют включения сохранения исчезающих медиа. Более ранние изменения восстановить нельзя.";
+ "Additional.EditFilters" = "Настроить фильтры";
+-"Additional.PremiumNotice" = "Изменения действуют только в этом клиенте. Серверные возможности требуют подписки. Значок профиля выбирается в профиле.";
++"Additional.PremiumNotice" = "Изменения действуют только в этом клиенте. Теги «Избранного» и их названия остаются на этом устройстве. Серверные возможности требуют подписки. Значок профиля выбирается в профиле.";
+ "Additional.Diagnostics" = "Диагностика";
+ "Additional.ClearAllNotice" = "Удалить сохранённые версии для всех аккаунтов?";
+ "Additional.ClearAccountNotice" = "Удалить сохранённые версии для этого аккаунта?";
+diff --git a/submodules/Postbox/Sources/Postbox.swift b/submodules/Postbox/Sources/Postbox.swift
+index a22711f5..dc232a86 100644
+--- a/submodules/Postbox/Sources/Postbox.swift
++++ b/submodules/Postbox/Sources/Postbox.swift
+@@ -48,7 +48,7 @@ public final class Transaction {
+         self.postbox?.messageDeletionObserver = observer
+     }
+ 
+-    public func setMessageProcessor(_ processor: @escaping (StoreMessage, Message?) -> StoreMessage?) {
++    public func setMessageProcessor(_ processor: @escaping (StoreMessage, Message?, Transaction) -> StoreMessage?) {
+         assert(self.queue.isCurrent())
+         self.postbox?.messageProcessor = processor
+     }
+@@ -1612,7 +1612,7 @@ public func openPostbox(basePath: String, seedConfiguration: SeedConfiguration,
+ }
+ 
+ final class PostboxImpl {
+-    var messageProcessor: ((StoreMessage, Message?) -> StoreMessage?)?
++    var messageProcessor: ((StoreMessage, Message?, Transaction) -> StoreMessage?)?
+     var messageDeletionObserver: (([MessageId]) -> Void)?
+     public let queue: Queue
+     public let seedConfiguration: SeedConfiguration
+@@ -2207,7 +2207,7 @@ final class PostboxImpl {
+         let messages = self.messageProcessor.map { processor in messages.compactMap { message in
+             let previous: Message?
+             if case let .Id(id) = message.id { previous = transaction.getMessage(id) } else { previous = nil }
+-            return processor(message, previous)
++            return processor(message, previous, transaction)
+         } } ?? messages
+         var addedMessagesByPeerId: [PeerId: [StoreMessage]] = [:]
+         let addResult = self.messageHistoryTable.addMessages(messages: messages, operationsByPeerId: &self.currentOperationsByPeerId, updatedMedia: &self.currentUpdatedMedia, unsentMessageOperations: &currentUnsentOperations, updatedPeerReadStateOperations: &self.currentUpdatedSynchronizeReadStateOperations, globalTagsOperations: &self.currentGlobalTagsOperations, pendingActionsOperations: &self.currentPendingMessageActionsOperations, updatedMessageActionsSummaries: &self.currentUpdatedMessageActionsSummaries, updatedMessageTagSummaries: &self.currentUpdatedMessageTagSummaries, invalidateMessageTagSummaries: &self.currentInvalidateMessageTagSummaries, localTagsOperations: &self.currentLocalTagsOperations, timestampBasedMessageAttributesOperations: &self.currentTimestampBasedMessageAttributesOperations, processMessages: { messagesByPeerId in
+@@ -3112,7 +3112,7 @@ final class PostboxImpl {
+             if case let .update(proposedMessage) = update(message) {
+                 let updatedMessage: StoreMessage
+                 if let processor = self.messageProcessor {
+-                    guard let processed = processor(proposedMessage, message) else {
++                    guard let processed = processor(proposedMessage, message, transaction) else {
+                         transaction.deleteMessages([id], forEachMedia: nil)
+                         return
+                     }
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index fffa55cc..5fd01f06 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1289,7 +1289,7 @@ public class Account {
+             network.additionalAccountId = additionalAccountKey(peerId)
+             let processor = AdditionalMessageProcessor(account: peerId, mediaBox: postbox.mediaBox)
+             let _ = postbox.transaction { transaction -> Bool in
+-                transaction.setMessageProcessor { processor.process($0, previous: $1) }
++                transaction.setMessageProcessor { processor.process($0, previous: $1, transaction: $2) }
+                 transaction.setMessageDeletionObserver { processor.deleted($0) }
+                 return additionalRestoreLegacyProfile(transaction: transaction, account: peerId)
+             }.start(next: { restored in
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalSavedTags.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalSavedTags.swift
+new file mode 100644
+index 00000000..379ed7c7
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalSavedTags.swift
+@@ -0,0 +1,101 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++
++func additionalUseLocalSavedTags(account: PeerId, serverPremium: Bool) -> Bool {
++    LocalSavedMessageTags.useLocalStorage(
++        localPremium: AddonSettings.shared.profile(additionalAccountKey(account)).localPremium,
++        serverPremium: serverPremium)
++}
++
++func additionalUseLocalSavedTags(transaction: Transaction, account: PeerId) -> Bool {
++    additionalUseLocalSavedTags(
++        account: account, serverPremium: (transaction.getPeer(account) as? TelegramUser)?.isPremium ?? false)
++}
++
++private func localTagKey(_ id: MessageId) -> String {
++    "SGALocalSavedTags:\(id.namespace):\(id.id)"
++}
++
++private func localTagAttributes(
++    _ attributes: [MessageAttribute], reactions: [MessageReaction.Reaction]
++) -> [MessageAttribute] {
++    var attributes = attributes.filter {
++        !($0 is ReactionsMessageAttribute || $0 is PendingReactionsMessageAttribute)
++    }
++    attributes.append(
++        ReactionsMessageAttribute(
++            canViewList: false, isTags: true,
++            reactions: reactions.enumerated().map {
++                MessageReaction(value: $0.element, count: 1, chosenOrder: $0.offset)
++            }, recentPeers: [], topPeers: []))
++    return attributes
++}
++
++/// Postbox keychain entries are durable and scoped to the authorized account.
++/// Keep an empty payload when clearing tags so a history refresh cannot restore them.
++func additionalApplyLocalSavedTags(
++    _ message: StoreMessage, account: PeerId, transaction: Transaction
++) -> StoreMessage {
++    guard case .Id(let id) = message.id, id.peerId == account,
++        id.namespace == Namespaces.Message.Cloud,
++        additionalUseLocalSavedTags(transaction: transaction, account: account),
++        let data = transaction.keychainEntryForKey(localTagKey(id)),
++        let reactions = try? JSONDecoder().decode([MessageReaction.Reaction].self, from: data)
++    else { return message }
++    return message.withUpdatedAttributes(localTagAttributes(message.attributes, reactions: reactions))
++}
++
++func additionalUpdateLocalSavedTags(
++    transaction: Transaction, account: PeerId, messageId: MessageId,
++    reactions: [UpdateMessageReaction], add: Bool
++) {
++    guard messageId.peerId == account, messageId.namespace == Namespaces.Message.Cloud,
++        let message = transaction.getMessage(messageId)
++    else { return }
++    let current =
++        message.effectiveReactions(isTags: true)?.filter { $0.isSelected && $0.value != .stars }.map(\.value) ?? []
++    let configuration =
++        transaction.getPreferencesEntry(key: PreferencesKeys.appConfiguration)?.get(AppConfiguration.self)
++        ?? .defaultValue
++    let limit = Int(UserLimitsConfiguration(appConfiguration: configuration, isPremium: true).maxReactionsPerMessage)
++    let selected = LocalSavedMessageTags.updated(
++        current: current, selected: reactions.map(\.reaction).filter { $0 != .stars }, add: add, limit: limit)
++    guard let data = try? JSONEncoder().encode(selected) else { return }
++    for reaction in reactions {
++        if case .custom(_, let file) = reaction, let file { transaction.storeMediaIfNotPresent(media: file) }
++    }
++    transaction.setKeychainEntry(data, forKey: localTagKey(messageId))
++    transaction.setPendingMessageAction(type: .updateReaction, id: messageId, action: nil)
++    transaction.updateMessage(messageId) { current in
++        let updated = StoreMessage(
++            id: current.id, customStableId: nil, globallyUniqueId: current.globallyUniqueId,
++            groupingKey: current.groupingKey, threadId: current.threadId, timestamp: current.timestamp,
++            flags: StoreMessageFlags(current.flags), tags: current.tags, globalTags: current.globalTags,
++            localTags: current.localTags, forwardInfo: current.forwardInfo.map(StoreMessageForwardInfo.init),
++            authorId: current.author?.id, text: current.text,
++            attributes: localTagAttributes(current.attributes, reactions: selected), media: current.media)
++        return .update(updated)
++    }
++    let previous = _internal_savedMessageTags(transaction: transaction, local: true)
++    var tags = previous?.tags.map { SavedMessageTags.Tag(reaction: $0.reaction, title: $0.title, count: 0) } ?? []
++    for tag in transaction.getMessageTagSummaryCustomTags(
++        peerId: account, threadId: nil, tagMask: [], namespace: Namespaces.Message.Cloud)
++    {
++        guard let reaction = ReactionsMessageAttribute.reactionFromMessageTag(tag: tag),
++            let summary = transaction.getMessageTagSummary(
++                peerId: account, threadId: nil, tagMask: [], namespace: Namespaces.Message.Cloud, customTag: tag),
++            summary.count > 0
++        else { continue }
++        let updated = SavedMessageTags.Tag(
++            reaction: reaction, title: previous?.tags.first(where: { $0.reaction == reaction })?.title,
++            count: Int(summary.count))
++        if let index = tags.firstIndex(where: { $0.reaction == reaction }) {
++            tags[index] = updated
++        } else {
++            tags.append(updated)
++        }
++    }
++    _internal_setSavedMessageTags(
++        transaction: transaction, savedMessageTags: SavedMessageTags(hash: 0, tags: tags), local: true)
++}
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+index 299b9cc2..90c0a1dd 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -103,7 +103,8 @@ final class AdditionalMessageProcessor {
+         self.disappearing = AdditionalDisappearingMedia(account: account, mediaBox: mediaBox)
+     }
+     func deleted(_ ids: [MessageId]) { disappearing.deleted(ids) }
+-    func process(_ proposed: StoreMessage, previous: Message?) -> StoreMessage? {
++    func process(_ proposed: StoreMessage, previous: Message?, transaction: Transaction) -> StoreMessage? {
++        let proposed = additionalApplyLocalSavedTags(proposed, account: account, transaction: transaction)
+         let message = disappearing.process(proposed, previous: previous)
+         guard case let .Id(id) = message.id,
+               let key = additionalMessageKey(account: account, id: id) else { return message }
+diff --git a/submodules/TelegramCore/Sources/State/Holes.swift b/submodules/TelegramCore/Sources/State/Holes.swift
+index a9e49038..afe5d622 100644
+--- a/submodules/TelegramCore/Sources/State/Holes.swift
++++ b/submodules/TelegramCore/Sources/State/Holes.swift
+@@ -437,6 +437,14 @@ func fetchMessageHistoryHole(accountPeerId: PeerId, source: FetchMessageHistoryH
+             switch peerInput {
+             case let .direct(peerId, _):
+                 let peer = transaction.getPeer(peerId)
++                if peerId == accountPeerId, namespace == Namespaces.Message.Cloud, case .customTag = space,
++                    additionalUseLocalSavedTags(transaction: transaction, account: accountPeerId) {
++                    transaction.removeHole(peerId: peerId,
++                        threadId: peer.flatMap { peerInput.requestThreadId(accountPeerId: accountPeerId, peer: $0) }
++                            ?? peer.flatMap { peerInput.requestSubPeerId(accountPeerId: accountPeerId, peer: $0)?.toInt64() },
++                        namespace: namespace, space: space, range: 1 ... (Int32.max - 1))
++                    return (nil, 0, nil)
++                }
+                 var subPeerId: PeerId?
+                 if let peer {
+                     subPeerId = peerInput.requestSubPeerId(accountPeerId: accountPeerId, peer: peer)
+diff --git a/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift b/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift
+index 6094a230..0c74eec7 100644
+--- a/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift
++++ b/submodules/TelegramCore/Sources/State/ManagedConsumePersonalMessagesActions.swift
+@@ -661,7 +661,7 @@ func synchronizeSavedMessageTags(postbox: Postbox, network: Network, peerId: Pee
+     |> take(1)
+     |> ignoreValues
+     
+-    let updateSignal: Signal<Never, NoError> = (postbox.transaction { transaction -> (Bool, Peer?, Int64) in
++    let updateSignal: Signal<Never, NoError> = (postbox.transaction { transaction -> (Bool, Bool, Peer?, Int64) in
+         struct HashableTag {
+             var titleId: UInt64?
+             var count: Int
+@@ -735,13 +735,14 @@ func synchronizeSavedMessageTags(postbox: Postbox, network: Network, peerId: Pee
+         }
+         
+         return (
++            additionalUseLocalSavedTags(transaction: transaction, account: peerId),
+             transaction.getPreferencesEntry(key: PreferencesKeys.didCacheSavedMessageTags(threadId: threadId)) != nil,
+             threadId.flatMap { transaction.getPeer(PeerId($0)) },
+             Int64(bitPattern: hashAcc)
+         )
+     }
+-    |> mapToSignal { alreadyCached, subPeer, currentHash -> Signal<Never, NoError> in
+-        if alreadyCached && !force {
++    |> mapToSignal { local, alreadyCached, subPeer, currentHash -> Signal<Never, NoError> in
++        if local || (alreadyCached && !force) {
+             return .complete()
+         }
+         
+@@ -795,6 +796,7 @@ func synchronizeSavedMessageTags(postbox: Postbox, network: Network, peerId: Pee
+                 }
+                 
+                 return postbox.transaction { transaction -> Void in
++                    guard !additionalUseLocalSavedTags(transaction: transaction, account: peerId) else { return }
+                     if threadId == nil {
+                         _internal_setSavedMessageTags(transaction: transaction, savedMessageTags: SavedMessageTags(
+                             hash: 0,
+diff --git a/submodules/TelegramCore/Sources/State/MessageReactions.swift b/submodules/TelegramCore/Sources/State/MessageReactions.swift
+index fae38f8b..674d8762 100644
+--- a/submodules/TelegramCore/Sources/State/MessageReactions.swift
++++ b/submodules/TelegramCore/Sources/State/MessageReactions.swift
+@@ -73,6 +73,12 @@ public func updateMessageReactionsInteractively(account: Account, messageIds: [M
+         }
+         
+         for messageId in messageIds {
++            if messageId.peerId == account.peerId, messageId.namespace == Namespaces.Message.Cloud,
++                additionalUseLocalSavedTags(transaction: transaction, account: account.peerId) {
++                additionalUpdateLocalSavedTags(transaction: transaction, account: account.peerId,
++                    messageId: messageId, reactions: reactions, add: add)
++                continue
++            }
+             var mappedReactions: [PendingReactionsMessageAttribute.PendingReaction] = []
+             
+             var reactions: [UpdateMessageReaction] = reactions
+diff --git a/submodules/TelegramCore/Sources/State/SavedMessageTags.swift b/submodules/TelegramCore/Sources/State/SavedMessageTags.swift
+index e228edf2..9bf7d9a2 100644
+--- a/submodules/TelegramCore/Sources/State/SavedMessageTags.swift
++++ b/submodules/TelegramCore/Sources/State/SavedMessageTags.swift
+@@ -104,31 +104,20 @@ func _internal_savedMessageTags(postbox: Postbox) -> Signal<SavedMessageTags?, N
+     }
+ }
+ 
+-func _internal_savedMessageTagsCacheKey() -> ItemCacheEntryId {
++func _internal_savedMessageTagsCacheKey(local: Bool = false) -> ItemCacheEntryId {
+     let key = ValueBoxKey(length: 8)
+-    key.setInt64(0, value: 0)
++    key.setInt64(0, value: local ? 1 : 0)
+     
+     return ItemCacheEntryId(collectionId: Namespaces.CachedItemCollection.savedMessageTags, key: key)
+ }
+ 
+-func _internal_savedMessageTags(transaction: Transaction) -> SavedMessageTags? {
+-    let key = ValueBoxKey(length: 8)
+-    key.setInt64(0, value: 0)
+-    
+-    let cached = transaction.retrieveItemCacheEntry(id: ItemCacheEntryId(collectionId: Namespaces.CachedItemCollection.savedMessageTags, key: key))?.get(SavedMessageTags.self)
+-    if let cached = cached {
+-        return cached
+-    } else {
+-        return nil
+-    }
++func _internal_savedMessageTags(transaction: Transaction, local: Bool = false) -> SavedMessageTags? {
++    return transaction.retrieveItemCacheEntry(id: _internal_savedMessageTagsCacheKey(local: local))?.get(SavedMessageTags.self)
+ }
+ 
+-func _internal_setSavedMessageTags(transaction: Transaction, savedMessageTags: SavedMessageTags) {
+-    let key = ValueBoxKey(length: 8)
+-    key.setInt64(0, value: 0)
+-    
++func _internal_setSavedMessageTags(transaction: Transaction, savedMessageTags: SavedMessageTags, local: Bool = false) {
+     if let entry = CodableEntry(savedMessageTags) {
+-        transaction.putItemCacheEntry(id: ItemCacheEntryId(collectionId: Namespaces.CachedItemCollection.savedMessageTags, key: key), entry: entry)
++        transaction.putItemCacheEntry(id: _internal_savedMessageTagsCacheKey(local: local), entry: entry)
+     }
+ }
+ 
+@@ -153,8 +142,12 @@ func managedSynchronizeSavedMessageTags(postbox: Postbox, network: Network, acco
+         |> take(1)
+         |> ignoreValues
+         
+-        let signal: Signal<Never, NoError> = _internal_savedMessageTags(postbox: postbox)
+-        |> mapToSignal { current in
++        let signal: Signal<Never, NoError> = postbox.transaction { transaction -> (Bool, SavedMessageTags?) in
++            return (additionalUseLocalSavedTags(transaction: transaction, account: accountPeerId),
++                _internal_savedMessageTags(transaction: transaction))
++        }
++        |> mapToSignal { local, current -> Signal<Never, NoError> in
++            if local { return .complete() }
+             return (network.request(Api.functions.messages.getSavedReactionTags(flags: 0, peer: nil, hash: current?.hash ?? 0))
+             |> map(Optional.init)
+             |> `catch` { _ -> Signal<Api.messages.SavedReactionTags?, NoError> in
+@@ -200,6 +193,7 @@ func managedSynchronizeSavedMessageTags(postbox: Postbox, network: Network, acco
+                     return _internal_resolveInlineStickers(postbox: postbox, network: network, fileIds: customFileIds)
+                     |> mapToSignal { _ -> Signal<Never, NoError> in
+                         return postbox.transaction { transaction in
++                            guard !additionalUseLocalSavedTags(transaction: transaction, account: accountPeerId) else { return }
+                             _internal_setSavedMessageTags(transaction: transaction, savedMessageTags: savedMessageTags)
+                         }
+                         |> ignoreValues
+@@ -224,17 +218,20 @@ func managedSynchronizeSavedMessageTags(postbox: Postbox, network: Network, acco
+ }
+ 
+ func _internal_setSavedMessageTagTitle(account: Account, reaction: MessageReaction.Reaction, title: String?) -> Signal<Never, NoError> {
+-    return account.postbox.transaction { transaction -> Void in
+-        let value = _internal_savedMessageTags(transaction: transaction) ?? SavedMessageTags(hash: 0, tags: [])
++    return account.postbox.transaction { transaction -> Bool in
++        let local = additionalUseLocalSavedTags(transaction: transaction, account: account.peerId)
++        let value = _internal_savedMessageTags(transaction: transaction, local: local) ?? SavedMessageTags(hash: 0, tags: [])
+         var updatedTags = value.tags
+         if let index = updatedTags.firstIndex(where: { $0.reaction == reaction }) {
+             updatedTags[index] = SavedMessageTags.Tag(reaction: updatedTags[index].reaction, title: title, count: updatedTags[index].count)
+         } else {
+             updatedTags.append(SavedMessageTags.Tag(reaction: reaction, title: title, count: 0))
+         }
+-        _internal_setSavedMessageTags(transaction: transaction, savedMessageTags: SavedMessageTags(hash: 0, tags: updatedTags))
++        _internal_setSavedMessageTags(transaction: transaction, savedMessageTags: SavedMessageTags(hash: 0, tags: updatedTags), local: local)
++        return local
+     }
+-    |> mapToSignal { _ -> Signal<Never, NoError> in
++    |> mapToSignal { local -> Signal<Never, NoError> in
++        if local { return .complete() }
+         var flags: Int32 = 0
+         if title != nil {
+             flags |= 1 << 0
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Stickers/TelegramEngineStickers.swift b/submodules/TelegramCore/Sources/TelegramEngine/Stickers/TelegramEngineStickers.swift
+index c68a7adc..0ebce12e 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Stickers/TelegramEngineStickers.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Stickers/TelegramEngineStickers.swift
+@@ -164,27 +164,24 @@ public extension TelegramEngine {
+         }
+         
+         public func savedMessageTagData() -> Signal<SavedMessageTags?, NoError> {
+-            return self.account.postbox.combinedView(keys: [PostboxViewKey.cachedItem(_internal_savedMessageTagsCacheKey())])
+-            |> mapToSignal { views -> Signal<SavedMessageTags?, NoError> in
+-                guard let views = views.views[PostboxViewKey.cachedItem(_internal_savedMessageTagsCacheKey())] as? CachedItemView else {
+-                    return .single(nil)
+-                }
+-                guard let savedMessageTags = views.value?.get(SavedMessageTags.self) else {
+-                    return .single(nil)
+-                }
+-                return .single(savedMessageTags)
++            let serverKey = PostboxViewKey.cachedItem(_internal_savedMessageTagsCacheKey())
++            let localKey = PostboxViewKey.cachedItem(_internal_savedMessageTagsCacheKey(local: true))
++            return combineLatest(
++                self.account.postbox.combinedView(keys: [serverKey, localKey, .basicPeer(self.account.peerId)]),
++                additionalPresentationChanges()
++            )
++            |> map { views, _ -> SavedMessageTags? in
++                let peer = (views.views[.basicPeer(self.account.peerId)] as? BasicPeerView)?.peer as? TelegramUser
++                let local = additionalUseLocalSavedTags(account: self.account.peerId, serverPremium: peer?.isPremium ?? false)
++                let view = views.views[local ? localKey : serverKey] as? CachedItemView
++                return view?.value?.get(SavedMessageTags.self) ?? (local ? SavedMessageTags(hash: 0, tags: []) : nil)
+             }
+         }
+-        
++
+         public func savedMessageTags() -> Signal<([SavedMessageTags.Tag], [Int64: TelegramMediaFile]), NoError> {
+-            return self.account.postbox.combinedView(keys: [PostboxViewKey.cachedItem(_internal_savedMessageTagsCacheKey())])
+-            |> mapToSignal { views -> Signal<([SavedMessageTags.Tag], [Int64: TelegramMediaFile]), NoError> in
+-                guard let views = views.views[PostboxViewKey.cachedItem(_internal_savedMessageTagsCacheKey())] as? CachedItemView else {
+-                    return .single(([], [:]))
+-                }
+-                guard let savedMessageTags = views.value?.get(SavedMessageTags.self) else {
+-                    return .single(([], [:]))
+-                }
++            return self.savedMessageTagData()
++            |> mapToSignal { savedMessageTags -> Signal<([SavedMessageTags.Tag], [Int64: TelegramMediaFile]), NoError> in
++                guard let savedMessageTags else { return .single(([], [:])) }
+                 return self.account.postbox.transaction { transaction -> ([SavedMessageTags.Tag], [Int64: TelegramMediaFile]) in
+                     var files: [Int64: TelegramMediaFile] = [:]
+                     for tag in savedMessageTags.tags {
+diff --git a/submodules/TelegramUI/Sources/ChatController.swift b/submodules/TelegramUI/Sources/ChatController.swift
+index e07fb3e0..e008c583 100644
+--- a/submodules/TelegramUI/Sources/ChatController.swift
++++ b/submodules/TelegramUI/Sources/ChatController.swift
+@@ -6499,7 +6499,7 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+             }
+         })
+         
+-        self.accountPeerDisposable = (context.account.postbox.peerView(id: context.account.peerId)
++        self.accountPeerDisposable = (context.account.viewTracker.peerView(context.account.peerId)
+         |> deliverOnMainQueue).startStrict(next: { [weak self] peerView in
+             if let strongSelf = self {
+                 let isPremium = peerView.peers[peerView.peerId]?.isPremium ?? false
