@@ -4952,7 +4952,7 @@ index c7c10406..299b9cc2 100644
  
 diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
 new file mode 100644
-index 00000000..24d3c2ac
+index 00000000..c3a3524e
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
 @@ -0,0 +1,328 @@
@@ -4988,7 +4988,7 @@ index 00000000..24d3c2ac
 +private func pluginPeer(_ chat: String) -> PeerId? {
 +    let parts = chat.split(separator: ":")
 +    guard parts.count == 2, let value = Int64(parts[1]), value > 0 else { return nil }
-+    let namespace: Int32
++    let namespace: PeerId.Namespace
 +    switch parts[0] {
 +    case "user": namespace = Namespaces.Peer.CloudUser
 +    case "chat": namespace = Namespaces.Peer.CloudGroup
@@ -5059,7 +5059,7 @@ index 00000000..24d3c2ac
 +                let message = EnqueueMessage.message(
 +                    text: action.text ?? "", attributes: attributes, inlineStickers: [:], mediaReference: media,
 +                    threadId: action.threadID, replyToMessageId: reply, replyToStoryId: nil, localGroupingKey: nil,
-+                    correlationId: correlation, bubbleUpEmojiOrStickersets: nil)
++                    correlationId: correlation, bubbleUpEmojiOrStickersets: [])
 +                disposables.add(
 +                    enqueueMessages(account: account, peerId: peer, messages: [message]).start(next: { ids in
 +                        let localIDs = ids.compactMap { $0 }
