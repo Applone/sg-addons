@@ -90,7 +90,8 @@ def apply(source: Path, lock: dict[str, str], patches: list[Path]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("check", help="Validate the source lock and patch series")
+    check = commands.add_parser("check", help="Validate the source lock and patch series")
+    check.add_argument("--release-tag", help="Require a tag matching release-version")
     prepare = commands.add_parser("prepare", help="Fetch one upstream commit and apply patches")
     prepare.add_argument("source", type=Path, help="New directory; must not already exist")
     prepare.add_argument("--submodules", action="store_true", help="Fetch build dependencies")
@@ -100,6 +101,13 @@ def main() -> int:
     try:
         lock, patches = configuration(), series()
         if args.command == "check":
+            version = (ROOT / "release-version").read_text(encoding="utf-8").strip()
+            if not re.fullmatch(
+                r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version
+            ):
+                raise ValueError("release-version must contain a numeric semantic version")
+            if args.release_tag is not None and args.release_tag != f"v{version}":
+                raise ValueError(f"Release tag must be v{version}, got {args.release_tag}")
             for patch in patches:
                 git(ROOT, "apply", "--numstat", str(patch))
             print(f"Valid source lock and {len(patches)} patches")

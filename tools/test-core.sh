@@ -36,22 +36,13 @@ PYTHON
 
 # Keep new feature modules strict without reformatting the pinned upstream.
 swift format lint --strict --configuration "$repo_dir/tools/swift-format.json" \
-    "$core_dir/Sources/DisappearingMessages.swift" \
-    "$core_dir/Sources/LocalSavedMessageTags.swift" \
-    "$core_dir/Tests/LocalSavedTagChecks.swift" \
-    "$core_dir/Sources/PluginActions.swift" \
-    "$core_dir/Tests/PluginActionChecks.swift" \
-    "$core_dir/Sources/PluginManifest.swift" \
-    "$core_dir/Sources/PluginRegistry.swift" \
-    "$core_dir/Sources/PythonPluginRuntime.swift" \
-    "$core_dir/Tests/DisappearingChecks.swift" \
-    "$core_dir/Tests/PluginChecks.swift" \
-    "$core_dir/Tests/PythonPluginChecks.swift" \
-    "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift" \
-    "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalSavedTags.swift" \
-    "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift" \
-    "$source_dir/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift" \
-    "$source_dir/Swiftgram/SGSettingsUI/Sources/AdditionalPlugins.swift"
+    "$core_dir"/Sources/*.swift "$core_dir"/Tests/*.swift \
+    "$source_dir"/submodules/TelegramCore/Sources/AdditionalFunctions/*.swift \
+    "$source_dir"/submodules/TelegramCore/Tests/Additional*.swift \
+    "$source_dir"/submodules/Postbox/Tests/Additional*.swift \
+    "$source_dir"/Swiftgram/SGSettingsUI/Sources/Additional*.swift \
+    "$source_dir"/Swiftgram/SGSettingsUI/Tests/Additional*.swift \
+    "$source_dir/submodules/TelegramUI/Sources/AdditionalHistoryController.swift"
 
 # Apple SDKs provide SQLite3; Linux Swift toolchains need a system module map.
 if [[ "$(uname -s)" == Linux ]]; then

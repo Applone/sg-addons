@@ -170,7 +170,9 @@ Post-request hooks cannot cancel, replace typed responses, or turn success into 
 error. Menu methods return text for the menu's declared native action. The host
 validates output size, outgoing text limits, settings, and callback permissions.
 
-`on_plugin_load()` initializes the account instance. `on_plugin_unload()` releases
+`on_plugin_load()` initializes the account instance. Startup actions are validated
+and dispatched as lifecycle actions, separately from the first hook after restart.
+Request-hook restrictions apply to the request callback itself. `on_plugin_unload()` releases
 plugin-owned resources. Repeated activation does not duplicate instances. Updates
 validate metadata before replacement; activation/import failures attempt to restore
 previous source and activation. Files/settings are atomically persisted, but
