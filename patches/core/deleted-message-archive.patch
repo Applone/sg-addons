@@ -1,0 +1,2675 @@
+diff --git a/Swiftgram/SGAdditionalCore/Sources/ArchivePolicy.swift b/Swiftgram/SGAdditionalCore/Sources/ArchivePolicy.swift
+new file mode 100644
+index 00000000..38704e59
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/ArchivePolicy.swift
+@@ -0,0 +1,53 @@
++import Foundation
++
++public struct ArchiveChatOverride: Codable, Equatable {
++    public var deleted: Bool?
++    public var history: Bool?
++    public var media: Bool?
++    public init(deleted: Bool? = nil, history: Bool? = nil, media: Bool? = nil) {
++        self.deleted = deleted
++        self.history = history
++        self.media = media
++    }
++}
++
++public struct ArchivePolicy: Codable, Equatable {
++    public enum Network: String, Codable { case wifi, all, cached }
++    public var quotaMiB = 1024
++    public var fileLimitMiB = 100
++    public var network: Network = .wifi
++    public var media = true
++    public var bots = false
++    public var chats: [String: ArchiveChatOverride] = [:]
++
++    public init() {}
++
++    /// Old installations already captured bot dialogs; preserve that choice on migration.
++    public static var legacy: ArchivePolicy {
++        var policy = ArchivePolicy()
++        policy.bots = true
++        return policy
++    }
++
++    public func validate() throws {
++        guard (1...1_048_576).contains(quotaMiB), (1...1024).contains(fileLimitMiB), chats.count <= 10_000 else {
++            throw SettingsError.invalid("Invalid archive size limits or chat overrides.")
++        }
++        if !chats.isEmpty {
++            var rule = FilterRule()
++            rule.pattern = "archive"
++            rule.chats = Array(chats.keys)
++            try rule.validate()
++        }
++    }
++
++    public func capturesDeleted(chat: String, bot: Bool, enabled: Bool) -> Bool {
++        chats[chat]?.deleted ?? (enabled && (!bot || bots))
++    }
++
++    public func capturesHistory(chat: String, bot: Bool, enabled: Bool) -> Bool {
++        chats[chat]?.history ?? (enabled && (!bot || bots))
++    }
++
++    public func capturesMedia(chat: String) -> Bool { chats[chat]?.media ?? media }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/ArchiveSession.swift b/Swiftgram/SGAdditionalCore/Sources/ArchiveSession.swift
+new file mode 100644
+index 00000000..9c4e5e05
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/ArchiveSession.swift
+@@ -0,0 +1,39 @@
++import Foundation
++
++public struct ArchiveSession: Equatable {
++    public let account: String
++    public let token: UUID
++    public let owner: String
++}
++
++/// Serializes account teardown with archive operations and rejects callbacks from a previous login.
++public final class ArchiveSessions {
++    public static let shared = ArchiveSessions()
++    private let lock = NSRecursiveLock()
++    private var sessions: [String: ArchiveSession] = [:]
++
++    public init() {}
++
++    @discardableResult public func begin(account: String, owner: String = "") -> ArchiveSession {
++        lock.lock()
++        defer { lock.unlock() }
++        let session = ArchiveSession(account: account, token: UUID(), owner: owner)
++        sessions[account] = session
++        return session
++    }
++
++    @discardableResult public func perform<T>(_ session: ArchiveSession, _ operation: () throws -> T) rethrows -> T? {
++        lock.lock()
++        defer { lock.unlock() }
++        guard sessions[session.account] == session else { return nil }
++        return try operation()
++    }
++
++    public func end(account: String, owner: String = "", _ cleanup: () throws -> Void) rethrows {
++        lock.lock()
++        defer { lock.unlock() }
++        if let current = sessions[account], current.owner != owner { return }
++        sessions.removeValue(forKey: account)
++        try cleanup()
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/DeletedMessageArchive.swift b/Swiftgram/SGAdditionalCore/Sources/DeletedMessageArchive.swift
+new file mode 100644
+index 00000000..3fab161b
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Sources/DeletedMessageArchive.swift
+@@ -0,0 +1,895 @@
++import Foundation
++import SQLite3
++
++/// A stable identity independent of Postbox's cache and local row identifiers.
++public struct ArchivedMessageID: Codable, Hashable {
++    public let account: String
++    public let chat: String
++    public let namespace: Int32
++    public let message: Int32
++
++    public init(account: String, chat: String, namespace: Int32 = 0, message: Int32) {
++        self.account = account
++        self.chat = chat
++        self.namespace = namespace
++        self.message = message
++    }
++}
++
++public struct ArchivedMessage: Codable, Equatable {
++    public let id: ArchivedMessageID
++    public let text: String
++    public let timestamp: Int32
++    public let thread: Int64?
++    public let revisionSignature: Data?
++    public let isBotDialog: Bool?
++    public let chatTitle: String
++    public let senderTitle: String
++    public let kind: Kind
++    /// Versioned Telegram adapter payload; the storage layer never interprets it.
++    public let payload: Data
++
++    public enum Kind: String, Codable, CaseIterable { case text, photo, video, voice, file }
++
++    public init(
++        id: ArchivedMessageID, text: String, timestamp: Int32, chatTitle: String,
++        senderTitle: String, kind: Kind, payload: Data, thread: Int64? = nil, revisionSignature: Data? = nil,
++        isBotDialog: Bool? = nil
++    ) {
++        self.id = id
++        self.text = text
++        self.timestamp = timestamp
++        self.thread = thread
++        self.revisionSignature = revisionSignature
++        self.isBotDialog = isBotDialog
++        self.chatTitle = chatTitle
++        self.senderTitle = senderTitle
++        self.kind = kind
++        self.payload = payload
++    }
++}
++
++public struct ArchiveCursor: Equatable {
++    public let observed: Int64
++    public let sequence: Int64
++    public init(observed: Int64, sequence: Int64) {
++        self.observed = observed
++        self.sequence = sequence
++    }
++}
++
++public struct ArchivedMessageEntry {
++    public let message: ArchivedMessage
++    public let observed: Int64
++    public let deletedAt: Int64?
++    public let cursor: ArchiveCursor
++}
++
++public struct ArchivePage {
++    public let entries: [ArchivedMessageEntry]
++    public let next: ArchiveCursor?
++}
++
++/// Owns snapshots separately from the host cache. All mutations commit before returning.
++public final class DeletedMessageArchive {
++    public static let shared: DeletedMessageArchive = {
++        #if TESTING
++            let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SGA_TEST_DIRECTORY"]!)
++        #else
++            let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
++        #endif
++        return DeletedMessageArchive(directory: root.appendingPathComponent("SwiftgramArchive"))
++    }()
++
++    private let queue = DispatchQueue(label: "app.swiftgram.archive.snapshots", qos: .utility)
++    private let directory: URL
++    private var database: OpaquePointer?
++    private var failure: String?
++    private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
++
++    public init(directory: URL) {
++        self.directory = directory
++        do {
++            #if os(iOS)
++                let attributes: [FileAttributeKey: Any] = [
++                    .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
++                ]
++            #else
++                let attributes: [FileAttributeKey: Any] = [:]
++            #endif
++            try FileManager.default.createDirectory(
++                at: directory, withIntermediateDirectories: true, attributes: attributes)
++            var protected = directory
++            var values = URLResourceValues()
++            values.isExcludedFromBackup = true
++            try protected.setResourceValues(values)
++            guard
++                sqlite3_open_v2(
++                    directory.appendingPathComponent("archive.sqlite3").path, &database,
++                    SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK
++            else { throw SettingsError.invalid("Cannot open message archive.") }
++            sqlite3_busy_timeout(database, 1000)
++            try execute("PRAGMA journal_mode=WAL")
++            try transaction {
++                let version = try prepare("PRAGMA user_version")
++                defer { sqlite3_finalize(version) }
++                guard sqlite3_step(version) == SQLITE_ROW, sqlite3_column_int(version, 0) <= 4 else {
++                    throw SettingsError.invalid("Message archive requires a newer application version.")
++                }
++                try execute(
++                    """
++                    CREATE TABLE IF NOT EXISTS snapshots (
++                      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
++                      account TEXT NOT NULL, chat TEXT NOT NULL, namespace INTEGER NOT NULL, message INTEGER NOT NULL,
++                      observed INTEGER NOT NULL, deleted INTEGER, kind TEXT NOT NULL, timestamp INTEGER NOT NULL,
++                      payload BLOB NOT NULL, UNIQUE(account,chat,namespace,message));
++                    CREATE INDEX IF NOT EXISTS archive_page ON snapshots(account,observed DESC,sequence DESC);
++                    CREATE INDEX IF NOT EXISTS archive_chat ON snapshots(account,chat,observed DESC,sequence DESC);
++                    CREATE TABLE IF NOT EXISTS purged (
++                      account TEXT NOT NULL, chat TEXT NOT NULL, namespace INTEGER NOT NULL, message INTEGER NOT NULL,
++                      PRIMARY KEY(account,chat,namespace,message));
++                    CREATE TABLE IF NOT EXISTS removed_accounts(account TEXT PRIMARY KEY);
++                    CREATE VIRTUAL TABLE IF NOT EXISTS archive_search USING fts5(text);
++                    CREATE TABLE IF NOT EXISTS attachments (
++                      id TEXT PRIMARY KEY, account TEXT NOT NULL, resource TEXT NOT NULL, descriptor BLOB NOT NULL,
++                      filename TEXT, bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'pending',
++                      UNIQUE(account,resource));
++                    CREATE TABLE IF NOT EXISTS attachment_owners (
++                      sequence INTEGER NOT NULL, attachment TEXT NOT NULL, PRIMARY KEY(sequence,attachment));
++                    CREATE INDEX IF NOT EXISTS attachment_references ON attachment_owners(attachment);
++                    CREATE TABLE IF NOT EXISTS legacy_progress(account TEXT PRIMARY KEY, cursor BLOB NOT NULL);
++                    CREATE TABLE IF NOT EXISTS snapshot_versions (
++                      sequence INTEGER PRIMARY KEY AUTOINCREMENT, owner INTEGER NOT NULL, observed INTEGER NOT NULL, payload BLOB NOT NULL);
++                    CREATE INDEX IF NOT EXISTS snapshot_version_owner ON snapshot_versions(owner,sequence);
++                    PRAGMA user_version=4;
++                    """)
++            }
++            try collectFiles()
++        } catch {
++            failure = error.localizedDescription
++            sqlite3_close(database)
++            database = nil
++        }
++    }
++
++    deinit { sqlite3_close(database) }
++
++    public func status() -> String? { queue.sync { failure } }
++
++    public func reportFailure(_ error: Error) { queue.sync { failure = error.localizedDescription } }
++
++    private func execute(_ sql: String) throws {
++        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
++            throw SettingsError.invalid("Message archive storage operation failed.")
++        }
++    }
++
++    private func prepare(_ sql: String) throws -> OpaquePointer {
++        var statement: OpaquePointer?
++        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
++            throw SettingsError.invalid("Cannot query message archive.")
++        }
++        return statement
++    }
++
++    private func bind(_ statement: OpaquePointer, _ index: Int32, _ text: String) {
++        _ = text.withCString { sqlite3_bind_text(statement, index, $0, -1, transient) }
++    }
++
++    private func bind(_ statement: OpaquePointer, id: ArchivedMessageID) {
++        bind(statement, 1, id.account)
++        bind(statement, 2, id.chat)
++        sqlite3_bind_int(statement, 3, id.namespace)
++        sqlite3_bind_int(statement, 4, id.message)
++    }
++
++    private func done(_ statement: OpaquePointer) throws {
++        guard sqlite3_step(statement) == SQLITE_DONE else {
++            throw SettingsError.invalid("Cannot update message archive.")
++        }
++    }
++
++    private func transaction<T>(_ body: () throws -> T) throws -> T {
++        try execute("BEGIN IMMEDIATE")
++        do {
++            let result = try body()
++            try execute("COMMIT")
++            return result
++        } catch {
++            try? execute("ROLLBACK")
++            throw error
++        }
++    }
++
++    /// Returns false for explicitly purged identities or accounts awaiting authorization.
++    @discardableResult public func capture(
++        _ message: ArchivedMessage, now: Int64 = Int64(Date().timeIntervalSince1970), ifAbsent: Bool = false,
++        keepRevision: Bool = false
++    )
++        throws -> Bool
++    {
++        try queue.sync {
++            try transaction {
++                let permitted = try prepare(
++                    """
++                    SELECT 1 WHERE NOT EXISTS(SELECT 1 FROM purged WHERE account=? AND chat=? AND namespace=? AND message=?)
++                    AND NOT EXISTS(SELECT 1 FROM removed_accounts WHERE account=?)
++                    """)
++                defer { sqlite3_finalize(permitted) }
++                bind(permitted, id: message.id)
++                bind(permitted, 5, message.id.account)
++                guard sqlite3_step(permitted) == SQLITE_ROW else { return false }
++                if keepRevision && !ifAbsent {
++                    let previous = try prepare(
++                        "SELECT sequence,payload FROM snapshots WHERE account=? AND chat=? AND namespace=? AND message=?"
++                    )
++                    defer { sqlite3_finalize(previous) }
++                    bind(previous, id: message.id)
++                    if sqlite3_step(previous) == SQLITE_ROW, let bytes = sqlite3_column_blob(previous, 1) {
++                        let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(previous, 1)))
++                        let old = try JSONDecoder().decode(ArchivedMessage.self, from: data)
++                        let changed =
++                            message.revisionSignature.map { $0 != old.revisionSignature }
++                            ?? (old.text != message.text || old.payload != message.payload)
++                        if changed {
++                            let version = try prepare(
++                                "INSERT INTO snapshot_versions(owner,observed,payload) VALUES(?,?,?)")
++                            defer { sqlite3_finalize(version) }
++                            sqlite3_bind_int64(version, 1, sqlite3_column_int64(previous, 0))
++                            sqlite3_bind_int64(version, 2, now)
++                            _ = data.withUnsafeBytes {
++                                sqlite3_bind_blob(version, 3, $0.baseAddress, Int32($0.count), transient)
++                            }
++                            try done(version)
++                        }
++                    }
++                }
++                let data = try JSONEncoder().encode(message)
++                let statement = try prepare(
++                    """
++                    INSERT INTO snapshots(account,chat,namespace,message,observed,kind,timestamp,payload) VALUES(?,?,?,?,?,?,?,?)
++                    ON CONFLICT(account,chat,namespace,message) DO UPDATE SET
++                      kind=excluded.kind,timestamp=excluded.timestamp,payload=excluded.payload WHERE ?=0
++                    """)
++                defer { sqlite3_finalize(statement) }
++                bind(statement, id: message.id)
++                sqlite3_bind_int64(statement, 5, now)
++                bind(statement, 6, message.kind.rawValue)
++                sqlite3_bind_int(statement, 7, message.timestamp)
++                _ = data.withUnsafeBytes { sqlite3_bind_blob(statement, 8, $0.baseAddress, Int32($0.count), transient) }
++                sqlite3_bind_int(statement, 9, ifAbsent ? 1 : 0)
++                try done(statement)
++                if sqlite3_changes(database) == 0 { return true }
++                let identity = try prepare(
++                    "SELECT sequence FROM snapshots WHERE account=? AND chat=? AND namespace=? AND message=?")
++                defer { sqlite3_finalize(identity) }
++                bind(identity, id: message.id)
++                guard sqlite3_step(identity) == SQLITE_ROW else {
++                    throw SettingsError.invalid("Cannot find saved message snapshot.")
++                }
++                let sequence = sqlite3_column_int64(identity, 0)
++                try removeSearch(sequence)
++                let search = try prepare("INSERT INTO archive_search(rowid,text) VALUES(?,?)")
++                defer { sqlite3_finalize(search) }
++                sqlite3_bind_int64(search, 1, sequence)
++                bind(search, 2, message.text)
++                try done(search)
++                return true
++            }
++        }
++    }
++
++    public func markDeleted(_ id: ArchivedMessageID, now: Int64 = Int64(Date().timeIntervalSince1970)) throws -> Bool {
++        try queue.sync {
++            let statement = try prepare(
++                "UPDATE snapshots SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND namespace=? AND message=?"
++            )
++            defer { sqlite3_finalize(statement) }
++            sqlite3_bind_int64(statement, 1, now)
++            bind(statement, 2, id.account)
++            bind(statement, 3, id.chat)
++            sqlite3_bind_int(statement, 4, id.namespace)
++            sqlite3_bind_int(statement, 5, id.message)
++            try done(statement)
++            return sqlite3_changes(database) > 0
++        }
++    }
++
++    public func page(
++        account: String, chat: String? = nil, search: String = "", kind: ArchivedMessage.Kind? = nil,
++        before: ArchiveCursor? = nil, deletedOnly: Bool = true, limit: Int = 50
++    ) throws -> ArchivePage {
++        try queue.sync {
++            let count = min(100, max(1, limit))
++            let statement = try prepare(
++                """
++                SELECT s.sequence,s.observed,s.deleted,s.payload FROM snapshots s
++                WHERE s.account=? AND (? IS NULL OR s.chat=?) AND (? IS NULL OR s.kind=?)
++                  AND (?=0 OR s.deleted IS NOT NULL)
++                  AND (? IS NULL OR s.observed<? OR (s.observed=? AND s.sequence<?))
++                  AND (?='' OR s.sequence IN (SELECT rowid FROM archive_search WHERE archive_search MATCH ?))
++                ORDER BY s.observed DESC,s.sequence DESC LIMIT ?
++                """)
++            defer { sqlite3_finalize(statement) }
++            bind(statement, 1, account)
++            if let chat {
++                bind(statement, 2, chat)
++                bind(statement, 3, chat)
++            }
++            if let kind {
++                bind(statement, 4, kind.rawValue)
++                bind(statement, 5, kind.rawValue)
++            }
++            sqlite3_bind_int(statement, 6, deletedOnly ? 1 : 0)
++            if let before {
++                for index: Int32 in [7, 8, 9] { sqlite3_bind_int64(statement, index, before.observed) }
++                sqlite3_bind_int64(statement, 10, before.sequence)
++            }
++            bind(statement, 11, search)
++            // Treat user input as a literal FTS phrase, never as query syntax.
++            bind(statement, 12, "\"" + search.replacingOccurrences(of: "\"", with: "\"\"") + "\"")
++            sqlite3_bind_int(statement, 13, Int32(count + 1))
++            var entries: [ArchivedMessageEntry] = []
++            while true {
++                let step = sqlite3_step(statement)
++                if step == SQLITE_DONE { break }
++                guard step == SQLITE_ROW, let bytes = sqlite3_column_blob(statement, 3) else {
++                    throw SettingsError.invalid("Cannot read archived messages.")
++                }
++                let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 3)))
++                let cursor = ArchiveCursor(
++                    observed: sqlite3_column_int64(statement, 1), sequence: sqlite3_column_int64(statement, 0))
++                entries.append(
++                    ArchivedMessageEntry(
++                        message: try JSONDecoder().decode(ArchivedMessage.self, from: data), observed: cursor.observed,
++                        deletedAt: sqlite3_column_type(statement, 2) == SQLITE_NULL
++                            ? nil : sqlite3_column_int64(statement, 2), cursor: cursor))
++            }
++            let more = entries.count > count
++            if more { entries.removeLast() }
++            return ArchivePage(entries: entries, next: more ? entries.last?.cursor : nil)
++        }
++    }
++
++    private func removeSearch(_ sequence: Int64) throws {
++        let statement = try prepare("DELETE FROM archive_search WHERE rowid=?")
++        defer { sqlite3_finalize(statement) }
++        sqlite3_bind_int64(statement, 1, sequence)
++        try done(statement)
++    }
++
++    /// Tombstones prevent a late server refresh from resurrecting explicitly deleted content.
++    public func purge(_ id: ArchivedMessageID) throws {
++        try queue.sync {
++            try transaction {
++                let tombstone = try prepare("INSERT OR IGNORE INTO purged VALUES(?,?,?,?)")
++                defer { sqlite3_finalize(tombstone) }
++                bind(tombstone, id: id)
++                try done(tombstone)
++                let statement = try prepare(
++                    "SELECT sequence FROM snapshots WHERE account=? AND chat=? AND namespace=? AND message=?")
++                defer { sqlite3_finalize(statement) }
++                bind(statement, id: id)
++                if sqlite3_step(statement) == SQLITE_ROW { try removeSnapshot(sqlite3_column_int64(statement, 0)) }
++            }
++            try collectFiles()
++        }
++    }
++
++    private func removeSnapshot(_ sequence: Int64) throws {
++        let owners = try prepare("DELETE FROM attachment_owners WHERE sequence=?")
++        defer { sqlite3_finalize(owners) }
++        sqlite3_bind_int64(owners, 1, sequence)
++        try done(owners)
++        let versions = try prepare("DELETE FROM snapshot_versions WHERE owner=?")
++        defer { sqlite3_finalize(versions) }
++        sqlite3_bind_int64(versions, 1, sequence)
++        try done(versions)
++        try removeSearch(sequence)
++        let statement = try prepare("DELETE FROM snapshots WHERE sequence=?")
++        defer { sqlite3_finalize(statement) }
++        sqlite3_bind_int64(statement, 1, sequence)
++        try done(statement)
++    }
++
++    /// The account fence also rejects work enqueued before logout but delivered afterwards.
++    public func removeAccount(_ account: String) throws {
++        try queue.sync {
++            try transaction {
++                let fence = try prepare("INSERT OR IGNORE INTO removed_accounts VALUES(?)")
++                defer { sqlite3_finalize(fence) }
++                bind(fence, 1, account)
++                try done(fence)
++                let rows = try prepare("SELECT sequence FROM snapshots WHERE account=?")
++                defer { sqlite3_finalize(rows) }
++                bind(rows, 1, account)
++                var ids: [Int64] = []
++                while sqlite3_step(rows) == SQLITE_ROW { ids.append(sqlite3_column_int64(rows, 0)) }
++                for id in ids { try removeSnapshot(id) }
++                let tombstones = try prepare("DELETE FROM purged WHERE account=?")
++                defer { sqlite3_finalize(tombstones) }
++                bind(tombstones, 1, account)
++                try done(tombstones)
++                let progress = try prepare("DELETE FROM legacy_progress WHERE account=?")
++                defer { sqlite3_finalize(progress) }
++                bind(progress, 1, account)
++                try done(progress)
++            }
++            try collectFiles()
++        }
++    }
++
++    public func authorizeAccount(_ account: String) throws {
++        try queue.sync {
++            let statement = try prepare("DELETE FROM removed_accounts WHERE account=?")
++            defer { sqlite3_finalize(statement) }
++            bind(statement, 1, account)
++            try done(statement)
++        }
++    }
++
++    /// Evict whole snapshots in first-observed order; updates never refresh their age.
++    @discardableResult public func enforcePolicy(
++        account: String, days: Int = 30, quota: Int64 = 1_073_741_824,
++        now: Int64 = Int64(Date().timeIntervalSince1970)
++    ) throws -> [ArchivedMessageID] {
++        guard (1...365).contains(days), quota >= 0 else {
++            throw SettingsError.invalid("Invalid archive storage policy.")
++        }
++        return try queue.sync {
++            let removed = try transaction { () -> [ArchivedMessageID] in
++                let rows = try prepare(
++                    "SELECT sequence,observed,length(payload) FROM snapshots WHERE account=? ORDER BY observed,sequence"
++                )
++                defer { sqlite3_finalize(rows) }
++                bind(rows, 1, account)
++                var records: [(Int64, Int64, Int64)] = []
++                while sqlite3_step(rows) == SQLITE_ROW {
++                    let size = sqlite3_column_int64(rows, 2)
++                    records.append((sqlite3_column_int64(rows, 0), sqlite3_column_int64(rows, 1), size))
++                }
++                let cutoff = now - Int64(days) * 86_400
++                var evicted: [ArchivedMessageID] = []
++                var used = try usedBytes(account)
++                for (sequence, observed, _) in records {
++                    if observed < cutoff || used > quota {
++                        let row = try prepare("SELECT payload FROM snapshots WHERE sequence=?")
++                        defer { sqlite3_finalize(row) }
++                        sqlite3_bind_int64(row, 1, sequence)
++                        guard sqlite3_step(row) == SQLITE_ROW, let bytes = sqlite3_column_blob(row, 0) else {
++                            throw SettingsError.invalid("Cannot expire archived message.")
++                        }
++                        let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(row, 0)))
++                        let id = try JSONDecoder().decode(ArchivedMessage.self, from: data).id
++                        let marker = try prepare("INSERT OR IGNORE INTO purged VALUES(?,?,?,?)")
++                        defer { sqlite3_finalize(marker) }
++                        bind(marker, id: id)
++                        try done(marker)
++                        let released = try prepare(
++                            """
++                            SELECT length(s.payload)
++                              + COALESCE((SELECT SUM(length(payload)) FROM snapshot_versions WHERE owner=s.sequence),0)
++                              + COALESCE((SELECT SUM(a.bytes) FROM attachments a JOIN attachment_owners o ON o.attachment=a.id
++                                  WHERE o.sequence=s.sequence AND NOT EXISTS(SELECT 1 FROM attachment_owners other
++                                    WHERE other.attachment=a.id AND other.sequence!=s.sequence)),0)
++                            FROM snapshots s WHERE sequence=?
++                            """)
++                        defer { sqlite3_finalize(released) }
++                        sqlite3_bind_int64(released, 1, sequence)
++                        guard sqlite3_step(released) == SQLITE_ROW else {
++                            throw SettingsError.invalid("Cannot measure expired archive storage.")
++                        }
++                        used -= sqlite3_column_int64(released, 0)
++                        evicted.append(id)
++                        try removeSnapshot(sequence)
++                    }
++                }
++                return evicted
++            }
++            try collectFiles()
++            return removed
++        }
++    }
++}
++
++public struct ArchivedAttachment {
++    public let chats: [String]
++    public let id: String
++    public let resource: String
++    public let descriptor: Data
++    public let status: String
++    public let bytes: Int64
++    public let file: URL?
++}
++
++extension DeletedMessageArchive {
++    /// Registers shared ownership before starting a download. Purged snapshots cannot own files.
++    public func registerAttachment(message: ArchivedMessageID, resource: String, descriptor: Data) throws {
++        try queue.sync {
++            try transaction {
++                let owner = try prepare(
++                    "SELECT sequence FROM snapshots WHERE account=? AND chat=? AND namespace=? AND message=?")
++                defer { sqlite3_finalize(owner) }
++                bind(owner, id: message)
++                guard sqlite3_step(owner) == SQLITE_ROW else { return }
++                let sequence = sqlite3_column_int64(owner, 0)
++                let attachment = try prepare(
++                    "INSERT INTO attachments(id,account,resource,descriptor) VALUES(?,?,?,?) ON CONFLICT(account,resource) DO UPDATE SET descriptor=excluded.descriptor"
++                )
++                defer { sqlite3_finalize(attachment) }
++                bind(attachment, 1, UUID().uuidString)
++                bind(attachment, 2, message.account)
++                bind(attachment, 3, resource)
++                _ = descriptor.withUnsafeBytes {
++                    sqlite3_bind_blob(attachment, 4, $0.baseAddress, Int32($0.count), transient)
++                }
++                try done(attachment)
++                let reference = try prepare(
++                    "INSERT OR IGNORE INTO attachment_owners SELECT ?,id FROM attachments WHERE account=? AND resource=?"
++                )
++                defer { sqlite3_finalize(reference) }
++                sqlite3_bind_int64(reference, 1, sequence)
++                bind(reference, 2, message.account)
++                bind(reference, 3, resource)
++                try done(reference)
++            }
++        }
++    }
++
++    public func attachments(account: String, message: ArchivedMessageID? = nil) throws -> [ArchivedAttachment] {
++        try queue.sync {
++            let statement = try prepare(
++                """
++                SELECT a.id,a.resource,a.descriptor,a.status,a.bytes,a.filename,
++                  (SELECT GROUP_CONCAT(DISTINCT s.chat) FROM attachment_owners o JOIN snapshots s ON s.sequence=o.sequence WHERE o.attachment=a.id)
++                FROM attachments a
++                WHERE a.account=? AND EXISTS(SELECT 1 FROM attachment_owners o JOIN snapshots s ON s.sequence=o.sequence
++                  WHERE o.attachment=a.id AND (? IS NULL OR (s.chat=? AND s.namespace=? AND s.message=?)))
++                ORDER BY a.id
++                """)
++            defer { sqlite3_finalize(statement) }
++            bind(statement, 1, account)
++            if let message {
++                guard message.account == account else { return [] }
++                bind(statement, 2, message.chat)
++                bind(statement, 3, message.chat)
++                sqlite3_bind_int(statement, 4, message.namespace)
++                sqlite3_bind_int(statement, 5, message.message)
++            }
++            var result: [ArchivedAttachment] = []
++            while true {
++                let step = sqlite3_step(statement)
++                if step == SQLITE_DONE { break }
++                guard step == SQLITE_ROW, let bytes = sqlite3_column_blob(statement, 2) else {
++                    throw SettingsError.invalid("Cannot read archive attachments.")
++                }
++                let filename = sqlite3_column_text(statement, 5).map { String(cString: $0) }
++                result.append(
++                    ArchivedAttachment(
++                        chats: String(cString: sqlite3_column_text(statement, 6)).split(separator: ",").map(
++                            String.init),
++                        id: String(cString: sqlite3_column_text(statement, 0)),
++                        resource: String(cString: sqlite3_column_text(statement, 1)),
++                        descriptor: Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 2))),
++                        status: String(cString: sqlite3_column_text(statement, 3)),
++                        bytes: sqlite3_column_int64(statement, 4),
++                        file: filename.map { directory.appendingPathComponent($0) }))
++            }
++            return result
++        }
++    }
++
++    /// Copies a complete resource with a streaming byte bound. Metadata commits only after atomic rename.
++    public func saveAttachment(id: String, account: String, source: URL, maximumBytes: Int64 = 104_857_600) throws {
++        guard maximumBytes >= 0 else { throw SettingsError.invalid("Invalid attachment size limit.") }
++        try queue.sync {
++            let owner = try prepare(
++                "SELECT 1 FROM attachments WHERE id=? AND account=? AND EXISTS(SELECT 1 FROM attachment_owners WHERE attachment=?)"
++            )
++            defer { sqlite3_finalize(owner) }
++            bind(owner, 1, id)
++            bind(owner, 2, account)
++            bind(owner, 3, id)
++            guard sqlite3_step(owner) == SQLITE_ROW else { return }
++            let values = try source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
++            guard values.isRegularFile == true, values.isSymbolicLink != true,
++                Int64(values.fileSize ?? 0) <= maximumBytes
++            else {
++                throw SettingsError.invalid("Archive attachment exceeds the file limit.")
++            }
++            let filename = "media-" + UUID().uuidString
++            let output = directory.appendingPathComponent(filename)
++            let staging = directory.appendingPathComponent(".transfer-" + UUID().uuidString)
++            var committed = false
++            defer {
++                try? FileManager.default.removeItem(at: staging)
++                if !committed { try? FileManager.default.removeItem(at: output) }
++            }
++            guard FileManager.default.createFile(atPath: staging.path, contents: nil) else {
++                throw SettingsError.invalid("Cannot create archive attachment.")
++            }
++            let reader = try FileHandle(forReadingFrom: source)
++            defer { try? reader.close() }
++            let writer = try FileHandle(forWritingTo: staging)
++            defer { try? writer.close() }
++            var size: Int64 = 0
++            while let chunk = try reader.read(upToCount: 1_048_576), !chunk.isEmpty {
++                size += Int64(chunk.count)
++                guard size <= maximumBytes else {
++                    throw SettingsError.invalid("Archive attachment grew beyond the file limit.")
++                }
++                try writer.write(contentsOf: chunk)
++            }
++            try writer.synchronize()
++            try FileManager.default.moveItem(at: staging, to: output)
++            let update = try prepare(
++                "UPDATE attachments SET filename=?,bytes=?,status='saved' WHERE id=? AND account=?")
++            defer { sqlite3_finalize(update) }
++            bind(update, 1, filename)
++            sqlite3_bind_int64(update, 2, size)
++            bind(update, 3, id)
++            bind(update, 4, account)
++            try done(update)
++            committed = true
++            try collectFiles()
++            attachmentChanged(account: account)
++        }
++    }
++
++    public func attachmentStatus(id: String, account: String, status: String) throws {
++        guard ["pending", "unavailable", "oversized"].contains(status) else {
++            throw SettingsError.invalid("Invalid attachment status.")
++        }
++        try queue.sync {
++            let statement = try prepare(
++                "UPDATE attachments SET status=? WHERE id=? AND account=? AND filename IS NULL AND status!=?")
++            defer { sqlite3_finalize(statement) }
++            bind(statement, 1, status)
++            bind(statement, 2, id)
++            bind(statement, 3, account)
++            bind(statement, 4, status)
++            try done(statement)
++            if sqlite3_changes(database) > 0 { attachmentChanged(account: account) }
++        }
++    }
++
++    public func storageBytes(account: String) throws -> Int64 { try queue.sync { try usedBytes(account) } }
++
++    private func usedBytes(_ account: String) throws -> Int64 {
++        let statement = try prepare(
++            """
++            SELECT COALESCE((SELECT SUM(length(payload)) FROM snapshots WHERE account=?),0)
++              + COALESCE((SELECT SUM(length(v.payload)) FROM snapshot_versions v JOIN snapshots s ON s.sequence=v.owner WHERE s.account=?),0)
++              + COALESCE((SELECT SUM(bytes) FROM attachments a WHERE account=?
++                AND EXISTS(SELECT 1 FROM attachment_owners WHERE attachment=a.id)),0)
++            """)
++        defer { sqlite3_finalize(statement) }
++        bind(statement, 1, account)
++        bind(statement, 2, account)
++        bind(statement, 3, account)
++        guard sqlite3_step(statement) == SQLITE_ROW else {
++            throw SettingsError.invalid("Cannot inspect archive storage.")
++        }
++        return sqlite3_column_int64(statement, 0)
++    }
++
++    private func collectFiles() throws {
++        try execute(
++            "DELETE FROM attachments WHERE NOT EXISTS(SELECT 1 FROM attachment_owners WHERE attachment=attachments.id)")
++        let statement = try prepare("SELECT filename FROM attachments WHERE filename IS NOT NULL")
++        defer { sqlite3_finalize(statement) }
++        var owned = Set<String>()
++        while sqlite3_step(statement) == SQLITE_ROW { owned.insert(String(cString: sqlite3_column_text(statement, 0))) }
++        for file in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
++            let name = file.lastPathComponent
++            if name.hasPrefix(".transfer-") || (name.hasPrefix("media-") && !owned.contains(name)) {
++                try FileManager.default.removeItem(at: file)
++            }
++        }
++    }
++}
++
++extension DeletedMessageArchive {
++    /// Clearing an archive is explicit deletion, so future refreshes must respect its tombstones.
++    @discardableResult public func purgeAll(
++        account: String, chat: String? = nil, thread: Int64? = nil,
++        minTimestamp: Int32? = nil, maxTimestamp: Int32? = nil
++    ) throws -> [ArchivedMessageID] {
++        try queue.sync {
++            let removed = try transaction { () -> [ArchivedMessageID] in
++                let rows = try prepare(
++                    "SELECT sequence,payload FROM snapshots WHERE account=? AND (? IS NULL OR chat=?)")
++                defer { sqlite3_finalize(rows) }
++                bind(rows, 1, account)
++                if let chat {
++                    bind(rows, 2, chat)
++                    bind(rows, 3, chat)
++                }
++                var selected: [(Int64, ArchivedMessageID)] = []
++                while true {
++                    let step = sqlite3_step(rows)
++                    if step == SQLITE_DONE { break }
++                    guard step == SQLITE_ROW, let bytes = sqlite3_column_blob(rows, 1) else {
++                        throw SettingsError.invalid("Cannot enumerate archived messages for deletion.")
++                    }
++                    let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(rows, 1)))
++                    let message = try JSONDecoder().decode(ArchivedMessage.self, from: data)
++                    if let thread, message.thread != thread { continue }
++                    if let minTimestamp, message.timestamp < minTimestamp { continue }
++                    if let maxTimestamp, message.timestamp > maxTimestamp { continue }
++                    selected.append((sqlite3_column_int64(rows, 0), message.id))
++                }
++                let tombstone = try prepare("INSERT OR IGNORE INTO purged VALUES(?,?,?,?)")
++                defer { sqlite3_finalize(tombstone) }
++                for (sequence, id) in selected {
++                    sqlite3_reset(tombstone)
++                    sqlite3_clear_bindings(tombstone)
++                    bind(tombstone, id: id)
++                    try done(tombstone)
++                    try removeSnapshot(sequence)
++                }
++                return selected.map { $0.1 }
++            }
++            try collectFiles()
++            return removed
++        }
++    }
++}
++
++extension DeletedMessageArchive {
++    public func migrationCursor(account: String) throws -> ArchivedMessageID? {
++        try queue.sync {
++            let sql = try prepare("SELECT cursor FROM legacy_progress WHERE account=?")
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, account)
++            let step = sqlite3_step(sql)
++            if step == SQLITE_DONE { return nil }
++            guard step == SQLITE_ROW, let bytes = sqlite3_column_blob(sql, 0) else {
++                throw SettingsError.invalid("Cannot read archive migration progress.")
++            }
++            return try JSONDecoder().decode(
++                ArchivedMessageID.self, from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(sql, 0))))
++        }
++    }
++
++    public func advanceMigration(_ id: ArchivedMessageID) throws {
++        try queue.sync {
++            let sql = try prepare("INSERT OR REPLACE INTO legacy_progress VALUES(?,?)")
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, id.account)
++            let data = try JSONEncoder().encode(id)
++            _ = data.withUnsafeBytes { sqlite3_bind_blob(sql, 2, $0.baseAddress, Int32($0.count), transient) }
++            try done(sql)
++        }
++    }
++}
++
++extension DeletedMessageArchive {
++    public func isPurged(_ id: ArchivedMessageID) throws -> Bool {
++        try queue.sync {
++            let sql = try prepare("SELECT 1 FROM purged WHERE account=? AND chat=? AND namespace=? AND message=?")
++            defer { sqlite3_finalize(sql) }
++            bind(sql, id: id)
++            let step = sqlite3_step(sql)
++            guard step == SQLITE_ROW || step == SQLITE_DONE else {
++                throw SettingsError.invalid("Cannot read archive deletion marker.")
++            }
++            return step == SQLITE_ROW
++        }
++    }
++}
++
++extension DeletedMessageArchive {
++    public func versions(_ id: ArchivedMessageID) throws -> [ArchivedMessage] {
++        try queue.sync {
++            let sql = try prepare(
++                "SELECT v.payload FROM snapshot_versions v JOIN snapshots s ON s.sequence=v.owner WHERE s.account=? AND s.chat=? AND s.namespace=? AND s.message=? ORDER BY v.sequence"
++            )
++            defer { sqlite3_finalize(sql) }
++            bind(sql, id: id)
++            var result: [ArchivedMessage] = []
++            while true {
++                let step = sqlite3_step(sql)
++                if step == SQLITE_DONE { break }
++                guard step == SQLITE_ROW, let bytes = sqlite3_column_blob(sql, 0) else {
++                    throw SettingsError.invalid("Cannot read archived versions.")
++                }
++                result.append(
++                    try JSONDecoder().decode(
++                        ArchivedMessage.self, from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(sql, 0)))))
++            }
++            return result
++        }
++    }
++}
++
++public struct ArchivedChat {
++    public let id: String
++    public let title: String
++    public let messages: Int
++    public let isBot: Bool
++    public let deleted: Int
++}
++
++extension DeletedMessageArchive {
++    public func chats(account: String) throws -> [ArchivedChat] {
++        try queue.sync {
++            let sql = try prepare(
++                """
++                SELECT s.chat,COUNT(*),SUM(CASE WHEN s.deleted IS NULL THEN 0 ELSE 1 END),
++                  (SELECT payload FROM snapshots latest WHERE latest.account=s.account AND latest.chat=s.chat ORDER BY observed DESC,sequence DESC LIMIT 1)
++                FROM snapshots s WHERE s.account=? GROUP BY s.chat ORDER BY MAX(s.observed) DESC,s.chat
++                """)
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, account)
++            var result: [ArchivedChat] = []
++            while true {
++                let step = sqlite3_step(sql)
++                if step == SQLITE_DONE { break }
++                guard step == SQLITE_ROW, let bytes = sqlite3_column_blob(sql, 3) else {
++                    throw SettingsError.invalid("Cannot read archived chats.")
++                }
++                let message = try JSONDecoder().decode(
++                    ArchivedMessage.self, from: Data(bytes: bytes, count: Int(sqlite3_column_bytes(sql, 3))))
++                result.append(
++                    ArchivedChat(
++                        id: String(cString: sqlite3_column_text(sql, 0)), title: message.chatTitle,
++                        messages: Int(sqlite3_column_int64(sql, 1)), isBot: message.isBotDialog ?? false,
++                        deleted: Int(sqlite3_column_int64(sql, 2))))
++            }
++            return result
++        }
++    }
++}
++
++extension DeletedMessageArchive {
++    public func deletedMessageIDs(account: String, chat: String? = nil) throws -> [ArchivedMessageID] {
++        try queue.sync {
++            let sql = try prepare(
++                "SELECT chat,namespace,message FROM snapshots WHERE account=? AND deleted IS NOT NULL AND (? IS NULL OR chat=?)"
++            )
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, account)
++            if let chat {
++                bind(sql, 2, chat)
++                bind(sql, 3, chat)
++            }
++            var result: [ArchivedMessageID] = []
++            while true {
++                let step = sqlite3_step(sql)
++                if step == SQLITE_DONE { break }
++                guard step == SQLITE_ROW else { throw SettingsError.invalid("Cannot read deleted-message identities.") }
++                result.append(
++                    ArchivedMessageID(
++                        account: account, chat: String(cString: sqlite3_column_text(sql, 0)),
++                        namespace: sqlite3_column_int(sql, 1), message: sqlite3_column_int(sql, 2)))
++            }
++            return result
++        }
++    }
++}
++
++#if TESTING
++    extension DeletedMessageArchive {
++        /// Exercise SQLite's real SQLITE_FULL rollback path without filling the host filesystem.
++        public func freezeStorageGrowthForTesting() throws {
++            try queue.sync {
++                let sql = try prepare("PRAGMA page_count")
++                defer { sqlite3_finalize(sql) }
++                guard sqlite3_step(sql) == SQLITE_ROW else {
++                    throw SettingsError.invalid("Cannot inspect test archive capacity.")
++                }
++                let pages = sqlite3_column_int64(sql, 0)
++                try execute("PRAGMA max_page_count=\(pages)")
++            }
++        }
++    }
++#endif
++
++extension DeletedMessageArchive {
++    private func attachmentChanged(account: String) {
++        DispatchQueue.main.async {
++            NotificationCenter.default.post(name: Notification.Name("SGAArchiveAttachmentChanged"), object: account)
++        }
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+index 8aa242ae..256b2c4f 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+@@ -492,3 +492,102 @@ public final class MessageArchive {
+ extension Notification.Name {
+     public static let retainedMessagesChanged = Notification.Name("SGARetainedMessagesChanged")
+ }
++
++public struct LegacyArchivedMessage {
++    public let id: ArchivedMessageID
++    public let observed: Int64
++    public let deleted: Int64?
++    public let revision: MessageRevision?
++}
++
++extension MessageArchive {
++    /// Read bounded batches from the old metadata schema. Source rows remain until explicit purge.
++    public func legacyPage(account: String, after: ArchivedMessageID?, limit: Int = 50) throws
++        -> [LegacyArchivedMessage]
++    {
++        try queue.sync {
++            guard
++                let sql = statement(
++                    """
++                    WITH legacy AS (
++                      SELECT chat,id,seen,deleted FROM messages WHERE account=?1
++                      UNION ALL
++                      SELECT r.chat,r.id,MIN(r.observed),NULL FROM revisions r WHERE r.account=?1
++                        AND NOT EXISTS(SELECT 1 FROM messages m WHERE m.account=r.account AND m.chat=r.chat AND m.id=r.id)
++                      GROUP BY r.chat,r.id
++                    )
++                    SELECT chat,id,seen,deleted FROM legacy
++                      WHERE (?2 IS NULL OR chat>?3 OR (chat=?4 AND id>?5)) ORDER BY chat,id LIMIT ?6
++                    """)
++            else { throw SettingsError.invalid("Cannot read legacy archive.") }
++            defer { sqlite3_finalize(sql) }
++            bind(sql, 1, account)
++            if let after {
++                bind(sql, 2, after.chat)
++                bind(sql, 3, after.chat)
++                bind(sql, 4, after.chat)
++                sqlite3_bind_int64(sql, 5, Int64(after.message))
++            }
++            sqlite3_bind_int(sql, 6, Int32(min(100, max(1, limit))))
++            var entries: [LegacyArchivedMessage] = []
++            while true {
++                let step = sqlite3_step(sql)
++                if step == SQLITE_DONE { break }
++                guard step == SQLITE_ROW else { throw SettingsError.invalid("Cannot read legacy archive batch.") }
++                let chat = String(cString: sqlite3_column_text(sql, 0))
++                guard let id = Int32(exactly: sqlite3_column_int64(sql, 1)) else { continue }
++                let key = MessageKey(account: account, chat: chat, id: Int64(id))
++                entries.append(
++                    LegacyArchivedMessage(
++                        id: ArchivedMessageID(account: account, chat: chat, message: id),
++                        observed: sqlite3_column_int64(sql, 2),
++                        deleted: sqlite3_column_type(sql, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(sql, 3),
++                        revision: readHistory(key).last))
++            }
++            return entries
++        }
++    }
++
++    public func purgeMetadata(account: String, chat: String? = nil) throws {
++        try queue.sync {
++            flush()
++            try execute("BEGIN IMMEDIATE")
++            do {
++                for table in ["messages", "revisions", "disappearing_media"] {
++                    guard let sql = statement("DELETE FROM \(table) WHERE account=? AND (? IS NULL OR chat=?)") else {
++                        throw SettingsError.invalid("Cannot clear retained-message storage.")
++                    }
++                    defer { sqlite3_finalize(sql) }
++                    bind(sql, 1, account)
++                    if let chat {
++                        bind(sql, 2, chat)
++                        bind(sql, 3, chat)
++                    }
++                    guard sqlite3_step(sql) == SQLITE_DONE else {
++                        throw SettingsError.invalid("Cannot clear retained-message storage.")
++                    }
++                }
++                try execute("COMMIT")
++            } catch {
++                try? execute("ROLLBACK")
++                throw error
++            }
++            lock.lock()
++            let matches: (MessageKey) -> Bool = { $0.account == account && (chat == nil || $0.chat == chat) }
++            eligible = eligible.filter { !matches($0) }
++            deleted = deleted.filter { !matches($0) }
++            pending = pending.filter { !matches($0) }
++            lock.unlock()
++            DispatchQueue.main.async { NotificationCenter.default.post(name: .retainedMessagesChanged, object: nil) }
++        }
++    }
++}
++
++extension MessageArchive {
++    public func retainedKeys(account: String, chat: String? = nil) -> [MessageKey] {
++        synchronize()
++        lock.lock()
++        defer { lock.unlock() }
++        return deleted.filter { $0.account == account && (chat == nil || $0.chat == chat) }
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Settings.swift b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+index ab072b35..368b8b70 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/Settings.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+@@ -65,6 +65,7 @@ public struct AddonProfile: Codable {
+     public var hideTyping = true
+     public var hideUpload = true
+     public var ghostExceptions: [String] = []
++    public var archive = ArchivePolicy()
+     public var saveDeleted = false
+     public var saveDisappearing = false
+     public var dimDeleted = true
+@@ -75,9 +76,12 @@ public struct AddonProfile: Codable {
+     public var localPremium = false
+     public var blockAds = false
+ 
++    public var hasHistoryCapture: Bool { saveEditHistory || archive.chats.values.contains { $0.history == true } }
++    public var hasDeletedCapture: Bool { saveDeleted || archive.chats.values.contains { $0.deleted == true } }
++
+     public init() {}
+     private enum CodingKeys: String, CodingKey {
+-        case ghostEnabled, hideRead, hideStories, hideOnline, hideTyping, hideUpload
++        case archive, ghostEnabled, hideRead, hideStories, hideOnline, hideTyping, hideUpload
+         case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium,
+             saveEditHistory, blockAds, saveDisappearing
+     }
+@@ -90,6 +94,7 @@ public struct AddonProfile: Codable {
+         hideTyping = try values.decodeIfPresent(Bool.self, forKey: .hideTyping) ?? true
+         hideUpload = try values.decodeIfPresent(Bool.self, forKey: .hideUpload) ?? true
+         ghostExceptions = try values.decodeIfPresent([String].self, forKey: .ghostExceptions) ?? []
++        archive = try values.decodeIfPresent(ArchivePolicy.self, forKey: .archive) ?? .legacy
+         saveDeleted = try values.decodeIfPresent(Bool.self, forKey: .saveDeleted) ?? false
+         saveDisappearing = try values.decodeIfPresent(Bool.self, forKey: .saveDisappearing) ?? false
+         dimDeleted = try values.decodeIfPresent(Bool.self, forKey: .dimDeleted) ?? true
+@@ -103,6 +108,7 @@ public struct AddonProfile: Codable {
+     }
+ 
+     public func validate() throws {
++        try archive.validate()
+         guard (1...365).contains(retentionDays) else {
+             throw SettingsError.invalid("Retention must be between 1 and 365 days.")
+         }
+@@ -140,10 +146,10 @@ public final class AddonSettings {
+     }
+     private func updateEnabled() {
+         enabled = profiles.values.contains {
+-            $0.ghostEnabled || $0.saveDeleted || $0.filtersEnabled || $0.localPremium || $0.saveEditHistory
++            $0.ghostEnabled || $0.hasDeletedCapture || $0.filtersEnabled || $0.localPremium || $0.hasHistoryCapture
+                 || $0.blockAds
+         }
+-        retaining = profiles.values.contains(where: \.saveDeleted)
++        retaining = profiles.values.contains(where: \.hasDeletedCapture)
+     }
+     public func anyEnabled() -> Bool {
+         lock.lock()
+@@ -153,7 +159,7 @@ public final class AddonSettings {
+     public func anyHistoryEnabled() -> Bool {
+         lock.lock()
+         defer { lock.unlock() }
+-        return profiles.values.contains(where: \.saveEditHistory)
++        return profiles.values.contains(where: \.hasHistoryCapture)
+     }
+     public func anyRetentionEnabled() -> Bool {
+         lock.lock()
+diff --git a/Swiftgram/SGAdditionalCore/Tests/ArchiveSessionChecks.swift b/Swiftgram/SGAdditionalCore/Tests/ArchiveSessionChecks.swift
+new file mode 100644
+index 00000000..e3710330
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/ArchiveSessionChecks.swift
+@@ -0,0 +1,49 @@
++import Foundation
++
++enum ArchiveSessionChecks {
++    static func run() {
++        let sessions = ArchiveSessions()
++        let original = sessions.begin(account: "77", owner: "old-record")
++        CheckCore.require(sessions.perform(original, { 42 }) == 42, "authorized session executes")
++        sessions.end(account: "77", owner: "old-record") {}
++        var invoked = false
++        let rejected: Int? = sessions.perform(original) {
++            invoked = true
++            return 1
++        }
++        CheckCore.require(rejected == nil && !invoked, "logged-out callbacks never execute")
++        let replacement = sessions.begin(account: "77", owner: "new-record")
++        let stale: Int? = sessions.perform(original) { 1 }
++        CheckCore.require(stale == nil, "reauthorization cannot revive an old session token")
++        sessions.end(account: "77", owner: "old-record") { invoked = true }
++        CheckCore.require(
++            !invoked && sessions.perform(replacement, { true }) == true,
++            "late cleanup from an old account record preserves the new login")
++        let unrelated = sessions.begin(account: "88")
++        sessions.end(account: "77", owner: "new-record") {}
++        CheckCore.require(sessions.perform(unrelated, { true }) == true, "session revocation respects account identity")
++        let session = sessions.begin(account: "99")
++        let entered = DispatchSemaphore(value: 0)
++        let release = DispatchSemaphore(value: 0)
++        let operationDone = DispatchSemaphore(value: 0)
++        let removalDone = DispatchSemaphore(value: 0)
++        DispatchQueue.global().async {
++            sessions.perform(session) {
++                entered.signal()
++                CheckCore.require(release.wait(timeout: .now() + 2) == .success, "release in-flight archive operation")
++            }
++            operationDone.signal()
++        }
++        CheckCore.require(entered.wait(timeout: .now() + 2) == .success, "archive operation entered")
++        DispatchQueue.global().async {
++            sessions.end(account: "99") {}
++            removalDone.signal()
++        }
++        CheckCore.require(
++            removalDone.wait(timeout: .now() + 0.02) == .timedOut, "logout waits for in-flight archive mutation")
++        release.signal()
++        CheckCore.require(operationDone.wait(timeout: .now() + 2) == .success, "archive operation completes")
++        CheckCore.require(removalDone.wait(timeout: .now() + 2) == .success, "logout finishes after mutation")
++        CheckCore.require(sessions.perform(session, { true }) == nil, "late mutations remain rejected")
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/DeletedArchiveChecks.swift b/Swiftgram/SGAdditionalCore/Tests/DeletedArchiveChecks.swift
+new file mode 100644
+index 00000000..3e244a98
+--- /dev/null
++++ b/Swiftgram/SGAdditionalCore/Tests/DeletedArchiveChecks.swift
+@@ -0,0 +1,309 @@
++import Foundation
++import SQLite3
++
++enum DeletedArchiveChecks {
++    static func storageFailure(root: URL) throws {
++        let store = DeletedMessageArchive(directory: root.appendingPathComponent("full-storage-checks"))
++        try store.freezeStorageGrowthForTesting()
++        let id = ArchivedMessageID(account: "77", chat: "user:42", message: 1)
++        let message = ArchivedMessage(
++            id: id, text: "Not committed", timestamp: 100, chatTitle: "Chat", senderTitle: "Sender", kind: .file,
++            payload: Data(repeating: 1, count: 1_048_576))
++        do {
++            _ = try store.capture(message)
++            fatalError("Full storage accepted snapshot")
++        } catch {}
++        let page = try store.page(account: "77", deletedOnly: false)
++        CheckCore.require(page.entries.isEmpty, "SQLITE_FULL rolls back the entire snapshot transaction")
++        let deleted = try store.markDeleted(id)
++        CheckCore.require(!deleted, "failed persistence cannot be marked as successfully retained")
++        let indexed = try store.page(account: "77", search: "Not committed", deletedOnly: false)
++        CheckCore.require(indexed.entries.isEmpty, "failed storage leaves no search index row")
++    }
++
++    static func versions(root: URL) throws {
++        let directory = root.appendingPathComponent("version-checks")
++        let store = DeletedMessageArchive(directory: directory)
++        let id = ArchivedMessageID(account: "77", chat: "user:42", message: 1)
++        func message(_ text: String, payload: UInt8, signature: UInt8) -> ArchivedMessage {
++            ArchivedMessage(
++                id: id, text: text, timestamp: 100, chatTitle: "Chat", senderTitle: "Sender", kind: .photo,
++                payload: Data([payload]), revisionSignature: Data([signature]), isBotDialog: true)
++        }
++        let original = message("Original", payload: 1, signature: 1)
++        _ = try store.capture(original, now: 100)
++        let botChats = try store.chats(account: "77")
++        CheckCore.require(botChats.first?.isBot == true, "bot-dialog identity survives independent archive storage")
++        _ = try store.capture(message("Original", payload: 2, signature: 1), now: 101, keepRevision: true)
++        let unchanged = try store.versions(id)
++        CheckCore.require(unchanged.isEmpty, "metadata refresh does not create a content revision")
++        _ = try store.capture(message("Original", payload: 3, signature: 2), now: 102, keepRevision: true)
++        let mediaEdit = try store.versions(id)
++        CheckCore.require(
++            mediaEdit.count == 1 && mediaEdit[0].payload == Data([2]), "media-only edit preserves prior native payload")
++        _ = try store.capture(message("Edited", payload: 4, signature: 3), now: 103, keepRevision: true)
++        let versions = try store.versions(id)
++        CheckCore.require(versions.count == 2, "content revisions remain ordered")
++        let size = try store.storageBytes(account: "77")
++        let currentSize = try JSONEncoder().encode(message("Edited", payload: 4, signature: 3)).count
++        CheckCore.require(size > Int64(currentSize), "versions contribute to quota")
++        let evicted = try store.enforcePolicy(account: "77", days: 1, now: 100_000)
++        CheckCore.require(evicted == [id], "expiry reports identities for host metadata cleanup")
++        let expired = try store.versions(id)
++        CheckCore.require(expired.isEmpty, "expiry deletes version payloads")
++        let resurrected = try store.capture(original, now: 100_001)
++        CheckCore.require(!resurrected, "history refresh cannot reset the age of an expired archive")
++        let futureDirectory = root.appendingPathComponent("future-schema")
++        try FileManager.default.createDirectory(at: futureDirectory, withIntermediateDirectories: true)
++        var db: OpaquePointer?
++        CheckCore.require(
++            sqlite3_open(futureDirectory.appendingPathComponent("archive.sqlite3").path, &db) == SQLITE_OK,
++            "future schema fixture")
++        CheckCore.require(
++            sqlite3_exec(db, "PRAGMA user_version=999", nil, nil, nil) == SQLITE_OK, "future schema version")
++        sqlite3_close(db)
++        let future = DeletedMessageArchive(directory: futureDirectory)
++        CheckCore.require(future.status() != nil, "future schema reports incompatibility")
++        do {
++            _ = try future.capture(original)
++            fatalError("Incompatible archive was mutated")
++        } catch {}
++    }
++
++    static func migration(root: URL) throws {
++        let old = MessageArchive.shared
++        let key = MessageKey(account: "991", chat: "user:42", id: 10)
++        old.observe(key)
++        CheckCore.require(old.retain(key), "legacy migration fixture retained")
++        CheckCore.require(
++            old.retainedKeys(account: "991") == [key],
++            "legacy cleanup exposes only retained keys for the selected account")
++        let rows = try old.legacyPage(account: "991", after: nil, limit: 1)
++        CheckCore.require(rows.count == 1 && rows[0].deleted != nil, "bounded legacy batch includes deletion metadata")
++        let next = try old.legacyPage(account: "991", after: rows[0].id, limit: 1)
++        CheckCore.require(next.isEmpty, "legacy cursor excludes previous batch")
++        let historyKey = MessageKey(account: "991", chat: "user:42", id: 11)
++        old.capture(
++            MessageRevision(text: "History only", entities: [], messageDate: 1, editDate: 2), key: historyKey,
++            retentionDays: 30)
++        let historyRows = try old.legacyPage(account: "991", after: rows[0].id)
++        CheckCore.require(
++            historyRows.count == 1 && historyRows[0].id.message == 11
++                && historyRows[0].revision?.text == "History only",
++            "migration includes history-only messages without retention metadata")
++
++        let directory = root.appendingPathComponent("migration-checks")
++        var store: DeletedMessageArchive? = DeletedMessageArchive(directory: directory)
++        let existing = ArchivedMessage(
++            id: rows[0].id, text: "Fresh", timestamp: 100, chatTitle: "Chat", senderTitle: "Sender", kind: .text,
++            payload: Data([9]))
++        _ = try store!.capture(existing)
++        let stale = ArchivedMessage(
++            id: existing.id, text: "Old", timestamp: 50, chatTitle: "Chat", senderTitle: "", kind: .text,
++            payload: Data())
++        _ = try store!.capture(stale, ifAbsent: true)
++        let preserved = try store!.page(account: "991", deletedOnly: false)
++        CheckCore.require(
++            preserved.entries[0].message == existing, "legacy import cannot overwrite a newer complete snapshot")
++        try store!.advanceMigration(existing.id)
++        store = nil
++        store = DeletedMessageArchive(directory: directory)
++        let cursor = try store!.migrationCursor(account: "991")
++        CheckCore.require(cursor == existing.id, "migration cursor survives restart")
++        let topic = ArchivedMessage(
++            id: ArchivedMessageID(account: "991", chat: "user:42", message: 11), text: "Topic", timestamp: 101,
++            chatTitle: "Chat", senderTitle: "", kind: .text, payload: Data([1]), thread: 7)
++        _ = try store!.capture(topic)
++        let removed = try store!.purgeAll(account: "991", thread: 7, minTimestamp: 100, maxTimestamp: 102)
++        CheckCore.require(removed == [topic.id], "range and topic purge excludes other messages")
++        try old.purgeMetadata(account: "991")
++        let cleared = try old.legacyPage(account: "991", after: nil)
++        CheckCore.require(
++            cleared.isEmpty && !old.isDeleted(key) && !old.retain(key),
++            "account purge clears legacy rows and memory indexes")
++        try store!.removeAccount("991")
++        let removedCursor = try store!.migrationCursor(account: "991")
++        CheckCore.require(removedCursor == nil, "account removal clears migration metadata")
++    }
++
++    static func attachments(root: URL) throws {
++        let directory = root.appendingPathComponent("attachment-checks")
++        var archive: DeletedMessageArchive? = DeletedMessageArchive(directory: directory)
++        func message(_ number: Int32) -> ArchivedMessage {
++            ArchivedMessage(
++                id: ArchivedMessageID(account: "77", chat: "user:42", message: number),
++                text: "Attachment", timestamp: 100, chatTitle: "Chat", senderTitle: "Sender",
++                kind: .file, payload: Data([1]))
++        }
++        let first = message(1)
++        let second = message(2)
++        _ = try archive!.capture(first)
++        _ = try archive!.capture(second)
++        for snapshot in [first, second] {
++            try archive!.registerAttachment(message: snapshot.id, resource: "shared", descriptor: Data([1, 2]))
++        }
++        let registered = try archive!.attachments(account: "77")
++        CheckCore.require(registered.count == 1, "resources deduplicate within an account")
++        let source = root.appendingPathComponent("cache-resource")
++        try Data("owned media".utf8).write(to: source)
++        try archive!.saveAttachment(id: registered[0].id, account: "77", source: source)
++        try FileManager.default.removeItem(at: source)
++        let saved = try archive!.attachments(account: "77")
++        let copy = try Data(contentsOf: saved[0].file!)
++        CheckCore.require(copy == Data("owned media".utf8), "attachment survives host cache deletion")
++        try archive!.purge(first.id)
++        CheckCore.require(
++            FileManager.default.fileExists(atPath: saved[0].file!.path), "shared resource survives first owner deletion"
++        )
++        archive = nil
++        try Data([0]).write(to: directory.appendingPathComponent(".transfer-interrupted"))
++        try Data([0]).write(to: directory.appendingPathComponent("media-orphan"))
++        archive = DeletedMessageArchive(directory: directory)
++        CheckCore.require(
++            !FileManager.default.fileExists(atPath: directory.appendingPathComponent("media-orphan").path),
++            "restart removes interrupted orphan files")
++        let reopened = try archive!.attachments(account: "77", message: second.id)
++        CheckCore.require(
++            reopened.count == 1 && reopened[0].status == "saved", "attachment ownership survives reopening")
++        try archive!.purge(second.id)
++        CheckCore.require(
++            !FileManager.default.fileExists(atPath: saved[0].file!.path), "last owner purge deletes attachment")
++        let late = try archive!.attachments(account: "77")
++        CheckCore.require(late.isEmpty, "purge removes attachment metadata")
++        _ = try archive!.capture(message(3))
++        try archive!.registerAttachment(message: message(3).id, resource: "large", descriptor: Data([3]))
++        let pending = try archive!.attachments(account: "77")
++        try Data(repeating: 1, count: 10).write(to: source)
++        do {
++            try archive!.saveAttachment(id: pending[0].id, account: "77", source: source, maximumBytes: 5)
++            fatalError("Oversized attachment accepted")
++        } catch {}
++        let failed = try archive!.attachments(account: "77")
++        CheckCore.require(failed[0].file == nil, "failed copy never publishes a file")
++        try archive!.attachmentStatus(id: pending[0].id, account: "77", status: "unavailable")
++        let unavailable = try archive!.attachments(account: "77")
++        CheckCore.require(unavailable[0].status == "unavailable", "download failure state is observable")
++        try archive!.attachmentStatus(id: pending[0].id, account: "88", status: "pending")
++        let isolated = try archive!.attachments(account: "77")
++        CheckCore.require(isolated[0].status == "unavailable", "status updates respect account scope")
++        try archive!.attachmentStatus(id: pending[0].id, account: "77", status: "pending")
++        let retry = try archive!.attachments(account: "77")
++        CheckCore.require(retry[0].status == "pending", "retry restores pending state")
++        try archive!.saveAttachment(id: pending[0].id, account: "77", source: source)
++        let total = try archive!.storageBytes(account: "77")
++        CheckCore.require(total > 10, "quota includes snapshot payload and owned media")
++        try archive!.enforcePolicy(account: "77", quota: 0)
++        let cleared = try archive!.attachments(account: "77")
++        CheckCore.require(cleared.isEmpty, "quota eviction releases attachments")
++    }
++
++    static func run(root: URL) throws {
++        let legacy = try JSONDecoder().decode(AddonProfile.self, from: Data("{}".utf8))
++        CheckCore.require(
++            legacy.archive.bots && !AddonProfile().archive.bots,
++            "bot capture migrates without changing existing choices")
++        var overrideProfile = AddonProfile()
++        CheckCore.require(
++            !overrideProfile.hasDeletedCapture && !overrideProfile.hasHistoryCapture,
++            "empty capture profile is disabled")
++        overrideProfile.archive.chats["user:42"] = ArchiveChatOverride(deleted: true, history: true)
++        CheckCore.require(
++            overrideProfile.hasDeletedCapture && overrideProfile.hasHistoryCapture,
++            "global feature gates include explicit chat overrides")
++        var policy = ArchivePolicy()
++        policy.chats["user:42"] = ArchiveChatOverride(deleted: true, media: false)
++        CheckCore.require(
++            policy.capturesDeleted(chat: "user:42", bot: true, enabled: false),
++            "chat capture overrides account and bot defaults")
++        CheckCore.require(!policy.capturesMedia(chat: "user:42"), "chat media override")
++        policy.quotaMiB = 0
++        do {
++            try policy.validate()
++            fatalError("Invalid quota accepted")
++        } catch {}
++        try storageFailure(root: root)
++        try versions(root: root)
++        try migration(root: root)
++        try attachments(root: root)
++        let directory = root.appendingPathComponent("snapshot-checks")
++        var archive: DeletedMessageArchive? = DeletedMessageArchive(directory: directory)
++        CheckCore.require(archive?.status() == nil, "archive schema is initialized")
++        let now: Int64 = 2_000_000_000
++        func message(_ id: Int32, account: String = "77", namespace: Int32 = 0, text: String = "searchable phrase")
++            -> ArchivedMessage
++        {
++            ArchivedMessage(
++                id: ArchivedMessageID(account: account, chat: "channel:42", namespace: namespace, message: id),
++                text: text, timestamp: 100, chatTitle: "Retained channel", senderTitle: "Sender",
++                kind: .text, payload: Data([1, 2, 3]))
++        }
++        let original = message(1)
++        let captured = try archive!.capture(original, now: now)
++        CheckCore.require(captured, "snapshot captured")
++        let deleted = try archive!.markDeleted(original.id, now: now + 1)
++        CheckCore.require(deleted, "remote deletion is durable")
++        _ = try archive!.capture(message(2), now: now)
++        _ = try archive!.capture(message(1, namespace: 1), now: now)
++        _ = try archive!.capture(message(1, account: "88"), now: now)
++        _ = try archive!.markDeleted(message(2).id, now: now + 1)
++        _ = try archive!.markDeleted(message(1, namespace: 1).id, now: now + 1)
++        let deletedIDs = try archive!.deletedMessageIDs(account: "77", chat: "channel:42")
++        CheckCore.require(
++            deletedIDs.count == 3 && Set(deletedIDs.map { $0.namespace }) == [0, 1],
++            "deleted identities preserve namespace for host cleanup")
++        let chats = try archive!.chats(account: "77")
++        CheckCore.require(
++            chats.count == 1 && chats[0].id == "channel:42" && chats[0].messages == 3 && chats[0].deleted == 3,
++            "archived chat directory includes cached peer title and independent message counts")
++        let foreignChats = try archive!.chats(account: "88")
++        CheckCore.require(
++            foreignChats.count == 1 && foreignChats[0].deleted == 0,
++            "captured chat directory includes nondeleted content and isolates accounts")
++        let first = try archive!.page(account: "77", limit: 1)
++        let second = try archive!.page(account: "77", before: first.next, limit: 1)
++        CheckCore.require(
++            first.next != nil && first.entries[0].message.id != second.entries[0].message.id,
++            "stable pagination breaks timestamp ties")
++        let search = try archive!.page(account: "77", search: "searchable phrase")
++        CheckCore.require(search.entries.count == 3, "indexed search includes namespace-distinct messages")
++        let foreign = try archive!.page(account: "88")
++        CheckCore.require(foreign.entries.isEmpty, "account and deletion status isolation")
++        archive = nil
++        archive = DeletedMessageArchive(directory: directory)
++        let reopened = try archive!.page(account: "77", chat: "channel:42")
++        CheckCore.require(
++            reopened.entries.count == 3 && reopened.entries.contains { $0.message == original },
++            "complete payload survives reopening without Postbox")
++        try archive!.purge(original.id)
++        let resurrection = try archive!.capture(original, now: now + 5)
++        CheckCore.require(!resurrection, "purge tombstone rejects delayed history")
++        let otherNamespace = try archive!.page(account: "77")
++        CheckCore.require(otherNamespace.entries.count == 2, "purge respects namespace")
++        try archive!.removeAccount("77")
++        let removed = try archive!.capture(message(9), now: now)
++        CheckCore.require(!removed, "removed account rejects late callbacks")
++        let empty = try archive!.page(account: "77", deletedOnly: false)
++        CheckCore.require(empty.entries.isEmpty, "account removal clears snapshots")
++        let untouched = try archive!.page(account: "88", deletedOnly: false)
++        CheckCore.require(untouched.entries.count == 1, "account removal preserves other account")
++        try archive!.authorizeAccount("77")
++        _ = try archive!.capture(message(10), now: now - 31 * 86_400)
++        _ = try archive!.capture(message(11), now: now - 30 * 86_400)
++        _ = try archive!.capture(message(12), now: now)
++        _ = try archive!.capture(message(10, text: "Updated"), now: now)
++        try archive!.enforcePolicy(account: "77", now: now)
++        let retained = try archive!.page(account: "77", deletedOnly: false)
++        CheckCore.require(
++            Set(retained.entries.map { $0.message.id.message }) == [11, 12],
++            "expiry honors boundary and original observation age")
++        try archive!.enforcePolicy(account: "77", quota: 0, now: now)
++        _ = try archive!.capture(message(20), now: now)
++        try archive!.purgeAll(account: "77", chat: "channel:42")
++        let bulkResurrection = try archive!.capture(message(20), now: now)
++        CheckCore.require(!bulkResurrection, "bulk purge tombstones prevent delayed refresh")
++        let preservedAccount = try archive!.page(account: "88", deletedOnly: false)
++        CheckCore.require(preservedAccount.entries.count == 1, "bulk purge respects account scope")
++        let evicted = try archive!.page(account: "77", deletedOnly: false)
++        CheckCore.require(evicted.entries.isEmpty, "quota evicts snapshots and search rows atomically")
++    }
++}
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+index ddef278c..c9cf53f7 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -42,6 +42,8 @@ struct CheckCore {
+         CheckCore.require(!AdditionalPrivacy.suppress(.cancel, account: "77"), "cancel is transmitted")
+         try LocalSavedTagChecks.run()
+         try AdsChecks.run(defaults: defaults)
++        ArchiveSessionChecks.run()
++        try DeletedArchiveChecks.run(root: root)
+         try HistoryChecks.run(root: root)
+         let key = MessageKey(account: "77", chat: "user:42", id: 1)
+         let other = MessageKey(account: "77", chat: "channel:42", id: 1)
+diff --git a/Tests/AllTests/BUILD b/Tests/AllTests/BUILD
+index 58d209f8..a4148d8d 100644
+--- a/Tests/AllTests/BUILD
++++ b/Tests/AllTests/BUILD
+@@ -2,6 +2,9 @@
+ test_suite(
+     name = "AllTests",
+     tests = [
++        "//Swiftgram/SGSettingsUI:SGSettingsUITests",
++        "//submodules/TelegramCore:TelegramCoreTests",
++        "//submodules/Postbox:PostboxTests",
+         "//submodules/TgVoipWebrtc:TgCallsTests",
+     ],
+     visibility = [
+diff --git a/build-system/Make/Make.py b/build-system/Make/Make.py
+index 894ddfc5..5cff2eb4 100644
+--- a/build-system/Make/Make.py
++++ b/build-system/Make/Make.py
+@@ -976,6 +976,10 @@ if __name__ == '__main__':
+             '''
+     )
+     add_project_and_build_common_arguments(testParser)
++    testParser.add_argument(
++        '--disableProvisioningProfiles', action='store_true', default=False,
++        help='Run simulator tests without provisioning profiles.'
++    )
+     testParser.add_argument(
+         '--target',
+         type=str,
+diff --git a/submodules/Postbox/Sources/Postbox.swift b/submodules/Postbox/Sources/Postbox.swift
+index dc232a86..36721c51 100644
+--- a/submodules/Postbox/Sources/Postbox.swift
++++ b/submodules/Postbox/Sources/Postbox.swift
+@@ -43,6 +43,16 @@ public final class Transaction {
+         self.postbox?.keychainTable.set(key, value: value)
+     }
+     
++    public var messageProcessingSessionActive: Bool {
++        assert(self.queue.isCurrent())
++        return self.postbox?.messageProcessingSessionValidator?() ?? false
++    }
++
++    public func setMessageProcessingSessionValidator(_ validator: @escaping () -> Bool) {
++        assert(self.queue.isCurrent())
++        self.postbox?.messageProcessingSessionValidator = validator
++    }
++
+     public func setMessageDeletionObserver(_ observer: @escaping ([MessageId]) -> Void) {
+         assert(self.queue.isCurrent())
+         self.postbox?.messageDeletionObserver = observer
+@@ -1612,6 +1622,7 @@ public func openPostbox(basePath: String, seedConfiguration: SeedConfiguration,
+ }
+ 
+ final class PostboxImpl {
++    var messageProcessingSessionValidator: (() -> Bool)?
+     var messageProcessor: ((StoreMessage, Message?, Transaction) -> StoreMessage?)?
+     var messageDeletionObserver: (([MessageId]) -> Void)?
+     public let queue: Queue
+diff --git a/submodules/Postbox/Tests/AdditionalMessageProcessingTests.swift b/submodules/Postbox/Tests/AdditionalMessageProcessingTests.swift
+new file mode 100644
+index 00000000..10e1e0fe
+--- /dev/null
++++ b/submodules/Postbox/Tests/AdditionalMessageProcessingTests.swift
+@@ -0,0 +1,73 @@
++import XCTest
++
++@testable import Postbox
++
++final class AdditionalMessageProcessingTests: XCTestCase {
++    private var fixture: PostboxFixture!
++
++    override func setUp() {
++        super.setUp()
++        fixture = PostboxFixture(name: "AdditionalMessageProcessingTests")
++    }
++
++    override func tearDown() {
++        fixture.close()
++        fixture = nil
++        super.tearDown()
++    }
++
++    private static func message(_ text: String) -> StoreMessage {
++        StoreMessage(
++            id: MessageHistoryTableFixture.messageId(peer: 600, id: 1), customStableId: nil,
++            globallyUniqueId: nil, groupingKey: nil, threadId: nil, timestamp: 1000,
++            flags: [], tags: [], globalTags: [], localTags: [], forwardInfo: nil,
++            authorId: nil, text: text, attributes: [], media: [])
++    }
++
++    func testProcessorReceivesPreviousBodyBeforeAnEdit() {
++        var observations: [(String, String?)] = []
++        fixture.transaction { transaction in
++            transaction.setMessageProcessor { proposed, previous, _ in
++                observations.append((proposed.text, previous?.text))
++                return proposed
++            }
++            _ = transaction.addMessages([Self.message("Original")], location: .Random)
++        }
++        fixture.transaction { transaction in
++            transaction.updateMessage(MessageHistoryTableFixture.messageId(peer: 600, id: 1)) { _ in
++                .update(Self.message("Edited"))
++            }
++        }
++        XCTAssertEqual(observations.count, 2)
++        XCTAssertEqual(observations.first?.0, "Original")
++        XCTAssertNil(observations.first?.1)
++        XCTAssertEqual(observations.last?.0, "Edited")
++        XCTAssertEqual(observations.last?.1, "Original")
++    }
++
++    func testCancelledReplacementNotifiesDeletionObserver() {
++        let id = MessageHistoryTableFixture.messageId(peer: 600, id: 1)
++        var removed: [MessageId] = []
++        fixture.transaction { transaction in
++            _ = transaction.addMessages([Self.message("Original")], location: .Random)
++            transaction.setMessageDeletionObserver { removed += $0 }
++            transaction.setMessageProcessor { _, _, _ in nil }
++            transaction.updateMessage(id) { _ in .update(Self.message("Filtered")) }
++            XCTAssertNil(transaction.getMessage(id))
++        }
++        XCTAssertEqual(removed, [id])
++    }
++
++    func testTransactionSessionValidatorTracksRevocation() {
++        var active = true
++        fixture.transaction { transaction in
++            XCTAssertFalse(transaction.messageProcessingSessionActive)
++            transaction.setMessageProcessingSessionValidator { active }
++            XCTAssertTrue(transaction.messageProcessingSessionActive)
++        }
++        fixture.transaction { transaction in
++            active = false
++            XCTAssertFalse(transaction.messageProcessingSessionActive)
++        }
++    }
++}
+diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
+index 8eace30f..ca04b141 100644
+--- a/submodules/TelegramCore/BUILD
++++ b/submodules/TelegramCore/BUILD
+@@ -62,6 +62,7 @@ swift_library(
+         "Tests/**/*.swift",
+     ]),
+     deps = [
++        "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
+         ":TelegramCore",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+         "//submodules/TelegramApi:TelegramApi",
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index 40068c60..809c4a69 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1254,6 +1254,7 @@ public class Account {
+     }
+     private var networkTypeDisposable: Disposable?
+     
++    var additionalArchiveSession: ArchiveSession?
+     private let _loggedOut = ValuePromise<Bool>(false, ignoreRepeated: true)
+     public var loggedOut: Signal<Bool, NoError> {
+         return self._loggedOut.get()
+@@ -1286,9 +1287,14 @@ public class Account {
+         self.networkArguments = networkArguments
+         self.peerId = peerId
+         if !supplementary {
++            let session = ArchiveSessions.shared.begin(account: additionalAccountKey(peerId), owner: String(id.rawValue))
++            self.additionalArchiveSession = session
++            do { try DeletedMessageArchive.shared.authorizeAccount(additionalAccountKey(peerId)) }
++            catch { DeletedMessageArchive.shared.reportFailure(error) }
+             network.additionalAccountId = additionalAccountKey(peerId)
+-            let processor = AdditionalMessageProcessor(account: peerId, mediaBox: postbox.mediaBox)
++            let processor = AdditionalMessageProcessor(account: peerId, mediaBox: postbox.mediaBox, session: session)
+             let _ = postbox.transaction { transaction -> Bool in
++                transaction.setMessageProcessingSessionValidator { ArchiveSessions.shared.perform(session, { true }) == true }
+                 transaction.setMessageProcessor { processor.process($0, previous: $1, transaction: $2) }
+                 transaction.setMessageDeletionObserver { processor.deleted($0) }
+                 return additionalRestoreLegacyProfile(transaction: transaction, account: peerId)
+@@ -1594,9 +1600,10 @@ public class Account {
+         
+         self.automaticCacheEvictionContext = AutomaticCacheEvictionContext(postbox: postbox, accountManager: accountManager)
+         if !supplementary {
++            self.managedOperationsDisposable.add(AdditionalArchiveMedia(account: self))
+             PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: AdditionalPluginActionAdapter(account: self))
+             self.managedOperationsDisposable.add((self.loggedOut |> filter { $0 } |> take(1)).start(next: { _ in
+-                additionalPluginForgetOrigins(account: peerId)
++                additionalRemoveArchiveAccount(peerId, record: id)
+                 PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: nil)
+             }))
+         }
+diff --git a/submodules/TelegramCore/Sources/Account/AccountManager.swift b/submodules/TelegramCore/Sources/Account/AccountManager.swift
+index 857c0e4d..6234b6e8 100644
+--- a/submodules/TelegramCore/Sources/Account/AccountManager.swift
++++ b/submodules/TelegramCore/Sources/Account/AccountManager.swift
+@@ -504,6 +504,7 @@ private func cleanupAccount(networkArguments: NetworkInitializationArguments, ac
+             case .unauthorized:
+                 return .complete()
+             case let .authorized(account):
++                additionalRemoveArchiveAccount(account.peerId, record: account.id)
+                 account.shouldBeServiceTaskMaster.set(.single(.always))
+                 return account.network.request(Api.functions.auth.logOut())
+                 |> map(Optional.init)
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalArchiveMedia.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalArchiveMedia.swift
+new file mode 100644
+index 00000000..001278c2
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalArchiveMedia.swift
+@@ -0,0 +1,221 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++import SwiftSignalKit
++
++/// Account-owned bounded downloads. The SQLite queue fences every file commit against purged ownership.
++final class AdditionalArchiveMedia: Disposable {
++    private weak var account: Account?
++    private let queue = Queue(name: "Swiftgram.ArchiveMedia")
++    private var network: NetworkType = .none
++    private var subscription: Disposable?
++    private var settingsObserver: NSObjectProtocol?
++    private var captureObserver: NSObjectProtocol?
++    private var scanScheduled = false
++    private var timer: SwiftSignalKit.Timer?
++    private var active: [String: DisposableSet] = [:]
++    private var stopped = false
++    private var migrating = false
++    private var migrated = false
++    private let migration = MetaDisposable()
++
++    init(account: Account) {
++        self.account = account
++        settingsObserver = NotificationCenter.default.addObserver(
++            forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil
++        ) { [weak self] _ in
++            guard let self else { return }
++            self.queue.async { [weak self] in self?.reconfigure() }
++        }
++        let key = additionalAccountKey(account.peerId)
++        captureObserver = NotificationCenter.default.addObserver(
++            forName: Notification.Name("SGAArchiveCaptured"), object: nil, queue: nil
++        ) { [weak self] notification in
++            guard notification.object as? String == key, let self else { return }
++            self.queue.async { [weak self] in
++                guard let self, !self.stopped, !self.scanScheduled else { return }
++                self.scanScheduled = true
++                self.queue.after(0.1) { [weak self] in
++                    self?.scanScheduled = false
++                    self?.scan()
++                }
++            }
++        }
++        subscription = (account.networkType |> deliverOn(queue)).start(next: { [weak self] type in
++            guard let self else { return }
++            self.network = type
++            self.reconfigure()
++        })
++        queue.async { [weak self] in
++            guard let self else { return }
++            let timer = SwiftSignalKit.Timer(
++                timeout: 15, repeat: true, completion: { [weak self] in self?.scan() }, queue: self.queue)
++            self.timer = timer
++            timer.start()
++            self.scan()
++        }
++    }
++
++    func dispose() {
++        subscription?.dispose()
++        if let settingsObserver { NotificationCenter.default.removeObserver(settingsObserver) }
++        if let captureObserver { NotificationCenter.default.removeObserver(captureObserver) }
++        migration.dispose()
++        queue.async { [self] in
++            stopped = true
++            timer?.invalidate()
++            for disposable in active.values { disposable.dispose() }
++            active.removeAll()
++        }
++    }
++
++    private func reconfigure() {
++        guard !stopped, let account, let session = account.additionalArchiveSession else { return }
++        ArchiveSessions.shared.perform(session) {
++            for disposable in active.values { disposable.dispose() }
++            active.removeAll()
++            do {
++                let key = additionalAccountKey(account.peerId)
++                for attachment in try DeletedMessageArchive.shared.attachments(account: key)
++                where attachment.status == "unavailable" || attachment.status == "oversized" {
++                    try DeletedMessageArchive.shared.attachmentStatus(
++                        id: attachment.id, account: key, status: "pending")
++                }
++            } catch { DeletedMessageArchive.shared.reportFailure(error) }
++        }
++        scan()
++    }
++
++    private func scan() {
++        guard !stopped, let account else { return }
++        guard let session = account.additionalArchiveSession else { return }
++        ArchiveSessions.shared.perform(session) { scanActive(account: account, session: session) }
++    }
++
++    private func scanActive(account: Account, session: ArchiveSession) {
++        let key = additionalAccountKey(account.peerId)
++        let profile = AddonSettings.shared.profile(key)
++        if !migrated && !migrating {
++            do {
++                let cursor = try DeletedMessageArchive.shared.migrationCursor(account: key)
++                let entries = try MessageArchive.shared.legacyPage(account: key, after: cursor)
++                if entries.isEmpty {
++                    migrated = true
++                } else {
++                    migrating = true
++                    migration.set(
++                        (additionalMigrateArchive(account: account, entries: entries) |> deliverOn(queue)).start(next: {
++                            [weak self] success in
++                            guard let self else { return }
++                            self.migrating = false
++                            if success { self.queue.after(0.1) { [weak self] in self?.scan() } }
++                        }))
++                }
++            } catch { DeletedMessageArchive.shared.reportFailure(error) }
++        }
++
++        do {
++            let evicted = try DeletedMessageArchive.shared.enforcePolicy(
++                account: key, days: profile.retentionDays, quota: Int64(profile.archive.quotaMiB) * 1_048_576)
++            var expiredMessages: [MessageId] = []
++            for id in evicted {
++                let legacy = MessageKey(account: key, chat: id.chat, id: Int64(id.message))
++                if MessageArchive.shared.isDeleted(legacy), let peer = additionalArchivePeer(id.chat) {
++                    expiredMessages.append(MessageId(peerId: peer, namespace: id.namespace, id: id.message))
++                }
++                MessageArchive.shared.exclude(legacy)
++            }
++            if !evicted.isEmpty { MessageArchive.shared.synchronize() }
++            if !expiredMessages.isEmpty {
++                let ids = expiredMessages
++                let _ = account.postbox.transaction { transaction -> Void in
++                    ArchiveSessions.shared.perform(session) { transaction.deleteMessages(ids, forEachMedia: nil) }
++                }.start()
++            }
++            let botChats = Set(try DeletedMessageArchive.shared.chats(account: key).filter { $0.isBot }.map { $0.id })
++            let attachments = try DeletedMessageArchive.shared.attachments(account: key)
++            let allowed = attachments.filter { attachment in
++                attachment.chats.contains {
++                    (profile.archive.capturesDeleted(chat: $0, bot: botChats.contains($0), enabled: profile.saveDeleted)
++                        || profile.archive.capturesHistory(
++                            chat: $0, bot: botChats.contains($0), enabled: profile.saveEditHistory))
++                        && profile.archive.capturesMedia(chat: $0)
++                }
++            }
++            let canFetch =
++                profile.archive.network != .cached && network != .none
++                && (profile.archive.network == .all || network == .wifi)
++            let owned = canFetch ? Set(allowed.map { $0.id }) : []
++            for id in Array(active.keys) where !owned.contains(id) { active.removeValue(forKey: id)?.dispose() }
++            for attachment in allowed where attachment.file == nil && active[attachment.id] == nil {
++                guard
++                    let resource = PostboxDecoder(buffer: MemoryBuffer(data: attachment.descriptor)).decodeRootObject()
++                        as? MediaResource
++                else { continue }
++                if let size = resource.size, size > Int64(profile.archive.fileLimitMiB) * 1_048_576 {
++                    try DeletedMessageArchive.shared.attachmentStatus(
++                        id: attachment.id, account: key, status: "oversized")
++                    continue
++                }
++                if let path = account.postbox.mediaBox.completedResourcePath(resource) {
++                    do {
++                        try DeletedMessageArchive.shared.saveAttachment(
++                            id: attachment.id, account: key, source: URL(fileURLWithPath: path),
++                            maximumBytes: Int64(profile.archive.fileLimitMiB) * 1_048_576)
++                    } catch {
++                        try DeletedMessageArchive.shared.attachmentStatus(
++                            id: attachment.id, account: key, status: "unavailable")
++                        DeletedMessageArchive.shared.reportFailure(error)
++                    }
++                    continue
++                }
++                guard active.count < 2, attachment.status == "pending",
++                    profile.saveDeleted || profile.saveEditHistory || !profile.archive.chats.isEmpty,
++                    profile.archive.network != .cached, network != .none,
++                    profile.archive.network == .all || network == .wifi
++                else { continue }
++                let set = DisposableSet()
++                active[attachment.id] = set
++                let finish: (String?) -> Void = { [weak self] status in
++                    guard let self, self.active[attachment.id] === set else { return }
++                    if let status {
++                        try? DeletedMessageArchive.shared.attachmentStatus(
++                            id: attachment.id, account: key, status: status)
++                    }
++                    self.active.removeValue(forKey: attachment.id)?.dispose()
++                }
++                set.add(
++                    (fetchedMediaResource(
++                        mediaBox: account.postbox.mediaBox, userLocation: .other,
++                        userContentType: .other, reference: .standalone(resource: resource)) |> deliverOn(queue)).start(
++                            error: { _ in finish("unavailable") }))
++                set.add(
++                    (account.postbox.mediaBox.resourceData(resource, option: .incremental(waitUntilFetchStatus: false))
++                        |> deliverOn(queue)).start(next: { data in
++                            guard
++                                let active = ArchiveSessions.shared.perform(
++                                    session, { self.active[attachment.id] === set }), active
++                            else { return }
++                            let limit = Int64(profile.archive.fileLimitMiB) * 1_048_576
++                            if data.size > limit {
++                                finish("oversized")
++                                return
++                            }
++                            guard data.complete else { return }
++                            do {
++                                try ArchiveSessions.shared.perform(session) {
++                                    try DeletedMessageArchive.shared.saveAttachment(
++                                        id: attachment.id, account: key, source: URL(fileURLWithPath: data.path),
++                                        maximumBytes: limit)
++                                }
++                                finish(nil)
++                            } catch { finish("unavailable") }
++                        }))
++                queue.after(60) { [weak self, weak set] in
++                    guard let self, let set, self.active[attachment.id] === set else { return }
++                    finish("unavailable")
++                }
++            }
++        } catch { DeletedMessageArchive.shared.reportFailure(error) }
++    }
++}
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift
+index 6461aaec..493e1bd5 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalDisappearingMedia.swift
+@@ -44,12 +44,11 @@ final class AdditionalDisappearingMedia {
+         for disposable in downloads.values { disposable.dispose() }
+     }
+ 
+-    func process(_ proposed: StoreMessage, previous: Message?) -> StoreMessage {
++    func process(_ proposed: StoreMessage, previous: Message?, profile: AddonProfile) -> StoreMessage {
+         guard case .Id(let id) = proposed.id, id.namespace == Namespaces.Message.Cloud,
+             let chat = additionalChatKey(id.peerId)
+         else { return proposed }
+         let key = MessageKey(account: account, chat: chat, id: Int64(id.id))
+-        let profile = AddonSettings.shared.profile(account)
+         guard profile.saveDeleted && profile.saveDisappearing else { return proposed }
+         let timed = proposed.attributes.contains {
+             $0 is AutoremoveTimeoutMessageAttribute || $0 is AutoclearTimeoutMessageAttribute
+@@ -132,10 +131,13 @@ final class AdditionalDisappearingMedia {
+ 
+ /// Captures media for an existing timer and removes its timestamp entries so later timers can run.
+ func additionalRetainDisappearingAtExpiry(account: String?, message: Message, transaction: Transaction) -> Bool {
++    guard transaction.messageProcessingSessionActive else { return false }
+     guard let account, message.id.namespace == Namespaces.Message.Cloud,
+-        let chat = additionalChatKey(message.id.peerId)
++        let chat = additionalChatKey(message.id.peerId),
++        let state = transaction.getState() as? AuthorizedAccountState,
++        additionalAccountKey(state.peerId) == account
+     else { return false }
+-    let profile = AddonSettings.shared.profile(account)
++    let profile = additionalArchiveProfile(account: state.peerId, chat: message.id.peerId, transaction: transaction)
+     let resources = disappearingResources(message.media)
+     guard
+         DisappearingMessages.shouldSave(
+@@ -144,6 +146,17 @@ func additionalRetainDisappearingAtExpiry(account: String?, message: Message, tr
+             service: message.media.contains { $0 is TelegramMediaAction })
+     else { return false }
+     let key = MessageKey(account: account, chat: chat, id: Int64(message.id.id))
++    let stored = additionalArchiveStored(message).withUpdatedAttributes(withoutExpiration(message.attributes))
++    guard additionalArchiveSnapshot(stored, account: state.peerId, transaction: transaction),
++        let identity = additionalArchivedID(account: state.peerId, id: message.id)
++    else { return false }
++    do {
++        guard try DeletedMessageArchive.shared.markDeleted(identity) else { return false }
++    } catch {
++        DeletedMessageArchive.shared.reportFailure(error)
++        return false
++    }
++
+     guard MessageArchive.shared.observeDisappearing(key, resources: resources.map { $0.id.stringRepresentation }),
+         MessageArchive.shared.retain(key)
+     else { return false }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift
+new file mode 100644
+index 00000000..1d066611
+--- /dev/null
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift
+@@ -0,0 +1,364 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++import SwiftSignalKit
++
++/// This envelope versions Telegram-specific encoding independently of the SQLite schema.
++struct AdditionalArchivedPayload: Codable {
++    var version = 1
++    let attributes: [Data]
++    let media: [Data]
++    let peers: [Data]
++    let author: Int64?
++    let globallyUniqueId: Int64?
++    let groupingKey: Int64?
++    let threadId: Int64?
++    let flags: UInt32
++    let tags: UInt32
++    let globalTags: UInt32
++    let localTags: UInt32
++    let forward: Forward?
++
++    struct Forward: Codable {
++        let author: Int64?
++        let source: Int64?
++        let sourcePeer: Int64?
++        let sourceNamespace: Int32?
++        let sourceMessage: Int32?
++        let date: Int32
++        let signature: String?
++        let psa: String?
++        let flags: Int32
++    }
++}
++
++func additionalArchivedID(account: PeerId, id: MessageId) -> ArchivedMessageID? {
++    guard id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(id.peerId) else { return nil }
++    return ArchivedMessageID(
++        account: additionalAccountKey(account), chat: chat, namespace: id.namespace, message: id.id)
++}
++
++@discardableResult func additionalArchiveSnapshot(
++    _ message: StoreMessage, account: PeerId, transaction: Transaction, observed: Int64? = nil, ifAbsent: Bool = false
++)
++    -> Bool
++{
++    guard case .Id(let id) = message.id, let identity = additionalArchivedID(account: account, id: id) else {
++        return false
++    }
++    func encode(_ object: PostboxCoding) -> Data {
++        let encoder = PostboxEncoder()
++        encoder.encodeRootObject(object)
++        return encoder.makeData()
++    }
++    let peerIDs = Set(
++        [id.peerId, message.authorId, message.forwardInfo?.authorId, message.forwardInfo?.sourceId].compactMap { $0 })
++    let peers = peerIDs.compactMap { transaction.getPeer($0) }
++    let payload = AdditionalArchivedPayload(
++        attributes: message.attributes.map { encode($0) }, media: message.media.map { encode($0) },
++        peers: peers.map { encode($0) }, author: message.authorId?.toInt64(),
++        globallyUniqueId: message.globallyUniqueId, groupingKey: message.groupingKey, threadId: message.threadId,
++        flags: message.flags.rawValue, tags: message.tags.rawValue, globalTags: message.globalTags.rawValue,
++        localTags: message.localTags.rawValue,
++        forward: message.forwardInfo.map {
++            .init(
++                author: $0.authorId?.toInt64(), source: $0.sourceId?.toInt64(),
++                sourcePeer: $0.sourceMessageId?.peerId.toInt64(),
++                sourceNamespace: $0.sourceMessageId?.namespace, sourceMessage: $0.sourceMessageId?.id,
++                date: $0.date, signature: $0.authorSignature, psa: $0.psaType, flags: $0.flags.rawValue)
++        })
++    let kind: ArchivedMessage.Kind
++    if message.media.contains(where: { $0 is TelegramMediaImage }) {
++        kind = .photo
++    } else if let file = message.media.compactMap({ $0 as? TelegramMediaFile }).first {
++        kind = file.isVoice ? .voice : file.isVideo ? .video : .file
++    } else {
++        kind = .text
++    }
++    do {
++        let encoder = JSONEncoder()
++        encoder.outputFormatting = [.sortedKeys]
++        let signature = try encoder.encode(
++            AdditionalArchiveRevisionSignature(
++                revision: additionalRevision(
++                    text: message.text, timestamp: message.timestamp, attributes: message.attributes),
++                media: payload.media))
++        let snapshot = ArchivedMessage(
++            id: identity, text: message.text, timestamp: message.timestamp,
++            chatTitle: transaction.getPeer(id.peerId)?.debugDisplayTitle ?? identity.chat,
++            senderTitle: message.authorId.flatMap { transaction.getPeer($0)?.debugDisplayTitle } ?? "",
++            kind: kind, payload: try JSONEncoder().encode(payload), thread: message.threadId,
++            revisionSignature: signature, isBotDialog: (transaction.getPeer(id.peerId) as? TelegramUser)?.botInfo != nil
++        )
++        guard
++            try DeletedMessageArchive.shared.capture(
++                snapshot, now: observed ?? Int64(Date().timeIntervalSince1970), ifAbsent: ifAbsent,
++                keepRevision: additionalArchiveProfile(account: account, chat: id.peerId, transaction: transaction)
++                    .saveEditHistory)
++        else { return false }
++        let policy = AddonSettings.shared.profile(identity.account).archive
++        if policy.capturesMedia(chat: identity.chat) {
++            for resource in additionalArchiveResources(message.media) {
++                guard let encodedResource = resource as? PostboxCoding else { continue }
++                try DeletedMessageArchive.shared.registerAttachment(
++                    message: identity, resource: resource.id.stringRepresentation, descriptor: encode(encodedResource))
++            }
++        }
++        NotificationCenter.default.post(name: Notification.Name("SGAArchiveCaptured"), object: identity.account)
++        return true
++    } catch {
++        DeletedMessageArchive.shared.reportFailure(error)
++        return false
++    }
++}
++
++func additionalPurgeArchivedMessage(account: PeerId, id: MessageId) {
++    guard let identity = additionalArchivedID(account: account, id: id) else { return }
++    do { try DeletedMessageArchive.shared.purge(identity) } catch { DeletedMessageArchive.shared.reportFailure(error) }
++    if let key = additionalMessageKey(account: account, id: id) { MessageArchive.shared.exclude(key) }
++}
++
++func additionalArchiveResources(_ media: [Media]) -> [MediaResource] {
++    media.flatMap { item -> [MediaResource] in
++        if let image = item as? TelegramMediaImage { return image.representations.map { $0.resource } }
++        if let file = item as? TelegramMediaFile {
++            return [file.resource] + file.previewRepresentations.map { $0.resource }
++        }
++        return []
++    }
++}
++
++func additionalArchiveProfile(account: PeerId, chat: PeerId, transaction: Transaction) -> AddonProfile {
++    var profile = AddonSettings.shared.profile(additionalAccountKey(account))
++    guard let key = additionalChatKey(chat) else { return profile }
++    let bot = (transaction.getPeer(chat) as? TelegramUser)?.botInfo != nil
++    profile.saveDeleted = profile.archive.capturesDeleted(chat: key, bot: bot, enabled: profile.saveDeleted)
++    profile.saveEditHistory = profile.archive.capturesHistory(chat: key, bot: bot, enabled: profile.saveEditHistory)
++    return profile
++}
++
++public func additionalArchivedRevision(_ message: ArchivedMessage) throws -> MessageRevision {
++    let payload = try JSONDecoder().decode(AdditionalArchivedPayload.self, from: message.payload)
++    guard payload.version == 1 else { throw SettingsError.invalid("Unsupported archived message version.") }
++    let attributes = payload.attributes.compactMap {
++        PostboxDecoder(buffer: MemoryBuffer(data: $0)).decodeRootObject() as? MessageAttribute
++    }
++    return additionalRevision(text: message.text, timestamp: message.timestamp, attributes: attributes)
++}
++
++func additionalArchivePeer(_ chat: String) -> PeerId? {
++    let parts = chat.split(separator: ":")
++    guard parts.count == 2, let id = Int64(parts[1]) else { return nil }
++    let namespace: PeerId.Namespace
++    switch parts[0] {
++    case "user": namespace = Namespaces.Peer.CloudUser
++    case "chat": namespace = Namespaces.Peer.CloudGroup
++    case "channel": namespace = Namespaces.Peer.CloudChannel
++    default: return nil
++    }
++    return PeerId(namespace: namespace, id: ._internalFromInt64Value(id))
++}
++
++func additionalRemoveArchiveAccount(_ account: PeerId, record: AccountRecordId) {
++    let key = additionalAccountKey(account)
++    do {
++        try ArchiveSessions.shared.end(account: key, owner: String(record.rawValue)) {
++            try DeletedMessageArchive.shared.removeAccount(key)
++            try MessageArchive.shared.purgeMetadata(account: key)
++            additionalPluginForgetOrigins(account: account)
++        }
++    } catch { DeletedMessageArchive.shared.reportFailure(error) }
++}
++
++func additionalMigrateArchive(account: Account, entries: [LegacyArchivedMessage]) -> Signal<Bool, NoError> {
++    account.postbox.transaction { transaction -> Bool in
++        guard let session = account.additionalArchiveSession else { return false }
++        return ArchiveSessions.shared.perform(session) {
++            do {
++                for entry in entries {
++                    guard let peer = additionalArchivePeer(entry.id.chat) else {
++                        try DeletedMessageArchive.shared.advanceMigration(entry.id)
++                        continue
++                    }
++                    let id = MessageId(peerId: peer, namespace: entry.id.namespace, id: entry.id.message)
++                    if let message = transaction.getMessage(id),
++                        additionalCanArchive(attributes: message.attributes, media: message.media)
++                    {
++                        let stored = StoreMessage(
++                            id: message.id, customStableId: nil, globallyUniqueId: message.globallyUniqueId,
++                            groupingKey: message.groupingKey, threadId: message.threadId, timestamp: message.timestamp,
++                            flags: StoreMessageFlags(message.flags), tags: message.tags, globalTags: message.globalTags,
++                            localTags: message.localTags,
++                            forwardInfo: message.forwardInfo.map(StoreMessageForwardInfo.init),
++                            authorId: message.author?.id, text: message.text, attributes: message.attributes,
++                            media: message.media)
++                        guard
++                            additionalArchiveSnapshot(
++                                stored, account: account.peerId, transaction: transaction, observed: entry.observed,
++                                ifAbsent: true)
++                        else {
++                            if try DeletedMessageArchive.shared.isPurged(entry.id) {
++                                try DeletedMessageArchive.shared.advanceMigration(entry.id)
++                                continue
++                            }
++                            return false
++                        }
++                    } else {
++                        // An empty adapter payload explicitly denotes missing legacy content, not a fabricated message.
++                        let placeholder = ArchivedMessage(
++                            id: entry.id, text: entry.revision?.text ?? "",
++                            timestamp: Int32(clamping: entry.revision?.messageDate ?? 0),
++                            chatTitle: transaction.getPeer(peer)?.debugDisplayTitle ?? entry.id.chat, senderTitle: "",
++                            kind: .text, payload: Data(),
++                            isBotDialog: (transaction.getPeer(peer) as? TelegramUser)?.botInfo != nil)
++                        _ = try DeletedMessageArchive.shared.capture(placeholder, now: entry.observed, ifAbsent: true)
++                    }
++                    if let deleted = entry.deleted {
++                        _ = try DeletedMessageArchive.shared.markDeleted(entry.id, now: deleted)
++                    }
++                    try DeletedMessageArchive.shared.advanceMigration(entry.id)
++                }
++                return true
++            } catch {
++                DeletedMessageArchive.shared.reportFailure(error)
++                return false
++            }
++        } ?? false
++    }
++}
++
++func additionalPurgeArchiveChat(
++    transaction: Transaction, peer: PeerId, thread: Int64? = nil,
++    minTimestamp: Int32? = nil, maxTimestamp: Int32? = nil
++) {
++    guard transaction.messageProcessingSessionActive,
++        let state = transaction.getState() as? AuthorizedAccountState, let chat = additionalChatKey(peer)
++    else {
++        return
++    }
++    let account = additionalAccountKey(state.peerId)
++    do {
++        let ids = try DeletedMessageArchive.shared.purgeAll(
++            account: account, chat: chat, thread: thread,
++            minTimestamp: minTimestamp, maxTimestamp: maxTimestamp)
++        if thread == nil && minTimestamp == nil && maxTimestamp == nil {
++            try MessageArchive.shared.purgeMetadata(account: account, chat: chat)
++        } else {
++            for id in ids {
++                MessageArchive.shared.exclude(MessageKey(account: account, chat: chat, id: Int64(id.message)))
++            }
++        }
++    } catch { DeletedMessageArchive.shared.reportFailure(error) }
++}
++
++private struct AdditionalArchiveRevisionSignature: Encodable {
++    let revision: MessageRevision
++    let media: [Data]
++}
++
++func additionalArchiveStored(_ message: Message) -> StoreMessage {
++    StoreMessage(
++        id: message.id, customStableId: nil, globallyUniqueId: message.globallyUniqueId,
++        groupingKey: message.groupingKey, threadId: message.threadId, timestamp: message.timestamp,
++        flags: StoreMessageFlags(message.flags), tags: message.tags, globalTags: message.globalTags,
++        localTags: message.localTags, forwardInfo: message.forwardInfo.map(StoreMessageForwardInfo.init),
++        authorId: message.author?.id, text: message.text, attributes: message.attributes, media: message.media)
++}
++
++public struct ArchivedAttachmentInfo {
++    public let filename: String
++    public let mimeType: String
++    public let kind: ArchivedMessage.Kind
++}
++
++public func additionalArchivedAttachmentInfo(_ message: ArchivedMessage, resource: String) throws
++    -> ArchivedAttachmentInfo?
++{
++    let payload = try JSONDecoder().decode(AdditionalArchivedPayload.self, from: message.payload)
++    guard payload.version == 1 else { throw SettingsError.invalid("Unsupported archived message version.") }
++    for data in payload.media {
++        let media = PostboxDecoder(buffer: MemoryBuffer(data: data)).decodeRootObject() as? Media
++        if let file = media as? TelegramMediaFile {
++            if file.resource.id.stringRepresentation == resource {
++                return ArchivedAttachmentInfo(
++                    filename: file.fileName ?? (file.isVoice ? "voice.ogg" : file.isVideo ? "video.mp4" : "file"),
++                    mimeType: file.mimeType,
++                    kind: file.isVoice ? .voice : file.isVideo ? .video : .file)
++            }
++            if file.previewRepresentations.contains(where: { $0.resource.id.stringRepresentation == resource }) {
++                return ArchivedAttachmentInfo(filename: "preview.jpg", mimeType: "image/jpeg", kind: .photo)
++            }
++        }
++        if let image = media as? TelegramMediaImage,
++            image.representations.contains(where: { $0.resource.id.stringRepresentation == resource })
++        {
++            return ArchivedAttachmentInfo(filename: "photo.jpg", mimeType: "image/jpeg", kind: .photo)
++        }
++    }
++    return nil
++}
++
++/// Purges archive-owned copies and retained Postbox rows locally; it never sends Telegram deletion requests.
++public func additionalPurgeArchive(account: Account, chat: String? = nil, message: ArchivedMessageID? = nil) -> Signal<
++    Bool, NoError
++> {
++    account.postbox.transaction { transaction -> Bool in
++        guard let session = account.additionalArchiveSession, transaction.messageProcessingSessionActive else {
++            return false
++        }
++        return ArchiveSessions.shared.perform(session) {
++            let key = additionalAccountKey(account.peerId)
++            if let message, message.account != key { return false }
++            do {
++                var retained = Set(
++                    try DeletedMessageArchive.shared.deletedMessageIDs(account: key, chat: message?.chat ?? chat))
++                for legacy in MessageArchive.shared.retainedKeys(account: key, chat: message?.chat ?? chat) {
++                    if let id = Int32(exactly: legacy.id) {
++                        retained.insert(ArchivedMessageID(account: key, chat: legacy.chat, message: id))
++                    }
++                }
++                if let message {
++                    retained = retained.filter { $0 == message }
++                    try DeletedMessageArchive.shared.purge(message)
++                    MessageArchive.shared.exclude(
++                        MessageKey(account: key, chat: message.chat, id: Int64(message.message)))
++                    MessageArchive.shared.synchronize()
++                } else {
++                    try DeletedMessageArchive.shared.purgeAll(account: key, chat: chat)
++                    try MessageArchive.shared.purgeMetadata(account: key, chat: chat)
++                }
++                let ids = retained.compactMap { identity -> MessageId? in
++                    guard let peer = additionalArchivePeer(identity.chat) else { return nil }
++                    return MessageId(peerId: peer, namespace: identity.namespace, id: identity.message)
++                }
++                transaction.deleteMessages(ids, forEachMedia: nil)
++                return true
++            } catch {
++                DeletedMessageArchive.shared.reportFailure(error)
++                return false
++            }
++        } ?? false
++    }
++}
++
++public struct ArchivedMessageContext {
++    public let reply: Int32?
++    public let forwardedFrom: String?
++    public let isForwarded: Bool
++}
++
++public func additionalArchivedContext(_ message: ArchivedMessage) throws -> ArchivedMessageContext {
++    let payload = try JSONDecoder().decode(AdditionalArchivedPayload.self, from: message.payload)
++    guard payload.version == 1 else { throw SettingsError.invalid("Unsupported archived message version.") }
++    let attributes = payload.attributes.compactMap {
++        PostboxDecoder(buffer: MemoryBuffer(data: $0)).decodeRootObject() as? MessageAttribute
++    }
++    let peers = payload.peers.compactMap { PostboxDecoder(buffer: MemoryBuffer(data: $0)).decodeRootObject() as? Peer }
++    let reply = (attributes.first { $0 is ReplyMessageAttribute } as? ReplyMessageAttribute)?.messageId.id
++    let forwarded = payload.forward.flatMap { forward in
++        forward.author.flatMap { id in peers.first { $0.id.toInt64() == id }?.debugDisplayTitle }
++            ?? forward.source.flatMap { id in peers.first { $0.id.toInt64() == id }?.debugDisplayTitle }
++            ?? forward.signature ?? (forward.author ?? forward.source).map { "#" + String($0) }
++    }
++    return ArchivedMessageContext(reply: reply, forwardedFrom: forwarded, isForwarded: payload.forward != nil)
++}
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+index d4842639..2160ba9b 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -111,30 +111,63 @@ public func additionalTextEntities(_ revision: MessageRevision) -> [MessageTextE
+ /// One processor per authorized account, installed before state synchronization starts.
+ final class AdditionalMessageProcessor {
+     let account: PeerId
++    private let session: ArchiveSession
+     private let filters = CompiledFilters()
+     private let disappearing: AdditionalDisappearingMedia
+-    init(account: PeerId, mediaBox: MediaBox) {
++    init(account: PeerId, mediaBox: MediaBox, session: ArchiveSession) {
+         self.account = account
++        self.session = session
+         self.disappearing = AdditionalDisappearingMedia(account: account, mediaBox: mediaBox)
+     }
+     func deleted(_ ids: [MessageId]) {
+-        additionalPluginForgetOrigins(account: account, messages: ids)
+-        disappearing.deleted(ids)
++        ArchiveSessions.shared.perform(session) {
++            additionalPluginForgetOrigins(account: account, messages: ids)
++            disappearing.deleted(ids)
++        }
+     }
+     func process(_ proposed: StoreMessage, previous: Message?, transaction: Transaction) -> StoreMessage? {
++        if let processed = ArchiveSessions.shared.perform(
++            session, { processActive(proposed, previous: previous, transaction: transaction) })
++        {
++            return processed
++        }
++        return proposed
++    }
++    private func processActive(_ proposed: StoreMessage, previous: Message?, transaction: Transaction) -> StoreMessage?
++    {
+         let proposed = additionalApplyLocalSavedTags(proposed, account: account, transaction: transaction)
+-        let message = disappearing.process(proposed, previous: previous)
++        let profile = additionalArchiveProfile(account: account, chat: proposed.id.peerId, transaction: transaction)
++        let message = disappearing.process(proposed, previous: previous, profile: profile)
+         guard case .Id(let id) = message.id,
+             let key = additionalMessageKey(account: account, id: id)
+         else { return message }
+-        let profile = AddonSettings.shared.profile(key.account)
++        if let identity = additionalArchivedID(account: account, id: id),
++            (try? DeletedMessageArchive.shared.isPurged(identity)) == true
++        {
++            return message
++        }
+         let allowed = additionalCanArchive(attributes: message.attributes, media: message.media)
+         if !allowed, profile.saveDeleted || profile.saveEditHistory {
+             MessageArchive.shared.exclude(key)
+             disappearing.deleted([id])
+         }
+         if allowed {
+-            if profile.saveDeleted { MessageArchive.shared.observe(key) }
++            if profile.saveEditHistory, let previous,
++                additionalCanArchive(attributes: previous.attributes, media: previous.media)
++            {
++                _ = additionalArchiveSnapshot(
++                    additionalArchiveStored(previous), account: account, transaction: transaction, ifAbsent: true)
++            }
++            if profile.saveDeleted || profile.saveEditHistory,
++                additionalArchiveSnapshot(message, account: account, transaction: transaction)
++            {
++                MessageArchive.shared.observe(key)
++                if MessageArchive.shared.isDeleted(key), let identity = additionalArchivedID(account: account, id: id) {
++                    do { _ = try DeletedMessageArchive.shared.markDeleted(identity) } catch {
++                        DeletedMessageArchive.shared.reportFailure(error)
++                    }
++                }
++            }
+             if profile.saveEditHistory {
+                 if let previous, additionalCanArchive(attributes: previous.attributes, media: previous.media) {
+                     MessageArchive.shared.capture(
+@@ -173,11 +206,29 @@ final class AdditionalMessageProcessor {
+ }
+ 
+ func additionalRetainDeleted(account: PeerId, id: MessageId, transaction: Transaction) -> Bool {
+-    guard AddonSettings.shared.anyRetentionEnabled(), let key = additionalMessageKey(account: account, id: id),
+-        AddonSettings.shared.profile(key.account).saveDeleted, let message = transaction.getMessage(id)
++    guard transaction.messageProcessingSessionActive else { return false }
++    guard let key = additionalMessageKey(account: account, id: id),
++        additionalArchiveProfile(account: account, chat: id.peerId, transaction: transaction).saveDeleted,
++        let message = transaction.getMessage(id)
+     else { return false }
+     if !additionalCanArchive(attributes: message.attributes, media: message.media) {
+         return additionalRetainDisappearingAtExpiry(account: key.account, message: message, transaction: transaction)
+     }
++    guard let identity = additionalArchivedID(account: account, id: id) else { return false }
++    // Backfill a cached legacy message before allowing any destructive remote update.
++    let stored = StoreMessage(
++        id: message.id, customStableId: nil, globallyUniqueId: message.globallyUniqueId,
++        groupingKey: message.groupingKey, threadId: message.threadId, timestamp: message.timestamp,
++        flags: StoreMessageFlags(message.flags), tags: message.tags, globalTags: message.globalTags,
++        localTags: message.localTags, forwardInfo: message.forwardInfo.map(StoreMessageForwardInfo.init),
++        authorId: message.author?.id, text: message.text, attributes: message.attributes, media: message.media)
++    guard additionalArchiveSnapshot(stored, account: account, transaction: transaction) else { return false }
++    do {
++        guard try DeletedMessageArchive.shared.markDeleted(identity) else { return false }
++    } catch {
++        DeletedMessageArchive.shared.reportFailure(error)
++        return false
++    }
++    MessageArchive.shared.observe(key)
+     return MessageArchive.shared.retain(key)
+ }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
+index b2a3f2de..a72a553d 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
+@@ -128,6 +128,7 @@ final class AdditionalPluginActionAdapter: PluginActionAdapter {
+                     correlationId: correlation, bubbleUpEmojiOrStickersets: [])
+                 disposables.add(
+                     enqueueMessages(account: account, peerId: peer, messages: [message]).start(next: { ids in
++                        guard !cancelled.with({ $0 }) else { return }
+                         let localIDs = ids.compactMap { $0 }
+                         _ = pluginOrigins.modify { current in
+                             var current = current
+@@ -141,6 +142,7 @@ final class AdditionalPluginActionAdapter: PluginActionAdapter {
+                         }
+                         disposables.add(
+                             account.pendingMessageManager.pendingMessageStatus(localID).start(next: { status, failure in
++                                guard !cancelled.with({ $0 }) else { return }
+                                 if failure != nil {
+                                     fail("telegramRestriction")
+                                 } else if let status {
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/DeleteMessagesInteractively.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/DeleteMessagesInteractively.swift
+index 54d6699a..8ae58ab4 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/DeleteMessagesInteractively.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/DeleteMessagesInteractively.swift
+@@ -11,6 +11,15 @@ private enum EphemeralDeleteMessageRequest {
+ 
+ func _internal_deleteMessagesInteractively(account: Account, messageIds: [MessageId], type: InteractiveMessagesDeletionType, deleteAllInGroup: Bool = false) -> Signal<Void, NoError> {
+     return account.postbox.transaction { transaction -> [EphemeralDeleteMessageRequest] in
++        var archiveIDs = Set(messageIds)
++        if deleteAllInGroup {
++            for id in messageIds {
++                for message in transaction.getMessageGroup(id) ?? transaction.getMessageForwardedGroup(id) ?? [] {
++                    archiveIDs.insert(message.id)
++                }
++            }
++        }
++        for id in archiveIDs { additionalPurgeArchivedMessage(account: account.peerId, id: id) }
+         var ephemeralRequests: [EphemeralDeleteMessageRequest] = []
+         for messageId in messageIds where messageId.namespace == Namespaces.Message.EphemeralLocal || messageId.namespace == Namespaces.Message.WelcomeMessageCloud {
+             guard let message = transaction.getMessage(messageId), let peer = transaction.getPeer(messageId.peerId), let inputPeer = apiInputPeer(peer), let attribute = message.attributes.first(where: { $0 is EphemeralMessageAttribute }) as? EphemeralMessageAttribute else {
+@@ -173,6 +182,7 @@ func deleteMessagesInteractively(transaction: Transaction, stateManager: Account
+ 
+ func _internal_clearHistoryInRangeInteractively(postbox: Postbox, peerId: PeerId, threadId: Int64?, minTimestamp: Int32, maxTimestamp: Int32, type: InteractiveHistoryClearingType) -> Signal<Void, NoError> {
+     return postbox.transaction { transaction -> Void in
++        if type != .scheduledMessages { additionalPurgeArchiveChat(transaction: transaction, peer: peerId, thread: threadId, minTimestamp: minTimestamp, maxTimestamp: maxTimestamp) }
+         if peerId.namespace == Namespaces.Peer.CloudUser || peerId.namespace == Namespaces.Peer.CloudGroup || peerId.namespace == Namespaces.Peer.CloudChannel {
+             cloudChatAddClearHistoryOperation(transaction: transaction, peerId: peerId, threadId: threadId, explicitTopMessageId: nil, minTimestamp: minTimestamp, maxTimestamp: maxTimestamp, type: CloudChatClearHistoryType(type))
+             if type == .scheduledMessages {
+@@ -206,6 +216,7 @@ func _internal_clearHistoryInRangeInteractively(postbox: Postbox, peerId: PeerId
+ 
+ func _internal_clearHistoryInteractively(postbox: Postbox, peerId: PeerId, threadId: Int64?, type: InteractiveHistoryClearingType) -> Signal<Void, NoError> {
+     return postbox.transaction { transaction -> Void in
++        if type != .scheduledMessages { additionalPurgeArchiveChat(transaction: transaction, peer: peerId, thread: threadId) }
+         if peerId.namespace == Namespaces.Peer.CloudUser || peerId.namespace == Namespaces.Peer.CloudGroup || peerId.namespace == Namespaces.Peer.CloudChannel {
+             cloudChatAddClearHistoryOperation(transaction: transaction, peerId: peerId, threadId: threadId, explicitTopMessageId: nil, minTimestamp: nil, maxTimestamp: nil, type: CloudChatClearHistoryType(type))
+             if type == .scheduledMessages {
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Peers/RemovePeerChat.swift b/submodules/TelegramCore/Sources/TelegramEngine/Peers/RemovePeerChat.swift
+index e833bda0..1fe1d79f 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Peers/RemovePeerChat.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Peers/RemovePeerChat.swift
+@@ -25,6 +25,7 @@ func _internal_terminateSecretChat(transaction: Transaction, peerId: PeerId, req
+ }
+ 
+ func _internal_removePeerChat(account: Account, transaction: Transaction, mediaBox: MediaBox, peerId: PeerId, reportChatSpam: Bool, deleteGloballyIfPossible: Bool) {
++    additionalPurgeArchiveChat(transaction: transaction, peer: peerId)
+     if let _ = transaction.getPeerChatInterfaceState(peerId) {
+         transaction.setPeerChatInterfaceState(peerId, state: nil)
+     }
+diff --git a/submodules/TelegramCore/Tests/AdditionalArchiveTests.swift b/submodules/TelegramCore/Tests/AdditionalArchiveTests.swift
+new file mode 100644
+index 00000000..33467a94
+--- /dev/null
++++ b/submodules/TelegramCore/Tests/AdditionalArchiveTests.swift
+@@ -0,0 +1,86 @@
++import Foundation
++import Postbox
++import SGAdditionalCore
++import XCTest
++
++@testable import TelegramCore
++
++final class AdditionalArchiveTests: XCTestCase {
++    private func archived(
++        version: Int = 1, attributes: [MessageAttribute] = [], forward: AdditionalArchivedPayload.Forward? = nil
++    ) throws -> ArchivedMessage {
++        let encoded = attributes.map { attribute -> Data in
++            let encoder = PostboxEncoder()
++            encoder.encodeRootObject(attribute)
++            return encoder.makeData()
++        }
++        var payload = AdditionalArchivedPayload(
++            attributes: encoded, media: [], peers: [], author: nil,
++            globallyUniqueId: nil, groupingKey: nil, threadId: nil, flags: 0, tags: 0,
++            globalTags: 0, localTags: 0, forward: forward)
++        payload.version = version
++        return ArchivedMessage(
++            id: ArchivedMessageID(account: "77", chat: "channel:42", message: 1),
++            text: "Hello world", timestamp: 100, chatTitle: "Channel", senderTitle: "Sender", kind: .text,
++            payload: try JSONEncoder().encode(payload))
++    }
++
++    func testArchivedEntitiesRemainReadableWithoutPostbox() throws {
++        let message = try archived(attributes: [
++            TextEntitiesMessageAttribute(entities: [
++                MessageTextEntity(range: 0..<5, type: .Bold),
++                MessageTextEntity(range: 6..<11, type: .TextUrl(url: "https://example.com")),
++            ])
++        ])
++        let revision = try additionalArchivedRevision(message)
++        XCTAssertEqual(revision.text, "Hello world")
++        XCTAssertEqual(revision.messageDate, 100)
++        let restored = additionalTextEntities(revision)
++        XCTAssertEqual(restored.count, 2)
++        XCTAssertEqual(restored[0].range, 0..<5)
++        if case .TextUrl(let url) = restored[1].type {
++            XCTAssertEqual(url, "https://example.com")
++        } else {
++            XCTFail("Archived link lost its target")
++        }
++    }
++
++    func testReplyAndAnonymousForwardMetadataSurvivesWithoutLivePeers() throws {
++        let peer = PeerId(namespace: Namespaces.Peer.CloudUser, id: ._internalFromInt64Value(42))
++        let message = try archived(
++            attributes: [
++                ReplyMessageAttribute(
++                    messageId: MessageId(peerId: peer, namespace: Namespaces.Message.Cloud, id: 99),
++                    threadMessageId: nil, quote: nil, isQuote: false, innerSubject: nil)
++            ],
++            forward: .init(
++                author: nil, source: nil, sourcePeer: nil, sourceNamespace: nil,
++                sourceMessage: nil, date: 50, signature: nil, psa: nil, flags: 0))
++        let context = try additionalArchivedContext(message)
++        XCTAssertEqual(context.reply, 99)
++        XCTAssertTrue(context.isForwarded)
++        XCTAssertNil(context.forwardedFrom)
++    }
++
++    func testFutureAndMissingPayloadsFailExplicitly() throws {
++        XCTAssertThrowsError(try additionalArchivedRevision(archived(version: 999)))
++        let missing = ArchivedMessage(
++            id: ArchivedMessageID(account: "77", chat: "user:42", message: 1),
++            text: "Legacy text", timestamp: 0, chatTitle: "Chat", senderTitle: "", kind: .text, payload: Data())
++        XCTAssertThrowsError(try additionalArchivedRevision(missing))
++    }
++
++    func testPluginOriginsAreAccountScopedAndClearable() {
++        let first = PeerId(namespace: Namespaces.Peer.CloudUser, id: ._internalFromInt64Value(77))
++        let second = PeerId(namespace: Namespaces.Peer.CloudUser, id: ._internalFromInt64Value(88))
++        defer {
++            additionalPluginForgetOrigins(account: first)
++            additionalPluginForgetOrigins(account: second)
++        }
++        let correlation = additionalPluginCorrelation(account: first)
++        XCTAssertTrue(additionalPluginIsOrigin(correlation, account: first))
++        XCTAssertFalse(additionalPluginIsOrigin(correlation, account: second))
++        additionalPluginForgetOrigins(account: first)
++        XCTAssertFalse(additionalPluginIsOrigin(correlation, account: first))
++    }
++}

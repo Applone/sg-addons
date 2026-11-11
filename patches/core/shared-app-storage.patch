@@ -1,9 +1,5 @@
-Subject: shared app storage
-Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
-Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
-
 diff --git a/Swiftgram/SGAppGroupIdentifier/BUILD b/Swiftgram/SGAppGroupIdentifier/BUILD
-index cc3e13985c6657cc9569ba3f6f451d0c062b6d9c..ab5fc7e01ac60a9ec3a90cc92145185a5943d445 100644
+index cc3e1398..ab5fc7e0 100644
 --- a/Swiftgram/SGAppGroupIdentifier/BUILD
 +++ b/Swiftgram/SGAppGroupIdentifier/BUILD
 @@ -10,6 +10,7 @@ swift_library(
@@ -16,7 +12,7 @@ index cc3e13985c6657cc9569ba3f6f451d0c062b6d9c..ab5fc7e01ac60a9ec3a90cc92145185a
          "//visibility:public",
 diff --git a/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/BUILD b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/BUILD
 new file mode 100644
-index 0000000000000000000000000000000000000000..2cae5d6d74980508162eb9924e02ab6aa1e2d522
+index 00000000..2cae5d6d
 --- /dev/null
 +++ b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/BUILD
 @@ -0,0 +1,10 @@
@@ -32,7 +28,7 @@ index 0000000000000000000000000000000000000000..2cae5d6d74980508162eb9924e02ab6a
 +)
 diff --git a/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..c9ce49749d2c639feea94ae92d48d517f2ef0109
+index 00000000..c9ce4974
 --- /dev/null
 +++ b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.h
 @@ -0,0 +1,5 @@
@@ -43,7 +39,7 @@ index 0000000000000000000000000000000000000000..c9ce49749d2c639feea94ae92d48d517
 +NS_ASSUME_NONNULL_END
 diff --git a/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.m b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.m
 new file mode 100644
-index 0000000000000000000000000000000000000000..46b46e838f398cc47fff724a282dd51832a459ec
+index 00000000..46b46e83
 --- /dev/null
 +++ b/Swiftgram/SGAppGroupIdentifier/SignedEntitlements/SGSignedEntitlements.m
 @@ -0,0 +1,25 @@
@@ -73,7 +69,7 @@ index 0000000000000000000000000000000000000000..46b46e838f398cc47fff724a282dd518
 +    return [services isKindOfClass:NSArray.class] && [services containsObject:@"CloudKit"] && [containers isKindOfClass:NSArray.class] && [containers count] > 0;
 +}
 diff --git a/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift b/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift
-index 90859ac8046909f5e898e8d3f3dcfd1732a37dca..d8872daf75b1d40cfbab1e9da1d8f7f472a346b3 100644
+index 90859ac8..d8872daf 100644
 --- a/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift
 +++ b/Swiftgram/SGAppGroupIdentifier/Sources/SGAppGroupIdentifier.swift
 @@ -21,11 +21,9 @@ public func sgBaseBundleIdentifier() -> String {
@@ -95,7 +91,7 @@ index 90859ac8046909f5e898e8d3f3dcfd1732a37dca..d8872daf75b1d40cfbab1e9da1d8f7f4
 +public func sgSharedStorageStatus() -> String { SGSharedStorage.resolution.status }
 diff --git a/Swiftgram/SGAppGroupIdentifier/Sources/SGSharedStorage.swift b/Swiftgram/SGAppGroupIdentifier/Sources/SGSharedStorage.swift
 new file mode 100644
-index 0000000000000000000000000000000000000000..7096bdc8ed642553fae6fbc74841233fba0ea6be
+index 00000000..7096bdc8
 --- /dev/null
 +++ b/Swiftgram/SGAppGroupIdentifier/Sources/SGSharedStorage.swift
 @@ -0,0 +1,87 @@
@@ -187,7 +183,7 @@ index 0000000000000000000000000000000000000000..7096bdc8ed642553fae6fbc74841233f
 +    }
 +}
 diff --git a/Swiftgram/SGDBReset/Sources/File.swift b/Swiftgram/SGDBReset/Sources/File.swift
-index 42e661040dc561759b8dcfeee6e0e57632aefe6e..6aae48e2660cf3c5d15c376682ad16c00133f891 100644
+index 42e66104..6aae48e2 100644
 --- a/Swiftgram/SGDBReset/Sources/File.swift
 +++ b/Swiftgram/SGDBReset/Sources/File.swift
 @@ -7,7 +7,7 @@ private let dbResetKey = "sg_db_reset"
@@ -200,7 +196,7 @@ index 42e661040dc561759b8dcfeee6e0e57632aefe6e..6aae48e2660cf3c5d15c376682ad16c0
      }
      return (appGroupUrl.path as NSString).appendingPathComponent("telegram-data")
 diff --git a/Telegram/BUILD b/Telegram/BUILD
-index e90d2c8617f60ad3dd999eb39d39d4eba02da24e..ebe01b2f693d93f247670fb20fccc15cb089b132 100644
+index e90d2c86..ebe01b2f 100644
 --- a/Telegram/BUILD
 +++ b/Telegram/BUILD
 @@ -244,6 +244,7 @@ swift_library(
@@ -276,7 +272,7 @@ index e90d2c8617f60ad3dd999eb39d39d4eba02da24e..ebe01b2f693d93f247670fb20fccc15c
          "//submodules/TelegramVoip:TelegramVoip",
          "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
 diff --git a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
-index 6482ba9bf218f12379039c8de28bd424e89737f6..e965e0c1343da3b1b42b48fb08597209258800c1 100644
+index 6482ba9b..e965e0c1 100644
 --- a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
 +++ b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
 @@ -1,3 +1,4 @@
@@ -296,7 +292,7 @@ index 6482ba9bf218f12379039c8de28bd424e89737f6..e965e0c1343da3b1b42b48fb08597209
          guard let appGroupUrl = maybeAppGroupUrl else {
              self.finishWithError()
 diff --git a/Telegram/NotificationContent/NotificationViewController.swift b/Telegram/NotificationContent/NotificationViewController.swift
-index be6efb0ab6837ee7f7d4a0ef9da6d07c5a064e41..e0e8ae2fba5a6502fcac2fd7671737af6c6027c1 100644
+index be6efb0a..e0e8ae2f 100644
 --- a/Telegram/NotificationContent/NotificationViewController.swift
 +++ b/Telegram/NotificationContent/NotificationViewController.swift
 @@ -1,3 +1,4 @@
@@ -317,7 +313,7 @@ index be6efb0ab6837ee7f7d4a0ef9da6d07c5a064e41..e0e8ae2fba5a6502fcac2fd7671737af
              guard let appGroupUrl = maybeAppGroupUrl else {
                  return
 diff --git a/Telegram/NotificationService/Sources/NotificationService.swift b/Telegram/NotificationService/Sources/NotificationService.swift
-index 9b28ddba98ce271986b858ad3b0f70f87d7e4f15..596a479c0ae4a2b5f8d02927945608279a9a4a59 100644
+index 9b28ddba..596a479c 100644
 --- a/Telegram/NotificationService/Sources/NotificationService.swift
 +++ b/Telegram/NotificationService/Sources/NotificationService.swift
 @@ -853,9 +853,9 @@ private final class NotificationServiceHandler {
@@ -333,7 +329,7 @@ index 9b28ddba98ce271986b858ad3b0f70f87d7e4f15..596a479c0ae4a2b5f8d0292794560827
          guard let appGroupUrl = maybeAppGroupUrl else {
              return nil
 diff --git a/Telegram/Share/ShareRootController.swift b/Telegram/Share/ShareRootController.swift
-index 6a29189e813ddfa80cbffb4806f9accda9d91920..840bc9bcef04b26e65cab1acc73adabf8e1f3e73 100644
+index 6a29189e..840bc9bc 100644
 --- a/Telegram/Share/ShareRootController.swift
 +++ b/Telegram/Share/ShareRootController.swift
 @@ -1,3 +1,4 @@
@@ -361,7 +357,7 @@ index 6a29189e813ddfa80cbffb4806f9accda9d91920..840bc9bcef04b26e65cab1acc73adabf
              }
              
 diff --git a/Telegram/SiriIntents/IntentHandler.swift b/Telegram/SiriIntents/IntentHandler.swift
-index ad4a6f4455b5f1ea877647ae3aa8a3bc6e48743c..41f3e3fb96632db5002445888a41ebf7dc389b56 100644
+index ad4a6f44..41f3e3fb 100644
 --- a/Telegram/SiriIntents/IntentHandler.swift
 +++ b/Telegram/SiriIntents/IntentHandler.swift
 @@ -1,3 +1,4 @@
@@ -393,7 +389,7 @@ index ad4a6f4455b5f1ea877647ae3aa8a3bc6e48743c..41f3e3fb96632db5002445888a41ebf7
          guard let appGroupUrl = maybeAppGroupUrl else {
              return
 diff --git a/Telegram/WidgetKitWidget/TodayViewController.swift b/Telegram/WidgetKitWidget/TodayViewController.swift
-index 118ae440a3036e31342f166fb03bf2f4e6514332..9422a5ffa32ac9815cd1141ce3f745c289734d2f 100644
+index 118ae440..9422a5ff 100644
 --- a/Telegram/WidgetKitWidget/TodayViewController.swift
 +++ b/Telegram/WidgetKitWidget/TodayViewController.swift
 @@ -1,3 +1,4 @@
@@ -414,7 +410,7 @@ index 118ae440a3036e31342f166fb03bf2f4e6514332..9422a5ffa32ac9815cd1141ce3f745c2
      guard let appGroupUrl = maybeAppGroupUrl else {
          completion(Timeline(entries: [SimpleEntry(date: entryDate, contents: .recent)], policy: .atEnd))
 diff --git a/submodules/BuildConfig/BUILD b/submodules/BuildConfig/BUILD
-index 849501f346a027b7c8cffb572787b5d8ac095c85..07e504820aa879e0490b11d31b1af95e9e2b0844 100644
+index 849501f3..07e50482 100644
 --- a/submodules/BuildConfig/BUILD
 +++ b/submodules/BuildConfig/BUILD
 @@ -41,6 +41,7 @@ objc_library(
@@ -426,7 +422,7 @@ index 849501f346a027b7c8cffb572787b5d8ac095c85..07e504820aa879e0490b11d31b1af95e
      visibility = ["//visibility:public"],
  )
 diff --git a/submodules/BuildConfig/Sources/BuildConfig.m b/submodules/BuildConfig/Sources/BuildConfig.m
-index 923d02a705a8708c4d13bc09f8f059188b232919..04084a33f8391f04bedb28169660c94d9f0c8f9d 100644
+index 923d02a7..04084a33 100644
 --- a/submodules/BuildConfig/Sources/BuildConfig.m
 +++ b/submodules/BuildConfig/Sources/BuildConfig.m
 @@ -1,4 +1,5 @@
@@ -445,7 +441,7 @@ index 923d02a705a8708c4d13bc09f8f059188b232919..04084a33f8391f04bedb28169660c94d
  
  - (bool)isSiriEnabled {
 diff --git a/submodules/DebugSettingsUI/BUILD b/submodules/DebugSettingsUI/BUILD
-index 5e0efe5e281cdf48bb83a20efca690e3f20bfecf..f586deb32a84b523cce42092d05ef6fd636b3d07 100644
+index 5e0efe5e..f586deb3 100644
 --- a/submodules/DebugSettingsUI/BUILD
 +++ b/submodules/DebugSettingsUI/BUILD
 @@ -1,6 +1,7 @@
@@ -457,7 +453,7 @@ index 5e0efe5e281cdf48bb83a20efca690e3f20bfecf..f586deb32a84b523cce42092d05ef6fd
      "//Swiftgram/SGLogging:SGLogging",
      "//Swiftgram/SGLoggingComposer:SGLoggingComposer",
 diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
-index 4b2dfae37a3f7de768fc7c8b45c6b73b47c43607..f841dd4f10da89dd4633d1e3b935576f4c1b171b 100644
+index 4b2dfae3..f841dd4f 100644
 --- a/submodules/DebugSettingsUI/Sources/DebugController.swift
 +++ b/submodules/DebugSettingsUI/Sources/DebugController.swift
 @@ -1,3 +1,4 @@
@@ -475,7 +471,7 @@ index 4b2dfae37a3f7de768fc7c8b45c6b73b47c43607..f841dd4f10da89dd4633d1e3b935576f
      var hasLegacyAppData = false
      if let appGroupUrl = maybeAppGroupUrl {
 diff --git a/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift b/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
-index eb3292b0dc3580463bf9167cbcb887eba2083b85..ddd41c34b41eb2b65026aa64b12825023e7ba173 100644
+index eb3292b0..997dbca1 100644
 --- a/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
 +++ b/submodules/LegacyMediaPickerUI/Sources/LegacyICloudFilePicker.swift
 @@ -26,6 +26,7 @@ private class DocumentPickerViewController: UIDocumentPickerViewController {
@@ -522,7 +518,7 @@ index eb3292b0dc3580463bf9167cbcb887eba2083b85..ddd41c34b41eb2b65026aa64b1282502
 +        } catch {
 +            completion([])
 +            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-+                guard let root = controller.view.window?.rootViewController ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap { $0.windows }.first(where: { $0.isKeyWindow })?.rootViewController else { return }
++                guard let root = controller.view.window?.rootViewController ?? UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).flatMap({ $0.windows }).first(where: { $0.isKeyWindow })?.rootViewController else { return }
 +                var presenter = root
 +                while let next = presenter.presentedViewController, !next.isBeingDismissed { presenter = next }
 +                let alert = UIAlertController(title: "Could not import file", message: "Check that the file provider is available and try again. " + error.localizedDescription, preferredStyle: .alert)

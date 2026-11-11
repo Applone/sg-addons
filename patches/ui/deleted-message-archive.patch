@@ -1,0 +1,1261 @@
+diff --git a/Swiftgram/SGSettingsUI/BUILD b/Swiftgram/SGSettingsUI/BUILD
+index aaee9800..319bc28d 100644
+--- a/Swiftgram/SGSettingsUI/BUILD
++++ b/Swiftgram/SGSettingsUI/BUILD
+@@ -1,4 +1,6 @@
+ load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
++load("@build_bazel_rules_apple//apple:ios.bzl", "ios_unit_test")
++load("@build_bazel_rules_apple//apple/testing/default_runner:ios_test_runner.bzl", "ios_test_runner")
+ 
+ filegroup(
+     name = "SGUIAssets",
+@@ -17,6 +19,8 @@ swift_library(
+     ],
+     deps = [
+     "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
++        "//submodules/MediaPlayer:UniversalMediaPlayer",
++        "//submodules/TextFormat:TextFormat",
+         "//Swiftgram/SGItemListUI:SGItemListUI",
+         "//Swiftgram/SGLogging:SGLogging",
+         "//Swiftgram/SGSimpleSettings:SGSimpleSettings",
+@@ -42,3 +46,28 @@ swift_library(
+         "//visibility:public",
+     ],
+ )
++
++swift_library(
++    name = "SGSettingsUITestsLib",
++    testonly = True,
++    srcs = glob(["Tests/**/*.swift"]),
++    deps = [
++        ":SGSettingsUI",
++        "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
++        "//submodules/TextFormat:TextFormat",
++    ],
++)
++
++ios_test_runner(
++    name = "SGSettingsUITestRunner",
++    device_type = "iPhone 17",
++    os_version = "26.5",
++)
++
++ios_unit_test(
++    name = "SGSettingsUITests",
++    minimum_os_version = "15.0",
++    runner = ":SGSettingsUITestRunner",
++    deps = [":SGSettingsUITestsLib"],
++    visibility = ["//visibility:public"],
++)
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift
+new file mode 100644
+index 00000000..da3e1372
+--- /dev/null
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift
+@@ -0,0 +1,748 @@
++import AccountContext
++import Display
++import Foundation
++import QuickLook
++import SGAdditionalCore
++import SGStrings
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import TextFormat
++import UIKit
++import UniformTypeIdentifiers
++import UniversalMediaPlayer
++
++private func archiveTitle(_ key: String, _ context: AccountContext) -> String {
++    i18n("Additional.Archive" + key, context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode })
++}
++
++private func archiveConfirm(_ model: AdditionalForm, action: @escaping () throws -> Void) {
++    let data = model.context.sharedContext.currentPresentationData.with { $0 }
++    let sheet = ActionSheetController(presentationData: data)
++    sheet.setItemGroups([
++        ActionSheetItemGroup(items: [
++            ActionSheetTextItem(title: archiveTitle("PurgeNotice", model.context)),
++            ActionSheetButtonItem(
++                title: data.strings.Common_Delete, color: .destructive,
++                action: { [weak sheet, weak model] in
++                    sheet?.dismissAnimated()
++                    do { try action() } catch { model?.error(error) }
++                }),
++        ]),
++        ActionSheetItemGroup(items: [
++            ActionSheetButtonItem(
++                title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })
++        ]),
++    ])
++    model.controller?.present(sheet, in: .window(.root))
++}
++
++/// Works entirely from archive snapshots, including chats no longer present in Postbox.
++public func additionalDeletedMessagesController(
++    context: AccountContext, account: String? = nil, chat: String? = nil, deletedOnly initialDeletedOnly: Bool = true
++)
++    -> ViewController
++{
++    let account = account ?? additionalAccountKey(context.account.peerId)
++    let model = AdditionalForm(context: context)
++    var deletedOnly = initialDeletedOnly
++    var query = ""
++    var date = ""
++    var kind: ArchivedMessage.Kind?
++    var entries: [ArchivedMessageEntry] = []
++    var next: ArchiveCursor?
++    var generation = 0
++    var loading = false
++    var failure: String?
++    weak var weakModel = model
++    func load(reset: Bool) {
++        guard let model = weakModel else { return }
++        generation += 1
++        let request = generation
++        loading = true
++        failure = nil
++        if reset {
++            entries = []
++            next = nil
++        }
++        let search = query
++        let filter = kind
++        let onlyDeleted = deletedOnly
++        let formatter = DateFormatter()
++        formatter.locale = Locale(identifier: "en_US_POSIX")
++        formatter.timeZone = TimeZone(secondsFromGMT: 0)
++        formatter.dateFormat = "yyyy-MM-dd"
++        formatter.isLenient = false
++        let parsed = date.isEmpty ? nil : formatter.date(from: date)
++        if !date.isEmpty, parsed == nil {
++            loading = false
++            failure = archiveTitle("Date", context)
++            model.refresh()
++            return
++        }
++        let cursor =
++            next
++            ?? parsed.map { ArchiveCursor(observed: Int64($0.timeIntervalSince1970) + 86_400, sequence: Int64.max) }
++        model.refresh()
++        DispatchQueue.global(qos: .utility).async { [weak model] in
++            let result = Result {
++                try DeletedMessageArchive.shared.page(
++                    account: account, chat: chat, search: search, kind: filter, before: cursor, deletedOnly: onlyDeleted
++                )
++            }
++            DispatchQueue.main.async {
++                guard let model, request == generation else { return }
++                loading = false
++                switch result {
++                case .success(let page):
++                    entries += page.entries
++                    next = page.next
++                case .failure(let error): failure = error.localizedDescription
++                }
++                model.refresh()
++            }
++        }
++    }
++    model.entries = { lang in
++        var result = [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .input, title: i18n("Additional.ArchiveSearch", lang), value: query),
++            AdditionalFormEntry(
++                stableId: 1, section: 0, kind: .input, title: i18n("Additional.ArchiveDate", lang), value: date),
++            AdditionalFormEntry(stableId: 2, section: 0, kind: .action, title: i18n("Additional.ArchiveApply", lang)),
++            AdditionalFormEntry(
++                stableId: 3, section: 0, kind: .disclosure, title: i18n("Additional.ArchiveFilter", lang),
++                value: i18n("Additional.ArchiveKind." + (kind?.rawValue ?? "all"), lang)),
++            AdditionalFormEntry(
++                stableId: 4, section: 0, kind: .disclosure, title: i18n("Additional.ArchiveSettings", lang)),
++        ]
++        result.append(
++            .init(
++                stableId: 7, section: 0, kind: .toggle, title: i18n("Additional.ArchiveDeletedOnly", lang),
++                value: deletedOnly ? "1" : "0"))
++        if chat == nil {
++            result.append(
++                .init(stableId: 8, section: 0, kind: .disclosure, title: i18n("Additional.ArchiveChats", lang)))
++        }
++        if let failure { result.append(.init(stableId: 5, section: 1, kind: .notice, title: failure)) }
++        if entries.isEmpty {
++            result.append(
++                .init(
++                    stableId: 6, section: 1, kind: .notice,
++                    title: i18n(loading ? "Additional.ArchiveLoading" : "Additional.ArchiveEmpty", lang)))
++        }
++        for (index, entry) in entries.enumerated() {
++            let message = entry.message
++            let title = [
++                message.chatTitle, message.senderTitle,
++                message.text.isEmpty
++                    ? i18n("Additional.ArchiveKind." + message.kind.rawValue, lang) : String(message.text.prefix(120)),
++            ].filter { !$0.isEmpty }.joined(separator: " · ")
++            result.append(.init(stableId: index + 100, section: 2, kind: .disclosure, title: title))
++        }
++        if next != nil && !loading {
++            result.append(.init(stableId: 10, section: 3, kind: .action, title: i18n("Additional.ArchiveMore", lang)))
++        }
++        return result
++    }
++    model.input = { id, value in
++        if id == 0 {
++            query = value
++        } else if id == 1 {
++            date = value
++        } else if id == 7 {
++            deletedOnly = value == "1"
++            load(reset: true)
++        }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 2 {
++            load(reset: true)
++        } else if id == 3 {
++            let data = context.sharedContext.currentPresentationData.with { $0 }
++            let sheet = ActionSheetController(presentationData: data)
++            let kinds: [ArchivedMessage.Kind?] = [nil] + ArchivedMessage.Kind.allCases.map { Optional($0) }
++            let items = kinds.map { value in
++                ActionSheetButtonItem(
++                    title: i18n("Additional.ArchiveKind." + (value?.rawValue ?? "all"), data.strings.baseLanguageCode),
++                    color: .accent,
++                    action: { [weak sheet] in
++                        sheet?.dismissAnimated()
++                        kind = value
++                        load(reset: true)
++                    })
++            }
++            sheet.setItemGroups([ActionSheetItemGroup(items: items)])
++            model.controller?.present(sheet, in: .window(.root))
++        } else if id == 4 {
++            model.push(additionalArchiveSettingsController(context: context, account: account, chat: chat))
++        } else if id == 8 {
++            model.push(additionalArchiveChatsController(context: context, account: account))
++        } else if id == 10 {
++            load(reset: false)
++        } else if id >= 100, entries.indices.contains(id - 100) {
++            model.push(
++                additionalArchivedMessageController(
++                    context: context, message: entries[id - 100].message, refresh: { load(reset: true) }))
++        }
++    }
++    let controller = model.make(title: archiveTitle("Title", context))
++    load(reset: true)
++    return controller
++}
++
++private func additionalArchivedMessageController(
++    context: AccountContext, message: ArchivedMessage, historical: Bool = false, refresh: @escaping () -> Void
++) -> ViewController {
++    let model = AdditionalForm(context: context)
++    var attachments: [ArchivedAttachment] = []
++    var revisions: [MessageRevision] = []
++    var versions: [ArchivedMessage] = []
++    var revealSpoilers = false
++    var attachmentFailure: String?
++    var loadGeneration = 0
++    model.entries = { lang in
++        let formatter = DateFormatter()
++        formatter.dateStyle = .medium
++        formatter.timeStyle = .medium
++        var result = [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .notice,
++                title: message.chatTitle + "\n" + message.senderTitle + "\n"
++                    + formatter.string(from: Date(timeIntervalSince1970: Double(message.timestamp)))),
++            AdditionalFormEntry(
++                stableId: 1, section: 0, kind: .notice, title: message.text,
++                richText: archiveRichText(
++                    (try? additionalArchivedRevision(message))
++                        ?? MessageRevision(
++                            text: message.text, entities: [], messageDate: Int64(message.timestamp), editDate: nil),
++                    context: context, hideSpoilers: !revealSpoilers)),
++            AdditionalFormEntry(stableId: 2, section: 1, kind: .action, title: i18n("Additional.ArchiveCopy", lang)),
++            AdditionalFormEntry(stableId: 3, section: 1, kind: .action, title: i18n("Additional.ArchivePurge", lang)),
++        ]
++        if historical { result.removeAll { $0.stableId == 3 } }
++        result.append(
++            .init(
++                stableId: 6, section: 1, kind: .toggle, title: i18n("Additional.ArchiveShowSpoilers", lang),
++                value: revealSpoilers ? "1" : "0"))
++        if let details = try? additionalArchivedContext(message) {
++            if let reply = details.reply {
++                result.append(
++                    .init(
++                        stableId: 7, section: 0, kind: .notice,
++                        title: i18n("Additional.ArchiveReply", lang) + ": #" + String(reply)))
++            }
++            if details.isForwarded {
++                result.append(
++                    .init(
++                        stableId: 8, section: 0, kind: .notice,
++                        title: i18n("Additional.ArchiveForward", lang) + ": "
++                            + (details.forwardedFrom ?? i18n("Additional.ArchiveUnknownSender", lang))))
++            }
++        }
++        if message.payload.isEmpty {
++            result.append(
++                .init(stableId: 5, section: 0, kind: .notice, title: i18n("Additional.ArchiveMissingLegacy", lang)))
++        }
++        if let attachmentFailure {
++            result.append(.init(stableId: 4, section: 1, kind: .notice, title: attachmentFailure))
++        }
++        for (index, attachment) in attachments.enumerated() {
++            result.append(
++                .init(
++                    stableId: index + 100, section: 2, kind: .disclosure,
++                    title: i18n("Additional.ArchiveAttachment", lang) + " \(index + 1)",
++                    value: i18n("Additional.ArchiveStatus." + attachment.status, lang)))
++        }
++        for (index, version) in versions.enumerated() {
++            let revision = try? additionalArchivedRevision(version)
++            let time = revision?.editDate ?? Int64(version.timestamp)
++            result.append(
++                .init(
++                    stableId: 20000 + index, section: 4, kind: .disclosure,
++                    title: formatter.string(from: Date(timeIntervalSince1970: Double(time))) + " · "
++                        + i18n("Additional.ArchiveKind." + version.kind.rawValue, lang),
++                    value: String(version.text.prefix(80))))
++        }
++        for (index, revision) in revisions.enumerated() {
++            result.append(
++                .init(
++                    stableId: 10000 + index, section: 3, kind: .notice,
++                    title: revision.text,
++                    richText: archiveRichText(revision, context: context, hideSpoilers: !revealSpoilers)))
++        }
++        return result
++    }
++    model.input = { [weak model] id, value in
++        if id == 6 {
++            revealSpoilers = value == "1"
++            model?.refresh()
++        }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 2 {
++            UIPasteboard.general.string = message.text
++        } else if id == 3 {
++            archiveConfirm(model) {
++                archivePurge(context: context, account: message.id.account, message: message.id) {
++                    [weak model] success in
++                    guard let model else { return }
++                    if success {
++                        refresh()
++                        model.controller?.navigationController?.popViewController(animated: true)
++                    } else {
++                        model.error(SettingsError.invalid(archiveTitle("PurgeFailed", context)))
++                    }
++                }
++            }
++        } else if id >= 20000, versions.indices.contains(id - 20000) {
++            model.push(
++                additionalArchivedMessageController(
++                    context: context, message: versions[id - 20000], historical: true, refresh: refresh))
++        } else if id >= 100, attachments.indices.contains(id - 100), let file = attachments[id - 100].file {
++            let attachment = attachments[id - 100]
++            do {
++                var info = try additionalArchivedAttachmentInfo(message, resource: attachment.resource)
++                if info == nil {
++                    for version in versions {
++                        if let value = try additionalArchivedAttachmentInfo(version, resource: attachment.resource) {
++                            info = value
++                            break
++                        }
++                    }
++                }
++                if info?.kind == .voice {
++                    model.push(additionalArchiveAudioController(context: context, file: file))
++                } else {
++                    let name = info?.filename ?? "file"
++                    let mimeType = info?.mimeType
++                    DispatchQueue.global(qos: .utility).async { [weak model] in
++                        let result = Result { try AdditionalArchivePreview(file: file, name: name, mimeType: mimeType) }
++                        DispatchQueue.main.async {
++                            guard let model, model.controller?.presentedViewController == nil else { return }
++                            switch result {
++                            case .success(let preview):
++                                model.documentDelegate = preview
++                                let controller = QLPreviewController()
++                                controller.dataSource = preview
++                                model.controller?.present(controller, animated: true)
++                            case .failure(let error): model.error(error)
++                            }
++                        }
++                    }
++                }
++            } catch { model.error(error) }
++        }
++    }
++    let controller = model.make(title: archiveTitle("Title", context))
++    if !historical {
++        MessageArchive.shared.history(
++            MessageKey(account: message.id.account, chat: message.id.chat, id: Int64(message.id.message))
++        ) { [weak model] values in
++            revisions = values
++            model?.refresh()
++        }
++    }
++    weak var weakModel = model
++    func loadDetails() {
++        guard let model = weakModel else { return }
++        loadGeneration += 1
++        let generation = loadGeneration
++        DispatchQueue.global(qos: .utility).async { [weak model] in
++            let result = Result {
++                let files = try DeletedMessageArchive.shared.attachments(
++                    account: message.id.account, message: message.id
++                ).filter {
++                    (try? additionalArchivedAttachmentInfo(message, resource: $0.resource)) != nil
++                }
++                let values = historical ? [] : try DeletedMessageArchive.shared.versions(message.id)
++                return (files, values)
++            }
++            DispatchQueue.main.async {
++                guard let model, generation == loadGeneration else { return }
++                switch result {
++                case .success(let values):
++                    attachments = values.0
++                    versions = values.1
++                    attachmentFailure = nil
++                case .failure(let error): attachmentFailure = error.localizedDescription
++                }
++                model.refresh()
++            }
++        }
++    }
++    var reloadScheduled = false
++    model.disposables.add(
++        (archiveAttachmentChanges(account: message.id.account) |> deliverOnMainQueue).start(next: {
++            guard !reloadScheduled else { return }
++            reloadScheduled = true
++            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
++                reloadScheduled = false
++                loadDetails()
++            }
++        }))
++    loadDetails()
++    return controller
++}
++
++private func archiveRichText(_ revision: MessageRevision, context: AccountContext, hideSpoilers: Bool = true)
++    -> NSAttributedString
++{
++    let data = context.sharedContext.currentPresentationData.with { $0 }
++    return additionalArchiveAttributedText(
++        revision, font: UIFont.preferredFont(forTextStyle: .body),
++        textColor: data.theme.list.itemPrimaryTextColor, linkColor: data.theme.list.itemAccentColor,
++        hideSpoilers: hideSpoilers)
++}
++
++func additionalArchiveAttributedText(
++    _ revision: MessageRevision, font: UIFont, textColor: UIColor, linkColor: UIColor, hideSpoilers: Bool
++) -> NSAttributedString {
++    let result = NSMutableAttributedString(
++        string: revision.text, attributes: [.font: font, .foregroundColor: textColor])
++    let units = Array(revision.text.utf16)
++    let entities = revision.entities.filter { entity in
++        guard entity.offset >= 0, entity.length > 0, entity.offset <= units.count,
++            entity.length <= units.count - entity.offset
++        else { return false }
++        return [entity.offset, entity.offset + entity.length].allSatisfy { boundary in
++            boundary == 0 || boundary == units.count || !(0xDC00...0xDFFF).contains(units[boundary])
++        }
++    }
++    for entity in entities {
++        let range = NSRange(location: entity.offset, length: entity.length)
++        switch entity.kind {
++        case "messageEntityBold", "messageEntityItalic":
++            let trait: UIFontDescriptor.SymbolicTraits = entity.kind == "messageEntityBold" ? .traitBold : .traitItalic
++            result.enumerateAttribute(.font, in: range, options: []) { value, span, _ in
++                let current = (value as? UIFont) ?? font
++                if let descriptor = current.fontDescriptor.withSymbolicTraits(
++                    current.fontDescriptor.symbolicTraits.union(trait))
++                {
++                    result.addAttribute(
++                        .font, value: UIFont(descriptor: descriptor, size: current.pointSize), range: span)
++                }
++            }
++        case "messageEntityCode", "messageEntityPre":
++            result.addAttribute(
++                .font, value: UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular), range: range)
++        case "messageEntityUnderline":
++            result.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range)
++        case "messageEntityStrike":
++            result.addAttribute(.strikethroughStyle, value: NSUnderlineStyle.single.rawValue, range: range)
++        case "messageEntityUrl", "messageEntityTextUrl":
++            let target =
++                entity.kind == "messageEntityTextUrl"
++                ? entity.value : (revision.text as NSString).substring(with: range)
++            if let target, URL(string: target)?.scheme != nil {
++                result.addAttribute(
++                    NSAttributedString.Key(rawValue: TelegramTextAttributes.URL), value: target, range: range)
++                result.addAttribute(.foregroundColor, value: linkColor, range: range)
++            }
++        case "messageEntityBlockquote":
++            let paragraph = NSMutableParagraphStyle()
++            paragraph.headIndent = 12
++            paragraph.firstLineHeadIndent = 12
++            result.addAttribute(.paragraphStyle, value: paragraph, range: range)
++        default: break
++        }
++    }
++    if hideSpoilers {
++        for entity in entities where entity.kind == "messageEntitySpoiler" {
++            let range = NSRange(location: entity.offset, length: entity.length)
++            result.replaceCharacters(in: range, with: String(repeating: "•", count: entity.length))
++            result.removeAttribute(NSAttributedString.Key(rawValue: TelegramTextAttributes.URL), range: range)
++        }
++    }
++    return result
++}
++
++private final class AdditionalArchivePreview: NSObject, QLPreviewControllerDataSource {
++    let file: URL
++    private let temporary: TempBoxFile
++    init(file: URL, name: String, mimeType: String?) throws {
++        let candidate = URL(fileURLWithPath: name).pathExtension.lowercased()
++        let inferred = mimeType.flatMap { UTType(mimeType: $0)?.preferredFilenameExtension } ?? "bin"
++        let suffix =
++            !candidate.isEmpty && candidate.count <= 12
++                && candidate.utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) })
++            ? candidate : inferred
++        temporary = TempBox.shared.tempFile(fileName: "preview." + suffix)
++        self.file = URL(fileURLWithPath: temporary.path)
++        super.init()
++        do { try FileManager.default.copyItem(at: file, to: self.file) } catch {
++            TempBox.shared.dispose(temporary)
++            throw error
++        }
++    }
++    deinit { TempBox.shared.dispose(temporary) }
++    func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
++    func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
++        file as NSURL
++    }
++}
++
++public func additionalArchiveSettingsController(context: AccountContext, account: String?, chat: String? = nil)
++    -> ViewController
++{
++    let model = AdditionalForm(context: context)
++    var profile = AddonSettings.shared.profile(account)
++    var quota = String(profile.archive.quotaMiB)
++    var size = String(profile.archive.fileLimitMiB)
++    var days = String(profile.retentionDays)
++    var usage = ""
++    model.entries = { lang in
++        var result = [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .input, title: i18n("Additional.ArchiveQuota", lang), value: quota),
++            AdditionalFormEntry(
++                stableId: 1, section: 0, kind: .input, title: i18n("Additional.ArchiveFileLimit", lang), value: size),
++            AdditionalFormEntry(
++                stableId: 2, section: 0, kind: .input, title: i18n("Additional.Retention", lang), value: days),
++            AdditionalFormEntry(
++                stableId: 3, section: 1, kind: .toggle, title: i18n("Additional.ArchiveBots", lang),
++                value: profile.archive.bots ? "1" : "0"),
++            AdditionalFormEntry(
++                stableId: 4, section: 1, kind: .toggle, title: i18n("Additional.ArchiveMedia", lang),
++                value: profile.archive.media ? "1" : "0"),
++            AdditionalFormEntry(
++                stableId: 5, section: 1, kind: .disclosure, title: i18n("Additional.ArchiveNetwork", lang),
++                value: i18n("Additional.ArchiveNetwork." + profile.archive.network.rawValue, lang)),
++            AdditionalFormEntry(stableId: 6, section: 2, kind: .action, title: i18n("Additional.Save", lang)),
++            AdditionalFormEntry(
++                stableId: 7, section: 2, kind: .notice, title: i18n("Additional.ArchiveUsage", lang) + ": " + usage),
++            AdditionalFormEntry(stableId: 8, section: 2, kind: .action, title: i18n("Additional.ArchivePurge", lang)),
++        ]
++        if let chat {
++            for (index, value) in [
++                profile.archive.chats[chat]?.deleted, profile.archive.chats[chat]?.history,
++                profile.archive.chats[chat]?.media,
++            ].enumerated() {
++                result.append(
++                    .init(
++                        stableId: index + 20, section: 3, kind: .disclosure,
++                        title: i18n("Additional.ArchiveOverride.\(index)", lang),
++                        value: i18n(
++                            "Additional.ArchiveOverride." + (value.map { $0 ? "on" : "off" } ?? "inherit"), lang)))
++            }
++        }
++        if let error = DeletedMessageArchive.shared.status() {
++            result.append(.init(stableId: 9, section: 2, kind: .notice, title: error))
++        }
++        return result
++    }
++    model.input = { id, value in
++        switch id {
++        case 0: quota = value
++        case 1: size = value
++        case 2: days = value
++        case 3: profile.archive.bots = value == "1"
++        case 4: profile.archive.media = value == "1"
++        default: break
++        }
++    }
++    model.action = { [weak model] id in
++        guard let model else { return }
++        if id == 5 {
++            let values: [ArchivePolicy.Network] = [.wifi, .all, .cached]
++            profile.archive.network = values[(values.firstIndex(of: profile.archive.network)! + 1) % values.count]
++            model.refresh()
++        } else if id == 6 {
++            do {
++                guard let quotaValue = Int(quota), let sizeValue = Int(size), let daysValue = Int(days) else {
++                    throw SettingsError.invalid(archiveTitle("InvalidLimits", context))
++                }
++                profile.archive.quotaMiB = quotaValue
++                profile.archive.fileLimitMiB = sizeValue
++                profile.retentionDays = daysValue
++                try AddonSettings.shared.save(profile, account: account)
++                model.controller?.navigationController?.popViewController(animated: true)
++            } catch { model.error(error) }
++        } else if id == 8 {
++            archiveConfirm(model) {
++                archivePurge(
++                    context: context, account: account ?? additionalAccountKey(context.account.peerId), chat: chat
++                ) { [weak model] success in
++                    guard let model else { return }
++                    if success {
++                        usage = archiveTitle("Loading", context)
++                        model.refresh()
++                        let key = account ?? additionalAccountKey(context.account.peerId)
++                        DispatchQueue.global(qos: .utility).async { [weak model] in
++                            let result = Result { try DeletedMessageArchive.shared.storageBytes(account: key) }
++                            DispatchQueue.main.async {
++                                guard let model else { return }
++                                switch result {
++                                case .success(let bytes):
++                                    usage = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
++                                case .failure(let error): usage = error.localizedDescription
++                                }
++                                model.refresh()
++                            }
++                        }
++                    } else {
++                        model.error(SettingsError.invalid(archiveTitle("PurgeFailed", context)))
++                    }
++                }
++            }
++        } else if let chat, (20...22).contains(id) {
++            var value = profile.archive.chats[chat] ?? ArchiveChatOverride()
++            func cycle(_ value: Bool?) -> Bool? { value == nil ? true : value == true ? false : nil }
++            if id == 20 { value.deleted = cycle(value.deleted) }
++            if id == 21 { value.history = cycle(value.history) }
++            if id == 22 { value.media = cycle(value.media) }
++            profile.archive.chats[chat] = value
++            model.refresh()
++        }
++    }
++    let controller = model.make(title: archiveTitle("Settings", context))
++    DispatchQueue.global(qos: .utility).async { [weak model] in
++        let result = Result {
++            let key = account ?? additionalAccountKey(context.account.peerId)
++            let bytes = try DeletedMessageArchive.shared.storageBytes(account: key)
++            let attachments = try DeletedMessageArchive.shared.attachments(account: key)
++            return (
++                bytes, attachments.filter { $0.status == "pending" }.count,
++                attachments.filter { $0.status == "unavailable" || $0.status == "oversized" }.count
++            )
++        }
++        DispatchQueue.main.async {
++            guard let model else { return }
++            switch result {
++            case .success(let values):
++                usage =
++                    ByteCountFormatter.string(fromByteCount: values.0, countStyle: .file)
++                    + "\n\(values.1) " + archiveTitle("Status.pending", context)
++                    + " · \(values.2) " + archiveTitle("Status.unavailable", context)
++            case .failure(let error): usage = error.localizedDescription
++            }
++            model.refresh()
++        }
++    }
++    return controller
++}
++
++private func additionalArchiveChatsController(context: AccountContext, account: String) -> ViewController {
++    let model = AdditionalForm(context: context)
++    var chats: [ArchivedChat] = []
++    var loading = true
++    var error: String?
++    model.entries = { lang in
++        var entries: [AdditionalFormEntry] = []
++        if let error { entries.append(.init(stableId: 0, section: 0, kind: .notice, title: error)) }
++        if chats.isEmpty {
++            entries.append(
++                .init(
++                    stableId: 1, section: 0, kind: .notice,
++                    title: i18n(loading ? "Additional.ArchiveLoading" : "Additional.ArchiveEmpty", lang)))
++        }
++        for (index, chat) in chats.enumerated() {
++            entries.append(
++                .init(
++                    stableId: index + 100, section: 1, kind: .disclosure, title: chat.title,
++                    value: String(chat.messages)))
++        }
++        return entries
++    }
++    model.action = { [weak model] id in
++        guard let model, id >= 100, chats.indices.contains(id - 100) else { return }
++        model.push(
++            additionalDeletedMessagesController(
++                context: context, account: account, chat: chats[id - 100].id, deletedOnly: false))
++    }
++    let controller = model.make(title: archiveTitle("Chats", context))
++    DispatchQueue.global(qos: .utility).async { [weak model] in
++        let result = Result { try DeletedMessageArchive.shared.chats(account: account) }
++        DispatchQueue.main.async {
++            guard let model else { return }
++            loading = false
++            switch result {
++            case .success(let values): chats = values
++            case .failure(let failure): error = failure.localizedDescription
++            }
++            model.refresh()
++        }
++    }
++    return controller
++}
++
++private final class AdditionalArchiveAudio: NSObject {
++    let player: MediaPlayer
++    var subscription: Disposable?
++    init(context: AccountContext, file: URL) {
++        let resource = LocalFileReferenceMediaResource(
++            localFilePath: file.path, randomId: Int64.random(in: Int64.min...Int64.max))
++        player = MediaPlayer(
++            audioSessionManager: context.sharedContext.mediaManager.audioSession, postbox: context.account.postbox,
++            userLocation: .other, userContentType: .other, resourceReference: .standalone(resource: resource),
++            tempFilePath: file.path,
++            streamable: .none, video: false, preferSoftwareDecoding: true, enableSound: true, fetchAutomatically: false,
++            isAudioVideoMessage: true)
++    }
++    deinit {
++        subscription?.dispose()
++        player.pause()
++    }
++}
++
++private func additionalArchiveAudioController(context: AccountContext, file: URL) -> ViewController {
++    let model = AdditionalForm(context: context)
++    let audio = AdditionalArchiveAudio(context: context, file: file)
++    model.documentDelegate = audio
++    var seek = "0"
++    var position = ""
++    model.entries = { lang in
++        [
++            .init(stableId: 0, section: 0, kind: .notice, title: position),
++            .init(stableId: 1, section: 1, kind: .action, title: i18n("Additional.ArchivePlay", lang)),
++            .init(stableId: 2, section: 1, kind: .action, title: i18n("Additional.ArchivePause", lang)),
++            .init(stableId: 3, section: 2, kind: .input, title: i18n("Additional.ArchiveSeek", lang), value: seek),
++            .init(stableId: 4, section: 2, kind: .action, title: i18n("Additional.ArchiveSeek", lang)),
++        ]
++    }
++    model.input = { _, value in seek = value }
++    model.action = { [weak model] id in
++        if id == 1 {
++            audio.player.play()
++        } else if id == 2 {
++            audio.player.pause()
++        } else if id == 4 {
++            guard let seconds = Double(seek), seconds.isFinite, seconds >= 0 else {
++                model?.error(SettingsError.invalid(archiveTitle("Seek", context)))
++                return
++            }
++            audio.player.seek(timestamp: seconds)
++        }
++    }
++    audio.subscription = (audio.player.status |> deliverOnMainQueue).start(next: { [weak model] status in
++        position = String(format: "%.0f / %.0f s", status.timestamp, status.duration)
++        model?.refresh()
++    })
++    return model.make(title: archiveTitle("Kind.voice", context))
++}
++
++private func archivePurge(
++    context: AccountContext, account: String, chat: String? = nil, message: ArchivedMessageID? = nil,
++    completion: @escaping (Bool) -> Void
++) {
++    let _ =
++        (context.sharedContext.activeAccountsWithInfo |> take(1)
++        |> mapToSignal { info -> Signal<Bool, NoError> in
++            guard let selected = info.accounts.first(where: { additionalAccountKey($0.account.peerId) == account })
++            else { return .single(false) }
++            return additionalPurgeArchive(account: selected.account, chat: chat, message: message)
++        } |> deliverOnMainQueue).startStandalone(next: completion)
++}
++
++private func archiveAttachmentChanges(account: String) -> Signal<Void, NoError> {
++    Signal { subscriber in
++        let observer = NotificationCenter.default.addObserver(
++            forName: Notification.Name("SGAArchiveAttachmentChanged"), object: nil, queue: nil
++        ) { notification in
++            if notification.object as? String == account { subscriber.putNext(()) }
++        }
++        return ActionDisposable { NotificationCenter.default.removeObserver(observer) }
++    }
++}
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+index 29d4dffd..72a15ca6 100644
+--- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+@@ -44,7 +44,10 @@ struct AdditionalFormEntry: ItemListNodeEntry {
+     let kind: Kind
+     let title: String
+     var value: String = ""
+-    static func < (lhs: Self, rhs: Self) -> Bool { lhs.stableId < rhs.stableId }
++    var richText: NSAttributedString?
++    static func < (lhs: Self, rhs: Self) -> Bool {
++        lhs.section == rhs.section ? lhs.stableId < rhs.stableId : lhs.section < rhs.section
++    }
+     func item(presentationData: ItemListPresentationData, arguments: Any) -> ListViewItem {
+         let model = arguments as! AdditionalForm
+         switch kind {
+@@ -66,7 +69,12 @@ struct AdditionalFormEntry: ItemListNodeEntry {
+                 presentationData: presentationData, systemStyle: .glass, title: title, label: value, sectionId: section,
+                 style: .blocks, action: { model.action(self.stableId) })
+         case .notice:
+-            return ItemListTextItem(presentationData: presentationData, text: .plain(title), sectionId: section)
++            return ItemListTextItem(
++                presentationData: presentationData,
++                text: richText.map { .custom(context: model.context, string: $0) } ?? .plain(title), sectionId: section,
++                linkAction: { action in
++                    if case .tap(let url) = action { model.context.sharedContext.applicationBindings.openUrl(url) }
++                })
+         }
+     }
+ }
+@@ -78,8 +86,10 @@ final class AdditionalForm {
+     var entries: (String) -> [AdditionalFormEntry] = { _ in [] }
+     var input: (Int, String) -> Void = { _, _ in }
+     var action: (Int) -> Void = { _ in }
++    let disposables = DisposableSet()
+     var documentDelegate: NSObject?
+     init(context: AccountContext) { self.context = context }
++    deinit { disposables.dispose() }
+     func refresh() { revision.set(0) }
+     func error(_ error: Error) {
+         controller?.present(additionalError(context: context, error: error), in: .window(.root))
+@@ -100,7 +110,7 @@ final class AdditionalForm {
+                         backNavigationButton: ItemListBackButton(title: data.strings.Common_Back)),
+                     (
+                         ItemListNodeState(
+-                            presentationData: presentation, entries: entries(data.strings.baseLanguageCode),
++                            presentationData: presentation, entries: entries(data.strings.baseLanguageCode).sorted(),
+                             style: .blocks), self
+                     )
+                 )
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index e7c7ccdf..3111030f 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -143,7 +143,7 @@ private enum SGSliderSetting: String {
+ }
+ 
+ private enum SGDisclosureLink: String {
+-    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
++    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins, additionalArchive, additionalArchiveSettings
+ 
+     case contentSettings
+     case languageSettings
+@@ -192,6 +192,8 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDisappearing, value: profile.saveDisappearing, text: text("saveDisappearing"), enabled: profile.saveDeleted))
+     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalDimDeleted, value: profile.dimDeleted, text: text("dimDeleted"), enabled: true))
+     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveEditHistory, value: profile.saveEditHistory, text: text("saveEditHistory"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalArchive, text: text("ArchiveTitle")))
++    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalArchiveSettings, text: text("ArchiveSettings")))
+     entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalRetention, text: text("Retention")))
+     entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("Clear")))
+     entries.append(.notice(id: id.count, section: .additionalHistory, text: text("HistoryNotice")))
+@@ -795,6 +797,10 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+                 }
+             })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
+             presentControllerImpl?(sheet, nil)
++        case .additionalArchive:
++            pushControllerImpl?(additionalDeletedMessagesController(context: context, account: account))
++        case .additionalArchiveSettings:
++            pushControllerImpl?(additionalArchiveSettingsController(context: context, account: account))
+         case .additionalPlugins:
+             pushControllerImpl?(additionalPluginsController(context: context, account: account))
+         case .additionalDiagnostics:
+diff --git a/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift b/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift
+new file mode 100644
+index 00000000..ef2bfc3d
+--- /dev/null
++++ b/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift
+@@ -0,0 +1,70 @@
++import SGAdditionalCore
++import TextFormat
++import UIKit
++import XCTest
++
++@testable import SGSettingsUI
++
++final class AdditionalArchivePresentationTests: XCTestCase {
++    func testEntryOrderingKeepsPaginationAfterMessages() {
++        let entries: [AdditionalFormEntry] = [
++            .init(stableId: 10, section: 3, kind: .action, title: "More"),
++            .init(stableId: 100, section: 2, kind: .notice, title: "Message"),
++            .init(stableId: 7, section: 0, kind: .toggle, title: "Filter"),
++            .init(stableId: 0, section: 0, kind: .input, title: "Search"),
++            .init(stableId: 5, section: 1, kind: .notice, title: "Status"),
++        ]
++        let sorted = entries.sorted()
++        XCTAssertEqual(sorted.map { $0.stableId }, [0, 7, 5, 100, 10])
++        for index in 1..<sorted.count { XCTAssertTrue(sorted[index - 1] < sorted[index]) }
++    }
++
++    private func render(_ text: String, entities: [RevisionEntity], hideSpoilers: Bool = true) -> NSAttributedString {
++        additionalArchiveAttributedText(
++            MessageRevision(text: text, entities: entities, messageDate: 1, editDate: nil),
++            font: UIFont.systemFont(ofSize: 16), textColor: .black, linkColor: .blue, hideSpoilers: hideSpoilers)
++    }
++
++    func testOverlappingBoldAndItalicArePreserved() {
++        let text = render(
++            "Hello",
++            entities: [
++                .init(kind: "messageEntityBold", offset: 0, length: 5, value: nil),
++                .init(kind: "messageEntityItalic", offset: 0, length: 5, value: nil),
++            ])
++        let font = text.attribute(.font, at: 0, effectiveRange: nil) as? UIFont
++        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.traitBold) == true)
++        XCTAssertTrue(font?.fontDescriptor.symbolicTraits.contains(.traitItalic) == true)
++    }
++
++    func testHiddenSpoilersDoNotExposeAccessibleTextOrLinks() {
++        let source = "https://example.com"
++        let entities: [RevisionEntity] = [
++            .init(kind: "messageEntityUrl", offset: 0, length: source.utf16.count, value: nil),
++            .init(kind: "messageEntitySpoiler", offset: 0, length: source.utf16.count, value: nil),
++        ]
++        let hidden = render(source, entities: entities)
++        XCTAssertFalse(hidden.string.contains("example"))
++        XCTAssertNil(
++            hidden.attribute(NSAttributedString.Key(rawValue: TelegramTextAttributes.URL), at: 0, effectiveRange: nil))
++        let revealed = render(source, entities: entities, hideSpoilers: false)
++        XCTAssertEqual(revealed.string, source)
++        XCTAssertEqual(
++            revealed.attribute(NSAttributedString.Key(rawValue: TelegramTextAttributes.URL), at: 0, effectiveRange: nil)
++                as? String, source)
++    }
++
++    func testSpoilerReplacementPreservesUTF16AndRejectsSplitSurrogates() {
++        let source = "A😀x"
++        let hidden = render(
++            source,
++            entities: [
++                .init(kind: "messageEntitySpoiler", offset: 1, length: 2, value: nil),
++                .init(kind: "messageEntityBold", offset: 2, length: 1, value: nil),
++            ])
++        XCTAssertEqual(hidden.string, "A••x")
++        XCTAssertEqual(hidden.length, source.utf16.count)
++        let font = hidden.attribute(.font, at: 2, effectiveRange: nil) as? UIFont
++        XCTAssertFalse(font?.fontDescriptor.symbolicTraits.contains(.traitBold) == true)
++    }
++}
+diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+index 4ce7f9ea..9fec5da7 100644
+--- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
+@@ -376,3 +376,103 @@
+ "Additional.PluginPermission.editMessages" = "Edit your message text and captions";
+ "Additional.PluginPermission.downloadMedia" = "Download ordinary cloud attachments";
+ "Additional.PluginPermission.sendMedia" = "Send photos, videos, and documents";
++
++"Additional.ArchiveTitle" = "Deleted messages";
++
++"Additional.ArchiveSettings" = "Archive settings";
++
++"Additional.ArchivePurgeNotice" = "Permanently delete archived messages and their saved attachments? History refreshes will not restore them.";
++
++"Additional.ArchiveSearch" = "Search archived text";
++
++"Additional.ArchiveDate" = "Saved before (UTC, YYYY-MM-DD)";
++
++"Additional.ArchiveApply" = "Apply search";
++
++"Additional.ArchiveFilter" = "Message type";
++
++"Additional.ArchiveLoading" = "Loading archive…";
++
++"Additional.ArchiveEmpty" = "No archived deleted messages match these filters.";
++
++"Additional.ArchiveMore" = "Load more";
++
++"Additional.ArchiveCopy" = "Copy text";
++
++"Additional.ArchivePurge" = "Delete from archive";
++
++"Additional.ArchiveAttachment" = "Attachment";
++
++"Additional.ArchiveQuota" = "Archive limit, MiB";
++
++"Additional.ArchiveFileLimit" = "Maximum file size, MiB";
++
++"Additional.ArchiveBots" = "Capture bot dialogs";
++
++"Additional.ArchiveMedia" = "Save attachments";
++
++"Additional.ArchiveNetwork" = "Attachment downloads";
++
++"Additional.ArchiveUsage" = "Archive storage used";
++
++"Additional.ArchiveInvalidLimits" = "Enter valid whole numbers for storage limits and retention.";
++
++"Additional.ArchiveNetwork.wifi" = "Wi-Fi only";
++
++"Additional.ArchiveNetwork.all" = "All networks";
++
++"Additional.ArchiveNetwork.cached" = "Cached files only";
++
++"Additional.ArchiveOverride.0" = "Capture deleted messages in this chat";
++
++"Additional.ArchiveOverride.1" = "Capture edit history in this chat";
++
++"Additional.ArchiveOverride.2" = "Save attachments in this chat";
++
++"Additional.ArchiveOverride.inherit" = "Use account setting";
++
++"Additional.ArchiveOverride.on" = "Enabled";
++
++"Additional.ArchiveOverride.off" = "Disabled";
++
++"Additional.ArchiveStatus.saved" = "Saved on device";
++
++"Additional.ArchiveStatus.pending" = "Waiting for download";
++
++"Additional.ArchiveStatus.unavailable" = "Download unavailable";
++
++"Additional.ArchiveStatus.oversized" = "Exceeds file limit";
++
++"Additional.ArchiveKind.all" = "All types";
++
++"Additional.ArchiveKind.text" = "Text";
++
++"Additional.ArchiveKind.photo" = "Photos";
++
++"Additional.ArchiveKind.video" = "Videos";
++
++"Additional.ArchiveKind.voice" = "Voice messages";
++
++"Additional.ArchiveKind.file" = "Files";
++
++"Additional.ArchiveMissingLegacy" = "The original message is no longer cached. Only previously recorded text, if available, can be shown.";
++
++"Additional.ArchiveChats" = "Captured chats";
++
++"Additional.ArchiveDeletedOnly" = "Show deleted messages only";
++
++"Additional.ArchivePlay" = "Play";
++
++"Additional.ArchivePause" = "Pause";
++
++"Additional.ArchiveSeek" = "Seek to seconds";
++
++"Additional.ArchivePurgeFailed" = "Could not purge the archive. Check that the account is still signed in and archive storage is available.";
++
++"Additional.ArchiveShowSpoilers" = "Show spoilers";
++
++"Additional.ArchiveReply" = "Reply to message";
++
++"Additional.ArchiveForward" = "Forwarded from";
++
++"Additional.ArchiveUnknownSender" = "Unknown sender";
+diff --git a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+index a2d88504..9de1d234 100644
+--- a/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
++++ b/Swiftgram/SGStrings/Strings/ru.lproj/SGLocalizable.strings
+@@ -371,3 +371,103 @@
+ "Additional.PluginPermission.editMessages" = "Редактировать текст и подписи ваших сообщений";
+ "Additional.PluginPermission.downloadMedia" = "Скачивать обычные облачные вложения";
+ "Additional.PluginPermission.sendMedia" = "Отправлять фото, видео и документы";
++
++"Additional.ArchiveTitle" = "Удалённые сообщения";
++
++"Additional.ArchiveSettings" = "Настройки архива";
++
++"Additional.ArchivePurgeNotice" = "Удалить сообщения и вложения из архива навсегда? Обновление истории не восстановит их.";
++
++"Additional.ArchiveSearch" = "Поиск по тексту архива";
++
++"Additional.ArchiveDate" = "Сохранено до (UTC, ГГГГ-ММ-ДД)";
++
++"Additional.ArchiveApply" = "Применить поиск";
++
++"Additional.ArchiveFilter" = "Тип сообщения";
++
++"Additional.ArchiveLoading" = "Загрузка архива…";
++
++"Additional.ArchiveEmpty" = "Нет удалённых сообщений с такими фильтрами.";
++
++"Additional.ArchiveMore" = "Загрузить ещё";
++
++"Additional.ArchiveCopy" = "Скопировать текст";
++
++"Additional.ArchivePurge" = "Удалить из архива";
++
++"Additional.ArchiveAttachment" = "Вложение";
++
++"Additional.ArchiveQuota" = "Лимит архива, МиБ";
++
++"Additional.ArchiveFileLimit" = "Максимальный размер файла, МиБ";
++
++"Additional.ArchiveBots" = "Сохранять диалоги с ботами";
++
++"Additional.ArchiveMedia" = "Сохранять вложения";
++
++"Additional.ArchiveNetwork" = "Загрузка вложений";
++
++"Additional.ArchiveUsage" = "Размер архива";
++
++"Additional.ArchiveInvalidLimits" = "Введите целые числа для лимитов и срока хранения.";
++
++"Additional.ArchiveNetwork.wifi" = "Только Wi-Fi";
++
++"Additional.ArchiveNetwork.all" = "Любая сеть";
++
++"Additional.ArchiveNetwork.cached" = "Только загруженные файлы";
++
++"Additional.ArchiveOverride.0" = "Удалённые сообщения этого чата";
++
++"Additional.ArchiveOverride.1" = "История изменений этого чата";
++
++"Additional.ArchiveOverride.2" = "Вложения этого чата";
++
++"Additional.ArchiveOverride.inherit" = "Как в аккаунте";
++
++"Additional.ArchiveOverride.on" = "Включено";
++
++"Additional.ArchiveOverride.off" = "Выключено";
++
++"Additional.ArchiveStatus.saved" = "Сохранено на устройстве";
++
++"Additional.ArchiveStatus.pending" = "Ожидает загрузки";
++
++"Additional.ArchiveStatus.unavailable" = "Загрузка недоступна";
++
++"Additional.ArchiveStatus.oversized" = "Превышен лимит файла";
++
++"Additional.ArchiveKind.all" = "Все типы";
++
++"Additional.ArchiveKind.text" = "Текст";
++
++"Additional.ArchiveKind.photo" = "Фотографии";
++
++"Additional.ArchiveKind.video" = "Видео";
++
++"Additional.ArchiveKind.voice" = "Голосовые сообщения";
++
++"Additional.ArchiveKind.file" = "Файлы";
++
++"Additional.ArchiveMissingLegacy" = "Исходного сообщения больше нет в кэше. Доступен только ранее записанный текст, если он сохранился.";
++
++"Additional.ArchiveChats" = "Сохранённые чаты";
++
++"Additional.ArchiveDeletedOnly" = "Только удалённые сообщения";
++
++"Additional.ArchivePlay" = "Воспроизвести";
++
++"Additional.ArchivePause" = "Пауза";
++
++"Additional.ArchiveSeek" = "Перейти к секунде";
++
++"Additional.ArchivePurgeFailed" = "Не удалось очистить архив. Проверьте вход в аккаунт и доступность хранилища.";
++
++"Additional.ArchiveShowSpoilers" = "Показать спойлеры";
++
++"Additional.ArchiveReply" = "Ответ на сообщение";
++
++"Additional.ArchiveForward" = "Переслано от";
++
++"Additional.ArchiveUnknownSender" = "Неизвестный отправитель";
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
+index 377b8025..ad51ecc1 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
+@@ -663,7 +663,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+         let dim: Bool
+         if let item, !item.context.account.supplementary, let key = additionalMessageKey(account: item.context.account.peerId, id: item.message.id) {
+             let profile = AddonSettings.shared.profile(key.account)
+-            dim = profile.saveDeleted && profile.dimDeleted && MessageArchive.shared.isDeleted(key)
++            dim = profile.archive.capturesDeleted(chat: key.chat, bot: (item.message.peers[item.message.id.peerId] as? TelegramUser)?.botInfo != nil, enabled: profile.saveDeleted) && profile.dimDeleted && MessageArchive.shared.isDeleted(key)
+         } else { dim = false }
+         if dim {
+             if additionalOriginalAlpha == nil { additionalOriginalAlpha = self.alpha }
+diff --git a/submodules/TelegramUI/Sources/ChatController.swift b/submodules/TelegramUI/Sources/ChatController.swift
+index e008c583..d8b65dbd 100644
+--- a/submodules/TelegramUI/Sources/ChatController.swift
++++ b/submodules/TelegramUI/Sources/ChatController.swift
+@@ -1,3 +1,5 @@
++import SGSettingsUI
++import SGStrings
+ import SGSimpleSettings
+ import Foundation
+ import UIKit
+@@ -6127,6 +6129,13 @@ public final class ChatControllerImpl: TelegramBaseController, ChatController, G
+                     )
+                     |> map { canViewStats -> [ContextMenuItem] in
+                         var items: [ContextMenuItem] = []
++                        if let chat = additionalChatKey(peer.id) {
++                            items.append(.action(ContextMenuActionItem(text: i18n("Additional.ArchiveTitle", strongSelf.presentationData.strings.baseLanguageCode), icon: { _ in nil }, action: { [weak self] _, dismiss in
++                                dismiss(.default)
++                                self?.push(additionalDeletedMessagesController(context: context, chat: chat))
++                            })))
++                        }
++
+                         
+                         let openText = strongSelf.presentationData.strings.Conversation_ContextMenuOpenProfile
+                         items.append(.action(ContextMenuActionItem(text: openText, icon: { theme in
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 85f9ffff..41b63fed 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -1,3 +1,4 @@
++import SGSettingsUI
+ import SGAdditionalCore
+ import SGStrings
+ import SGSimpleSettings // MARK: Swiftgram
+@@ -417,6 +418,8 @@ private func ephemeralReplacementContextMenuItems(chatPresentationInterfaceState
+ 
+         var actions: [ContextMenuItem] = []
+ 
++
++
+         let noAction: ((ContextMenuActionItem.Action) -> Void)? = nil
+         actions.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.Chat_EphemeralMessage_AnchoredInfo, textFont: .small, icon: { _ in return nil }, action: noAction)))
+         actions.append(.separator)
+@@ -969,6 +972,12 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+         let isPremium = accountPeer?.isPremium ?? false
+ 
+         var actions: [ContextMenuItem] = []
++        if let chat = additionalChatKey(message.id.peerId) {
++            actions.append(.action(ContextMenuActionItem(text: i18n("Additional.ArchiveTitle", chatPresentationInterfaceState.strings.baseLanguageCode), icon: { _ in nil }, action: { _, dismiss in
++                dismiss(.default)
++                controllerInteraction.navigationController()?.pushViewController(additionalDeletedMessagesController(context: context, chat: chat))
++            })))
++        }
+ 
+         if isSharedMediaPolls && messages.count == 1 {
+             actions.append(.action(ContextMenuActionItem(text: chatPresentationInterfaceState.strings.SharedMedia_ViewInChat, icon: { theme in
+@@ -2326,12 +2335,12 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+         if isEdited,
+            let key = additionalMessageKey(account: context.account.peerId, id: message.id),
+            additionalCanArchive(attributes: message.attributes, media: message.media),
+-           AddonSettings.shared.profile(key.account).saveEditHistory {
++           AddonSettings.shared.profile(key.account).archive.capturesHistory(chat: key.chat, bot: (message.peers[message.id.peerId] as? TelegramUser)?.botInfo != nil, enabled: AddonSettings.shared.profile(key.account).saveEditHistory) {
+             actions.append(.action(ContextMenuActionItem(text: i18n("Additional.History", chatPresentationInterfaceState.strings.baseLanguageCode), icon: { theme in
+                 UIImage(systemName: "clock.arrow.circlepath")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)
+             }, action: { controller, _ in
+                 controller?.dismiss(completion: {
+-                    guard AddonSettings.shared.profile(key.account).saveEditHistory else { return }
++                    guard AddonSettings.shared.profile(key.account).archive.capturesHistory(chat: key.chat, bot: (message.peers[message.id.peerId] as? TelegramUser)?.botInfo != nil, enabled: AddonSettings.shared.profile(key.account).saveEditHistory) else { return }
+                     controllerInteraction.navigationController()?.pushViewController(AdditionalHistoryController(context: context, message: message, key: key, updatedPresentationData: updatedPresentationData))
+                 })
+             })))

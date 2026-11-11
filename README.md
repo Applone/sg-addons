@@ -33,6 +33,50 @@ and patched in `patches/series` order when preparing a build.
   [plugin SDK and usage guide](PLUGINS.md) and
   [Python example](examples/plugins/uppercase.py). AyuGram Python plugins require porting.
 
+## Local message archive
+
+Enable **Keep deleted messages** under **Additional functions** to capture cloud
+messages observed by this client. **Deleted messages** opens a searchable archive
+from settings or a chat menu, including archived chats no longer available in the
+live chat list. Search supports message-type filters and a saved-before UTC date.
+Recorded edits, copy actions, attachment status, and locally saved file previews
+are available from each archived entry. **Captured chats** lists stored peers
+independently of current membership; turn off **Show deleted messages only** to
+view their other captured messages. Voice attachments use Telegram's local audio
+player with play, pause, and seek controls. Archived details include reply and
+forward metadata. Spoilers stay masked until **Show spoilers** is enabled. Open a
+recorded version to inspect its own media attachments. Attachment status refreshes
+when a download completes.
+
+Archive files live outside Telegram's ordinary cache. Clearing that cache does
+not remove them. Explicit message/chat deletion and archive purge remove the
+corresponding saved content; logout removes the account's archive and legacy
+history. Purge markers prevent a later history refresh from restoring explicitly
+purged entries. Disabling capture preserves already archived content.
+
+The defaults are 30 days, 1 GiB per account, a 100 MiB per-file limit, and downloads
+over Wi-Fi. Cached attachments are copied when available. The oldest archived
+messages are evicted when the quota is exceeded. Archive settings expose these
+limits, attachment download status, bot capture, and per-chat overrides. New
+profiles exclude bot dialogs; existing profiles preserve their previous behavior.
+Timed cloud media still requires **Save disappearing media**. Secret chats are
+excluded. iOS background suspension and unavailable server files can prevent media
+capture.
+
+Legacy metadata is migrated in restartable batches. Cached originals are copied
+when available; entries whose original content is missing are labeled explicitly.
+No message or attachment that the client never received can be recovered.
+
+## Verification
+
+Run `just check` and `just test` after preparing the source tree. The native core
+suite includes archive migration, retention, attachment ownership, purge, and
+session-lifecycle regressions. On an Apple Silicon Mac with the pinned Xcode and
+prepared build submodules, run `just test-apple` with `build/configuration.json` in
+place. It runs the upstream Apple suite, including TelegramCore archive adapter
+and Postbox interception checks. The IPA workflow runs that suite before building the device artifact.
+Linux core tests and Swift syntax checks do not validate iOS UI or signing.
+
 ## Build in CI
 
 1. Add a repository secret named `BUILD_CONFIGURATION_JSON` under
@@ -41,7 +85,9 @@ and patched in `patches/series` order when preparing a build.
 3. Download `sg-addons-unsigned-<run number>` from the run's **Artifacts** section.
    It contains the IPA, dSYMs, and source provenance.
 
-Pushing any tag automatically starts the same build. After a successful tag
+Release tags must match `v` followed by the version in `release-version` (for example,
+`v1.1.2`). Update that manifest before tagging. Tag validation runs before the build.
+Pushing a matching tag automatically starts the same build. After a successful tag
 build, the workflow publishes a GitHub Release for that tag with only
 `Swiftgram.ipa` and `Swiftgram.DSYMs.zip` as assets, plus automatically generated
 release notes. Manual runs on a tag also publish a
@@ -50,8 +96,8 @@ release; manual runs on a branch only upload the Actions artifact.
 For example, to publish a version from the current commit:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.2
+git push origin v1.1.2
 ```
 
 The workflow fetches pinned sources and submodules, applies patches, runs core

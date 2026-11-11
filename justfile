@@ -26,3 +26,9 @@ test-python source_dir="build/source":
 
 test-core source_dir="build/source":
     uv run --frozen bash tools/test-core.sh "{{ source_dir }}"
+
+# Requires the pinned Xcode and prepared build submodules on an Apple Silicon Mac.
+test-apple source_dir="build/source" configuration="build/configuration.json":
+    cd "{{ source_dir }}" && python3 build-system/Make/Make.py test \
+        --configurationPath="{{ absolute_path(configuration) }}" \
+        --xcodeManagedCodesigning --disableProvisioningProfiles --target=Tests/AllTests

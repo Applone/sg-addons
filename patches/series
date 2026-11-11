@@ -6,9 +6,6 @@ build/bazel-architecture-checksums.patch
 build/unsigned-device-builds.patch
 build/objc-entitlement-header.patch
 build/shared-storage-bindings.patch
-build/conditional-closures.patch
-build/settings-alert-import.patch
-build/history-ui-compatibility.patch
 ui/message-history.patch
 core/telegram-ads.patch
 ui/telegram-ads.patch
@@ -16,3 +13,6 @@ core/disappearing-messages.patch
 core/addons.patch
 core/local-saved-tags.patch
 build/python-runtime-ci.patch
+core/reliability-and-formatting.patch
+core/deleted-message-archive.patch
+ui/deleted-message-archive.patch

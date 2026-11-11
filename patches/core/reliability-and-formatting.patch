@@ -1,0 +1,2528 @@
+diff --git a/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift b/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift
+index 04c0d383..440ff1de 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/LocalProfileState.swift
+@@ -3,38 +3,58 @@ import Foundation
+ /// The legacy record is preserved byte-for-byte except for an explicit badge selection.
+ public final class AdditionalLocalProfileState {
+     public static let shared = AdditionalLocalProfileState()
+-    private struct State: Codable { var serverUser: Data?; var badge: Data? }
++    private struct State: Codable {
++        var serverUser: Data?
++        var badge: Data?
++    }
+     private let lock = NSLock()
+     #if TESTING
+-    private let defaults = UserDefaults(suiteName: "app.swiftgram.native-premium.tests.\(ProcessInfo.processInfo.processIdentifier)")!
++        private let defaults = UserDefaults(
++            suiteName: "app.swiftgram.native-premium.tests.\(ProcessInfo.processInfo.processIdentifier)")!
+     #else
+-    private let defaults = UserDefaults(suiteName: "app.swiftgram.ayu-addon")!
++        private let defaults = UserDefaults(suiteName: "app.swiftgram.ayu-addon")!
+     #endif
+     private var accounts: [String: State]
+     private init() {
+-        accounts = defaults.data(forKey: "localPremiumState").flatMap { try? JSONDecoder().decode([String: State].self, from: $0) } ?? [:]
++        accounts =
++            defaults.data(forKey: "localPremiumState").flatMap {
++                try? JSONDecoder().decode([String: State].self, from: $0)
++            } ?? [:]
+     }
+     public func legacyServerUser(account: String) -> Data? {
+-        lock.lock(); defer { lock.unlock() }; return accounts[account]?.serverUser
++        lock.lock()
++        defer { lock.unlock() }
++        return accounts[account]?.serverUser
+     }
+     public func legacyProfileNeedsRestoration(account: String) -> Bool {
+-        lock.lock(); defer { lock.unlock() }
+-        return accounts[account]?.serverUser != nil && !(defaults.stringArray(forKey: "nativeRestoredProfiles") ?? []).contains(account)
++        lock.lock()
++        defer { lock.unlock() }
++        return accounts[account]?.serverUser != nil
++            && !(defaults.stringArray(forKey: "nativeRestoredProfiles") ?? []).contains(account)
+     }
+     public func didRestoreLegacyProfile(account: String) {
+-        lock.lock(); defer { lock.unlock() }
++        lock.lock()
++        defer { lock.unlock() }
+         var values = defaults.stringArray(forKey: "nativeRestoredProfiles") ?? []
+-        if !values.contains(account) { values.append(account); defaults.set(values, forKey: "nativeRestoredProfiles") }
++        if !values.contains(account) {
++            values.append(account)
++            defaults.set(values, forKey: "nativeRestoredProfiles")
++        }
+     }
+     public func badge(account: String) -> Data? {
+-        lock.lock(); defer { lock.unlock() }; return accounts[account]?.badge
++        lock.lock()
++        defer { lock.unlock() }
++        return accounts[account]?.badge
+     }
+     public func select(badge: Data, account: String) {
+         lock.lock()
+-        var state = accounts[account] ?? State(); state.badge = badge
++        var state = accounts[account] ?? State()
++        state.badge = badge
+         accounts[account] = state
+         if let data = try? JSONEncoder().encode(accounts) { defaults.set(data, forKey: "localPremiumState") }
+         lock.unlock()
+-        DispatchQueue.main.async { NotificationCenter.default.post(name: Notification.Name("SGASettingsDidChange"), object: nil) }
++        DispatchQueue.main.async {
++            NotificationCenter.default.post(name: Notification.Name("SGASettingsDidChange"), object: nil)
++        }
+     }
+ }
+diff --git a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+index c7a88f79..8aa242ae 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/MessageArchive.swift
+@@ -5,7 +5,11 @@ public struct MessageKey: Hashable {
+     public let account: String
+     public let chat: String
+     public let id: Int64
+-    public init(account: String, chat: String, id: Int64) { self.account = account; self.chat = chat; self.id = id }
++    public init(account: String, chat: String, id: Int64) {
++        self.account = account
++        self.chat = chat
++        self.id = id
++    }
+ }
+ 
+ // The native Postbox remains the message store. This database records which
+@@ -27,8 +31,13 @@ public final class MessageArchive {
+     private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+ 
+     private init() {
+-        queue.async { self.load(); self.pruneAllHistory() }
+-        settingsObserver = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil) { [weak self] _ in
++        queue.async {
++            self.load()
++            self.pruneAllHistory()
++        }
++        settingsObserver = NotificationCenter.default.addObserver(
++            forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil
++        ) { [weak self] _ in
+             self?.queue.async { [weak self] in self?.pruneAllHistory() }
+         }
+     }
+@@ -41,33 +50,44 @@ public final class MessageArchive {
+         var accounts: [String] = []
+         while sqlite3_step(sql) == SQLITE_ROW { accounts.append(String(cString: sqlite3_column_text(sql, 0))) }
+         sqlite3_finalize(sql)
+-        for account in accounts { pruneHistory(account: account, days: AddonSettings.shared.profile(account).retentionDays, force: true) }
++        for account in accounts {
++            pruneHistory(account: account, days: AddonSettings.shared.profile(account).retentionDays, force: true)
++        }
+     }
+ 
+     private func load() {
+         do {
+             #if TESTING
+-            let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SGA_TEST_DIRECTORY"]!)
++                let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SGA_TEST_DIRECTORY"]!)
+             #else
+-            let root = try FileManager.default.url(for: .applicationSupportDirectory,
+-                in: .userDomainMask, appropriateFor: nil, create: true)
++                let root = try FileManager.default.url(
++                    for: .applicationSupportDirectory,
++                    in: .userDomainMask, appropriateFor: nil, create: true)
+             #endif
+             var directory = root.appendingPathComponent("SwiftgramAyu", isDirectory: true)
+             #if os(iOS)
+-            let attributes: [FileAttributeKey: Any] = [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication]
++                let attributes: [FileAttributeKey: Any] = [
++                    .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
++                ]
+             #else
+-            let attributes: [FileAttributeKey: Any] = [:]
++                let attributes: [FileAttributeKey: Any] = [:]
+             #endif
+-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: attributes)
+-            var values = URLResourceValues(); values.isExcludedFromBackup = true
++            try FileManager.default.createDirectory(
++                at: directory, withIntermediateDirectories: true, attributes: attributes)
++            var values = URLResourceValues()
++            values.isExcludedFromBackup = true
+             try directory.setResourceValues(values)
+-            guard sqlite3_open_v2(directory.appendingPathComponent("messages.sqlite3").path, &db,
+-                SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else {
++            guard
++                sqlite3_open_v2(
++                    directory.appendingPathComponent("messages.sqlite3").path, &db,
++                    SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK
++            else {
+                 throw SettingsError.invalid("Cannot open retained-message metadata.")
+             }
+             sqlite3_busy_timeout(db, 1000)
+             try execute("PRAGMA journal_mode=WAL")
+-            try execute("""
++            try execute(
++                """
+                 CREATE TABLE IF NOT EXISTS messages (
+                   account TEXT NOT NULL, chat TEXT NOT NULL, id INTEGER NOT NULL,
+                   sender TEXT NOT NULL, body TEXT NOT NULL, date INTEGER NOT NULL,
+@@ -75,12 +95,14 @@ public final class MessageArchive {
+                   PRIMARY KEY(account,chat,id))
+                 """)
+             try execute("CREATE INDEX IF NOT EXISTS retained_message_ids ON messages(account,id)")
+-            try execute("""
++            try execute(
++                """
+                 CREATE TABLE IF NOT EXISTS disappearing_media (
+                   account TEXT NOT NULL, chat TEXT NOT NULL, id INTEGER NOT NULL,
+                   resources BLOB NOT NULL, PRIMARY KEY(account,chat,id))
+                 """)
+-            try execute("""
++            try execute(
++                """
+                 CREATE TABLE IF NOT EXISTS revisions (
+                   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                   account TEXT NOT NULL, chat TEXT NOT NULL, id INTEGER NOT NULL,
+@@ -91,9 +113,11 @@ public final class MessageArchive {
+             try execute("CREATE INDEX IF NOT EXISTS revision_expiry ON revisions(account,observed)")
+             guard let sql = statement("SELECT account,chat,id,deleted FROM messages") else { return }
+             defer { sqlite3_finalize(sql) }
+-            lock.lock(); defer { lock.unlock() }
++            lock.lock()
++            defer { lock.unlock() }
+             while sqlite3_step(sql) == SQLITE_ROW {
+-                let key = MessageKey(account: String(cString: sqlite3_column_text(sql, 0)),
++                let key = MessageKey(
++                    account: String(cString: sqlite3_column_text(sql, 0)),
+                     chat: String(cString: sqlite3_column_text(sql, 1)), id: sqlite3_column_int64(sql, 2))
+                 if excluded.contains(key) { continue }
+                 eligible.insert(key)
+@@ -101,7 +125,11 @@ public final class MessageArchive {
+             }
+         } catch { setFailure(error.localizedDescription) }
+     }
+-    private func setFailure(_ value: String) { lock.lock(); failure = value; lock.unlock() }
++    private func setFailure(_ value: String) {
++        lock.lock()
++        failure = value
++        lock.unlock()
++    }
+     private func execute(_ sql: String) throws {
+         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
+             throw SettingsError.invalid("Retained-message metadata could not be updated.")
+@@ -111,7 +139,8 @@ public final class MessageArchive {
+         guard db != nil else { return nil }
+         var sql: OpaquePointer?
+         guard sqlite3_prepare_v2(db, query, -1, &sql, nil) == SQLITE_OK else {
+-            setFailure("Retained-message query failed."); return nil
++            setFailure("Retained-message query failed.")
++            return nil
+         }
+         return sql
+     }
+@@ -120,7 +149,10 @@ public final class MessageArchive {
+     }
+     public func observe(_ key: MessageKey) {
+         lock.lock()
+-        guard !excluded.contains(key), eligible.insert(key).inserted else { lock.unlock(); return }
++        guard !excluded.contains(key), eligible.insert(key).inserted else {
++            lock.unlock()
++            return
++        }
+         pending.insert(key)
+         let schedule = !flushScheduled
+         flushScheduled = true
+@@ -134,36 +166,60 @@ public final class MessageArchive {
+             do {
+                 try execute("BEGIN IMMEDIATE")
+                 defer { if !committed { try? execute("ROLLBACK") } }
+-                guard let metadata = statement("""
+-                    INSERT INTO messages(account,chat,id,sender,body,date,seen,wire)
+-                    VALUES(?,?,?,'','',0,?,zeroblob(0)) ON CONFLICT(account,chat,id) DO NOTHING
+-                    """) else { throw SettingsError.invalid("Preparing disappearing-message metadata failed.") }
++                guard
++                    let metadata = statement(
++                        """
++                        INSERT INTO messages(account,chat,id,sender,body,date,seen,wire)
++                        VALUES(?,?,?,'','',0,?,zeroblob(0)) ON CONFLICT(account,chat,id) DO NOTHING
++                        """)
++                else { throw SettingsError.invalid("Preparing disappearing-message metadata failed.") }
+                 defer { sqlite3_finalize(metadata) }
+                 let data = try JSONEncoder().encode(Array(Set(resources)).sorted())
+-                guard let media = statement("INSERT OR REPLACE INTO disappearing_media(account,chat,id,resources) VALUES(?,?,?,?)")
++                guard
++                    let media = statement(
++                        "INSERT OR REPLACE INTO disappearing_media(account,chat,id,resources) VALUES(?,?,?,?)")
+                 else { throw SettingsError.invalid("Preparing disappearing-media ownership failed.") }
+                 defer { sqlite3_finalize(media) }
+-                bind(metadata, 1, key.account); bind(metadata, 2, key.chat); sqlite3_bind_int64(metadata, 3, key.id)
++                bind(metadata, 1, key.account)
++                bind(metadata, 2, key.chat)
++                sqlite3_bind_int64(metadata, 3, key.id)
+                 sqlite3_bind_int64(metadata, 4, Int64(Date().timeIntervalSince1970))
+-                guard sqlite3_step(metadata) == SQLITE_DONE else { throw SettingsError.invalid("Saving disappearing-message metadata failed.") }
+-                bind(media, 1, key.account); bind(media, 2, key.chat); sqlite3_bind_int64(media, 3, key.id)
++                guard sqlite3_step(metadata) == SQLITE_DONE else {
++                    throw SettingsError.invalid("Saving disappearing-message metadata failed.")
++                }
++                bind(media, 1, key.account)
++                bind(media, 2, key.chat)
++                sqlite3_bind_int64(media, 3, key.id)
+                 _ = data.withUnsafeBytes { sqlite3_bind_blob(media, 4, $0.baseAddress, Int32($0.count), transient) }
+-                guard sqlite3_step(media) == SQLITE_DONE else { throw SettingsError.invalid("Saving disappearing-media ownership failed.") }
++                guard sqlite3_step(media) == SQLITE_DONE else {
++                    throw SettingsError.invalid("Saving disappearing-media ownership failed.")
++                }
+                 try execute("COMMIT")
+                 committed = true
+                 return true
+-            } catch { setFailure(error.localizedDescription); return false }
++            } catch {
++                setFailure(error.localizedDescription)
++                return false
++            }
+         }
+         if success {
+-            lock.lock(); excluded.remove(key); eligible.insert(key); pending.remove(key); lock.unlock()
++            lock.lock()
++            excluded.remove(key)
++            eligible.insert(key)
++            pending.remove(key)
++            lock.unlock()
+         }
+         return success
+     }
+     public func hasDisappearingMedia(_ key: MessageKey) -> Bool {
+         queue.sync {
+-            guard let sql = statement("SELECT 1 FROM disappearing_media WHERE account=? AND chat=? AND id=?") else { return false }
++            guard let sql = statement("SELECT 1 FROM disappearing_media WHERE account=? AND chat=? AND id=?") else {
++                return false
++            }
+             defer { sqlite3_finalize(sql) }
+-            bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++            bind(sql, 1, key.account)
++            bind(sql, 2, key.chat)
++            sqlite3_bind_int64(sql, 3, key.id)
+             return sqlite3_step(sql) == SQLITE_ROW
+         }
+     }
+@@ -184,41 +240,65 @@ public final class MessageArchive {
+     public func forgetDisappearing(_ keys: [MessageKey]) {
+         guard !keys.isEmpty else { return }
+         queue.sync {
+-            guard let sql = statement("DELETE FROM disappearing_media WHERE account=? AND chat=? AND id=?") else { return }
++            guard let sql = statement("DELETE FROM disappearing_media WHERE account=? AND chat=? AND id=?") else {
++                return
++            }
+             defer { sqlite3_finalize(sql) }
+             for key in keys {
+-                sqlite3_reset(sql); sqlite3_clear_bindings(sql)
+-                bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++                sqlite3_reset(sql)
++                sqlite3_clear_bindings(sql)
++                bind(sql, 1, key.account)
++                bind(sql, 2, key.chat)
++                sqlite3_bind_int64(sql, 3, key.id)
+                 if sqlite3_step(sql) != SQLITE_DONE { setFailure("Removing disappearing-media ownership failed.") }
+             }
+         }
+     }
+     public func exclude(_ key: MessageKey) {
+-        lock.lock(); excluded.insert(key); eligible.remove(key); deleted.remove(key); pending.remove(key); lock.unlock()
++        lock.lock()
++        excluded.insert(key)
++        eligible.remove(key)
++        deleted.remove(key)
++        pending.remove(key)
++        lock.unlock()
+         queue.async {
+             for table in ["messages", "revisions", "disappearing_media"] {
+-                guard let sql = self.statement("DELETE FROM \(table) WHERE account=? AND chat=? AND id=?") else { continue }
+-                self.bind(sql, 1, key.account); self.bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++                guard let sql = self.statement("DELETE FROM \(table) WHERE account=? AND chat=? AND id=?") else {
++                    continue
++                }
++                self.bind(sql, 1, key.account)
++                self.bind(sql, 2, key.chat)
++                sqlite3_bind_int64(sql, 3, key.id)
+                 if sqlite3_step(sql) != SQLITE_DONE { self.setFailure("Removing expiring message data failed.") }
+                 sqlite3_finalize(sql)
+             }
+         }
+     }
+     private func flush() {
+-        lock.lock(); let batch = pending; pending.removeAll(keepingCapacity: true); flushScheduled = false; lock.unlock()
++        lock.lock()
++        let batch = pending
++        pending.removeAll(keepingCapacity: true)
++        flushScheduled = false
++        lock.unlock()
+         guard !batch.isEmpty, db != nil else { return }
+         do {
+             try execute("BEGIN IMMEDIATE")
+             defer { try? execute("COMMIT") }
+-            guard let sql = statement("""
+-                INSERT INTO messages(account,chat,id,sender,body,date,seen,wire)
+-                VALUES(?,?,?,'','',0,?,zeroblob(0))
+-                ON CONFLICT(account,chat,id) DO NOTHING
+-                """) else { return }
++            guard
++                let sql = statement(
++                    """
++                    INSERT INTO messages(account,chat,id,sender,body,date,seen,wire)
++                    VALUES(?,?,?,'','',0,?,zeroblob(0))
++                    ON CONFLICT(account,chat,id) DO NOTHING
++                    """)
++            else { return }
+             defer { sqlite3_finalize(sql) }
+             for key in batch {
+-                sqlite3_reset(sql); sqlite3_clear_bindings(sql)
+-                bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++                sqlite3_reset(sql)
++                sqlite3_clear_bindings(sql)
++                bind(sql, 1, key.account)
++                bind(sql, 2, key.chat)
++                sqlite3_bind_int64(sql, 3, key.id)
+                 sqlite3_bind_int64(sql, 4, Int64(Date().timeIntervalSince1970))
+ 
+                 if sqlite3_step(sql) != SQLITE_DONE { setFailure("Saving retained-message metadata failed.") }
+@@ -235,8 +315,10 @@ public final class MessageArchive {
+         let wanted = Set(ids)
+         let channelChat = channel.map { "channel:\($0)" }
+         lock.lock()
+-        let keys = eligible.filter { key in key.account == account && wanted.contains(key.id) &&
+-            (channelChat.map { key.chat == $0 } ?? !key.chat.hasPrefix("channel:")) }
++        let keys = eligible.filter { key in
++            key.account == account && wanted.contains(key.id)
++                && (channelChat.map { key.chat == $0 } ?? !key.chat.hasPrefix("channel:"))
++        }
+         deleted.formUnion(keys)
+         lock.unlock()
+         guard !keys.isEmpty else { return [] }
+@@ -244,12 +326,18 @@ public final class MessageArchive {
+             do {
+                 try self.execute("BEGIN IMMEDIATE")
+                 defer { try? self.execute("COMMIT") }
+-                guard let sql = self.statement("UPDATE messages SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND id=?") else { return }
++                guard
++                    let sql = self.statement(
++                        "UPDATE messages SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND id=?")
++                else { return }
+                 defer { sqlite3_finalize(sql) }
+                 for key in keys {
+-                    sqlite3_reset(sql); sqlite3_clear_bindings(sql)
++                    sqlite3_reset(sql)
++                    sqlite3_clear_bindings(sql)
+                     sqlite3_bind_int64(sql, 1, Int64(Date().timeIntervalSince1970))
+-                    self.bind(sql, 2, key.account); self.bind(sql, 3, key.chat); sqlite3_bind_int64(sql, 4, key.id)
++                    self.bind(sql, 2, key.account)
++                    self.bind(sql, 3, key.chat)
++                    sqlite3_bind_int64(sql, 4, key.id)
+                     if sqlite3_step(sql) != SQLITE_DONE { self.setFailure("Marking a retained message failed.") }
+                 }
+             } catch { self.setFailure(error.localizedDescription) }
+@@ -265,14 +353,21 @@ public final class MessageArchive {
+         guard allowed else { return false }
+         var saved = false
+         queue.sync {
+-            guard let sql = statement("UPDATE messages SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND id=?") else { return }
++            guard
++                let sql = statement(
++                    "UPDATE messages SET deleted=COALESCE(deleted,?) WHERE account=? AND chat=? AND id=?")
++            else { return }
+             defer { sqlite3_finalize(sql) }
+             sqlite3_bind_int64(sql, 1, Int64(Date().timeIntervalSince1970))
+-            bind(sql, 2, key.account); bind(sql, 3, key.chat); sqlite3_bind_int64(sql, 4, key.id)
++            bind(sql, 2, key.account)
++            bind(sql, 3, key.chat)
++            sqlite3_bind_int64(sql, 4, key.id)
+             saved = sqlite3_step(sql) == SQLITE_DONE && sqlite3_changes(db) > 0
+         }
+         guard saved else { return false }
+-        lock.lock(); deleted.insert(key); lock.unlock()
++        lock.lock()
++        deleted.insert(key)
++        lock.unlock()
+         DispatchQueue.main.async { NotificationCenter.default.post(name: .retainedMessagesChanged, object: nil) }
+         return true
+     }
+@@ -281,21 +376,30 @@ public final class MessageArchive {
+     public func synchronize() { queue.sync { flush() } }
+ 
+     public func capture(_ revision: MessageRevision, key: MessageKey, retentionDays: Int) {
+-        lock.lock(); let allowed = !excluded.contains(key); lock.unlock()
++        lock.lock()
++        let allowed = !excluded.contains(key)
++        lock.unlock()
+         guard allowed else { return }
+         queue.async {
+-            self.lock.lock(); let excluded = self.excluded.contains(key); self.lock.unlock()
++            self.lock.lock()
++            let excluded = self.excluded.contains(key)
++            self.lock.unlock()
+             guard !excluded else { return }
+             self.pruneHistory(account: key.account, days: retentionDays)
+             // Compare with the latest snapshot no newer than this observation.
+             // A delayed history response must not replace a newer revision.
+             let previous = self.readHistory(key).last(where: { $0.version <= revision.version })
+             if let previous, previous.text == revision.text && previous.entities == revision.entities { return }
+-            guard let payload = try? JSONEncoder().encode(revision), let sql = self.statement("""
+-                INSERT INTO revisions(account,chat,id,version,observed,payload) VALUES(?,?,?,?,?,?)
+-                """) else { return }
++            guard let payload = try? JSONEncoder().encode(revision),
++                let sql = self.statement(
++                    """
++                    INSERT INTO revisions(account,chat,id,version,observed,payload) VALUES(?,?,?,?,?,?)
++                    """)
++            else { return }
+             defer { sqlite3_finalize(sql) }
+-            self.bind(sql, 1, key.account); self.bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++            self.bind(sql, 1, key.account)
++            self.bind(sql, 2, key.chat)
++            sqlite3_bind_int64(sql, 3, key.id)
+             sqlite3_bind_int64(sql, 4, revision.version)
+             sqlite3_bind_int64(sql, 5, Int64(Date().timeIntervalSince1970))
+             _ = payload.withUnsafeBytes { sqlite3_bind_blob(sql, 6, $0.baseAddress, Int32($0.count), self.transient) }
+@@ -307,14 +411,23 @@ public final class MessageArchive {
+         guard force || now.timeIntervalSince(lastHistoryPrune[account] ?? .distantPast) > 60 else { return }
+         guard let sql = statement("DELETE FROM revisions WHERE account=? AND observed<?") else { return }
+         defer { sqlite3_finalize(sql) }
+-        bind(sql, 1, account); sqlite3_bind_int64(sql, 2, Int64(now.timeIntervalSince1970) - Int64(days) * 86400)
+-        if sqlite3_step(sql) == SQLITE_DONE { lastHistoryPrune[account] = now }
+-        else { setFailure("Expiring message history failed.") }
++        bind(sql, 1, account)
++        sqlite3_bind_int64(sql, 2, Int64(now.timeIntervalSince1970) - Int64(days) * 86400)
++        if sqlite3_step(sql) == SQLITE_DONE {
++            lastHistoryPrune[account] = now
++        } else {
++            setFailure("Expiring message history failed.")
++        }
+     }
+     private func readHistory(_ key: MessageKey) -> [MessageRevision] {
+-        guard let sql = statement("SELECT payload FROM revisions WHERE account=? AND chat=? AND id=? ORDER BY version,sequence") else { return [] }
++        guard
++            let sql = statement(
++                "SELECT payload FROM revisions WHERE account=? AND chat=? AND id=? ORDER BY version,sequence")
++        else { return [] }
+         defer { sqlite3_finalize(sql) }
+-        bind(sql, 1, key.account); bind(sql, 2, key.chat); sqlite3_bind_int64(sql, 3, key.id)
++        bind(sql, 1, key.account)
++        bind(sql, 2, key.chat)
++        sqlite3_bind_int64(sql, 3, key.id)
+         var result: [MessageRevision] = []
+         while sqlite3_step(sql) == SQLITE_ROW {
+             guard let bytes = sqlite3_column_blob(sql, 0) else { continue }
+@@ -325,7 +438,8 @@ public final class MessageArchive {
+     }
+     public func history(_ key: MessageKey, completion: @escaping ([MessageRevision]) -> Void) {
+         queue.async {
+-            self.pruneHistory(account: key.account, days: AddonSettings.shared.profile(key.account).retentionDays, force: true)
++            self.pruneHistory(
++                account: key.account, days: AddonSettings.shared.profile(key.account).retentionDays, force: true)
+             let revisions = self.readHistory(key)
+             DispatchQueue.main.async { completion(revisions) }
+         }
+@@ -333,8 +447,12 @@ public final class MessageArchive {
+     public func clearHistory(account: String?, completion: @escaping (Bool) -> Void) {
+         queue.async {
+             // The default settings page clears all accounts; an account page clears only itself.
+-            guard let sql = self.statement(account == nil ? "DELETE FROM revisions" : "DELETE FROM revisions WHERE account=?") else {
+-                DispatchQueue.main.async { completion(false) }; return
++            guard
++                let sql = self.statement(
++                    account == nil ? "DELETE FROM revisions" : "DELETE FROM revisions WHERE account=?")
++            else {
++                DispatchQueue.main.async { completion(false) }
++                return
+             }
+             if let account { self.bind(sql, 1, account) }
+             let success = sqlite3_step(sql) == SQLITE_DONE
+@@ -343,19 +461,31 @@ public final class MessageArchive {
+         }
+     }
+     #if TESTING
+-    public func pruneHistoryForTesting(account: String, days: Int) { queue.sync { pruneHistory(account: account, days: days, force: true) } }
+-    public func clearHistoryForTesting(account: String) { queue.sync {
+-        guard let sql = statement("DELETE FROM revisions WHERE account=?") else { return }
+-        bind(sql, 1, account); _ = sqlite3_step(sql); sqlite3_finalize(sql)
+-    } }
+-    public func historyForTesting(_ key: MessageKey) -> [MessageRevision] { queue.sync { readHistory(key) } }
++        public func pruneHistoryForTesting(account: String, days: Int) {
++            queue.sync { pruneHistory(account: account, days: days, force: true) }
++        }
++        public func clearHistoryForTesting(account: String) {
++            queue.sync {
++                guard let sql = statement("DELETE FROM revisions WHERE account=?") else { return }
++                bind(sql, 1, account)
++                _ = sqlite3_step(sql)
++                sqlite3_finalize(sql)
++            }
++        }
++        public func historyForTesting(_ key: MessageKey) -> [MessageRevision] { queue.sync { readHistory(key) } }
+     #endif
+     public func isDeleted(_ key: MessageKey) -> Bool {
+-        lock.lock(); defer { lock.unlock() }; return deleted.contains(key)
++        lock.lock()
++        defer { lock.unlock() }
++        return deleted.contains(key)
++    }
++    public func status() -> String? {
++        lock.lock()
++        defer { lock.unlock() }
++        return failure
+     }
+-    public func status() -> String? { lock.lock(); defer { lock.unlock() }; return failure }
+     #if TESTING
+-    public func drain() { queue.sync { flush() } }
++        public func drain() { queue.sync { flush() } }
+     #endif
+ }
+ 
+diff --git a/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift b/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift
+index 30b976a4..43ab8ce3 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/MessageRevision.swift
+@@ -6,7 +6,10 @@ public struct RevisionEntity: Codable, Equatable {
+     public let length: Int
+     public let value: String?
+     public init(kind: String, offset: Int, length: Int, value: String? = nil) {
+-        self.kind = kind; self.offset = offset; self.length = length; self.value = value
++        self.kind = kind
++        self.offset = offset
++        self.length = length
++        self.value = value
+     }
+ }
+ 
+@@ -17,6 +20,9 @@ public struct MessageRevision: Codable, Equatable {
+     public let editDate: Int64?
+     public var version: Int64 { editDate ?? messageDate }
+     public init(text: String, entities: [RevisionEntity], messageDate: Int64, editDate: Int64?) {
+-        self.text = text; self.entities = entities; self.messageDate = messageDate; self.editDate = editDate
++        self.text = text
++        self.entities = entities
++        self.messageDate = messageDate
++        self.editDate = editDate
+     }
+ }
+diff --git a/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift b/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
+index 5b4c8422..ae8182af 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/PluginRegistry.swift
+@@ -398,7 +398,11 @@ public final class PluginRegistry {
+                 var visible = current
+                 if !record.manifest.permissions.contains(.readMessages) { visible.message = nil }
+                 let reply = try PythonPluginRuntime.shared.invoke(
+-                    record, event: visible, callback: hook.callback, marker: pythonRecovery)
++                    record, event: visible, callback: hook.callback, marker: pythonRecovery,
++                    onLoad: { reply in
++                        try self.acceptPythonSettings(reply.settings, id: id, account: current.account)
++                        try self.acceptActions(reply, record: record, account: current.account, allowed: true)
++                    })
+                 let strategy = reply.strategy ?? .default
+                 let replacementText = reply.text
+                 let replacementError = reply.error
+@@ -474,7 +478,11 @@ public final class PluginRegistry {
+             var visible = event
+             if !record.manifest.permissions.contains(.readMessages) { visible.message = nil }
+             let reply = try PythonPluginRuntime.shared.invoke(
+-                record, event: visible, callback: menu.callback, menuID: menu.id, marker: pythonRecovery)
++                record, event: visible, callback: menu.callback, menuID: menu.id, marker: pythonRecovery,
++                onLoad: { reply in
++                    try self.acceptPythonSettings(reply.settings, id: item.pluginID, account: event.account)
++                    try self.acceptActions(reply, record: record, account: event.account, allowed: true)
++                })
+             guard let text = reply.text, text.utf8.count <= 65536 else {
+                 throw SettingsError.invalid("Python menu returned invalid text.")
+             }
+diff --git a/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift b/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
+index 59fda8c9..a2252c02 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/PythonPluginRuntime.swift
+@@ -161,13 +161,14 @@ final class PythonPluginRuntime {
+ 
+     func invoke(
+         _ record: PluginRecord, event: PluginEvent, callback: String, menuID: String? = nil,
+-        marker: URL
++        marker: URL, onLoad: (PythonPluginReply) throws -> Void
+     ) throws -> PythonPluginReply {
+         stateLock.lock()
+         let loaded = loadedScopes.contains(scope(record, account: event.account, marker: marker))
+         stateLock.unlock()
+         let bootstrap = loaded ? nil : try load(record, account: event.account, marker: marker)
+-        var reply = try request(
++        if let bootstrap { try onLoad(bootstrap) }
++        let reply = try request(
+             Request(
+                 operation: menuID == nil ? "hook" : "menu", id: record.manifest.id,
+                 account: event.account, source: record.manifest.pythonSource,
+@@ -176,7 +177,6 @@ final class PythonPluginRuntime {
+                 dependencyPath: dependencyDirectory(record, marker: marker)?.path,
+                 scope: scope(record, account: event.account, marker: marker),
+                 dataDirectory: try dataDirectory(record, account: event.account, marker: marker)), marker: marker)
+-        reply.actions = (bootstrap?.actions ?? []) + (reply.actions ?? [])
+         return reply
+     }
+ 
+diff --git a/Swiftgram/SGAdditionalCore/Sources/Settings.swift b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+index cd31ea77..ab072b35 100644
+--- a/Swiftgram/SGAdditionalCore/Sources/Settings.swift
++++ b/Swiftgram/SGAdditionalCore/Sources/Settings.swift
+@@ -39,9 +39,10 @@ public struct FilterRule: Codable, Equatable {
+         if mode == "regex" { _ = try NSRegularExpression(pattern: pattern) }
+         for peer in chats + excludeChats + users {
+             guard let kind = peer.split(separator: ":").first,
+-                  ["user", "chat", "channel"].contains(String(kind)),
+-                  peer.split(separator: ":").count == 2,
+-                  let id = Int64(peer.split(separator: ":")[1]), id > 0 else {
++                ["user", "chat", "channel"].contains(String(kind)),
++                peer.split(separator: ":").count == 2,
++                let id = Int64(peer.split(separator: ":")[1]), id > 0
++            else {
+                 throw SettingsError.invalid("Peer IDs use user:123, chat:123, or channel:123.")
+             }
+         }
+@@ -50,7 +51,10 @@ public struct FilterRule: Codable, Equatable {
+ 
+ public enum SettingsError: LocalizedError {
+     case invalid(String)
+-    public var errorDescription: String? { if case let .invalid(text) = self { return text }; return nil }
++    public var errorDescription: String? {
++        if case .invalid(let text) = self { return text }
++        return nil
++    }
+ }
+ 
+ public struct AddonProfile: Codable {
+@@ -74,7 +78,8 @@ public struct AddonProfile: Codable {
+     public init() {}
+     private enum CodingKeys: String, CodingKey {
+         case ghostEnabled, hideRead, hideStories, hideOnline, hideTyping, hideUpload
+-        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium, saveEditHistory, blockAds, saveDisappearing
++        case ghostExceptions, saveDeleted, dimDeleted, retentionDays, filtersEnabled, filters, localPremium,
++            saveEditHistory, blockAds, saveDisappearing
+     }
+     public init(from decoder: Decoder) throws {
+         let values = try decoder.container(keyedBy: CodingKeys.self)
+@@ -116,9 +121,10 @@ public final class AddonSettings {
+     public static let shared = AddonSettings()
+     private let lock = NSLock()
+     #if TESTING
+-    private let defaults = UserDefaults(suiteName: "app.swiftgram.functions.tests.\(ProcessInfo.processInfo.processIdentifier)")!
++        private let defaults = UserDefaults(
++            suiteName: "app.swiftgram.functions.tests.\(ProcessInfo.processInfo.processIdentifier)")!
+     #else
+-    private let defaults = UserDefaults(suiteName: "app.swiftgram.ayu-addon")!
++        private let defaults = UserDefaults(suiteName: "app.swiftgram.ayu-addon")!
+     #endif
+     private var profiles: [String: AddonProfile]
+     private var revision = 0
+@@ -126,26 +132,48 @@ public final class AddonSettings {
+     private var retaining = false
+ 
+     private init() {
+-        profiles = defaults.data(forKey: "profiles").flatMap {
+-            try? JSONDecoder().decode([String: AddonProfile].self, from: $0)
+-        } ?? [:]
++        profiles =
++            defaults.data(forKey: "profiles").flatMap {
++                try? JSONDecoder().decode([String: AddonProfile].self, from: $0)
++            } ?? [:]
+         updateEnabled()
+     }
+     private func updateEnabled() {
+-        enabled = profiles.values.contains { $0.ghostEnabled || $0.saveDeleted || $0.filtersEnabled || $0.localPremium || $0.saveEditHistory || $0.blockAds }
++        enabled = profiles.values.contains {
++            $0.ghostEnabled || $0.saveDeleted || $0.filtersEnabled || $0.localPremium || $0.saveEditHistory
++                || $0.blockAds
++        }
+         retaining = profiles.values.contains(where: \.saveDeleted)
+     }
+-    public func anyEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return enabled }
+-    public func anyHistoryEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return profiles.values.contains(where: \.saveEditHistory) }
+-    public func anyRetentionEnabled() -> Bool { lock.lock(); defer { lock.unlock() }; return retaining }
++    public func anyEnabled() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        return enabled
++    }
++    public func anyHistoryEnabled() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        return profiles.values.contains(where: \.saveEditHistory)
++    }
++    public func anyRetentionEnabled() -> Bool {
++        lock.lock()
++        defer { lock.unlock() }
++        return retaining
++    }
+     public func profile(_ account: String?) -> AddonProfile {
+-        lock.lock(); defer { lock.unlock() }
++        lock.lock()
++        defer { lock.unlock() }
+         return profiles[account ?? "default"] ?? profiles["default"] ?? AddonProfile()
+     }
+-    public func version() -> Int { lock.lock(); defer { lock.unlock() }; return revision }
++    public func version() -> Int {
++        lock.lock()
++        defer { lock.unlock() }
++        return revision
++    }
+     public func save(_ profile: AddonProfile, account: String?) throws {
+         try profile.validate()
+-        lock.lock(); defer { lock.unlock() }
++        lock.lock()
++        defer { lock.unlock() }
+         var next = profiles
+         next[account ?? "default"] = profile
+         let bytes = try JSONEncoder().encode(next)
+@@ -158,7 +186,8 @@ public final class AddonSettings {
+         }
+     }
+     public func accounts() -> [String] {
+-        lock.lock(); defer { lock.unlock() }
++        lock.lock()
++        defer { lock.unlock() }
+         return profiles.keys.filter { $0 != "default" }.sorted()
+     }
+ }
+@@ -170,7 +199,8 @@ public final class CompiledFilters {
+     private var rules: [(FilterRule, NSRegularExpression?)] = []
+ 
+     // Called under the engine's serial lock. Regex objects are reused per revision.
+-    public func matches(text: String, chat: String, authors: [String], profile: AddonProfile, account: String?) -> Bool {
++    public func matches(text: String, chat: String, authors: [String], profile: AddonProfile, account: String?) -> Bool
++    {
+         guard profile.filtersEnabled else { return false }
+         let currentVersion = AddonSettings.shared.version()
+         if version != currentVersion || self.account != account {
+@@ -183,8 +213,11 @@ public final class CompiledFilters {
+                 case "word": pattern = "\\b" + NSRegularExpression.escapedPattern(for: rule.pattern) + "\\b"
+                 default: pattern = NSRegularExpression.escapedPattern(for: rule.pattern)
+                 }
+-                let regex = rule.pattern.isEmpty ? nil : try? NSRegularExpression(
+-                    pattern: pattern, options: rule.caseSensitive ? [] : [.caseInsensitive])
++                let regex =
++                    rule.pattern.isEmpty
++                    ? nil
++                    : try? NSRegularExpression(
++                        pattern: pattern, options: rule.caseSensitive ? [] : [.caseInsensitive])
+                 return (rule, regex)
+             }
+         }
+@@ -198,7 +231,8 @@ public final class CompiledFilters {
+             var found = false
+             var timedOut = false
+             let started = Date()
+-            regex?.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(text.startIndex..., in: text)) { match, _, stop in
++            regex?.enumerateMatches(in: text, options: [.reportProgress], range: NSRange(text.startIndex..., in: text))
++            { match, _, stop in
+                 if Date() > deadline || Date().timeIntervalSince(started) > 0.02 {
+                     timedOut = true
+                     stop.pointee = true
+diff --git a/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift b/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift
+index 9a88ad8a..41cbece9 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/AdsChecks.swift
+@@ -3,14 +3,17 @@ import Foundation
+ enum AdsChecks {
+     static func run(defaults: UserDefaults) throws {
+         CheckCore.require(!AddonProfile().blockAds, "ad blocking is opt-in")
+-        let legacy = try JSONDecoder().decode(AddonProfile.self, from: Data(#"{"ghostEnabled":true,"localPremium":true}"#.utf8))
+-        CheckCore.require(legacy.ghostEnabled && legacy.localPremium && !legacy.blockAds, "legacy profiles preserve settings without enabling ad blocking")
++        let legacy = try JSONDecoder().decode(
++            AddonProfile.self, from: Data(#"{"ghostEnabled":true,"localPremium":true}"#.utf8))
++        CheckCore.require(
++            legacy.ghostEnabled && legacy.localPremium && !legacy.blockAds,
++            "legacy profiles preserve settings without enabling ad blocking")
+         let empty = try JSONDecoder().decode(AddonProfile.self, from: Data("{}".utf8))
+         CheckCore.require(!empty.blockAds, "missing ad-blocking setting uses the default")
+         do {
+             _ = try JSONDecoder().decode(AddonProfile.self, from: Data(#"{"blockAds":"true"}"#.utf8))
+             fatalError("invalid ad-blocking setting accepted")
+-        } catch { }
++        } catch {}
+ 
+         var blocked = AddonProfile()
+         blocked.blockAds = true
+@@ -34,24 +37,31 @@ enum AdsChecks {
+         try settings.save(blocked, account: nil)
+         CheckCore.require(AdditionalAds.suppress(account: "99101"), "ad blocking inherits the default profile")
+         CheckCore.require(settings.anyEnabled(), "ad blocking alone enables the addon")
+-        CheckCore.require(!settings.anyHistoryEnabled() && !settings.anyRetentionEnabled(), "ad blocking does not enable message archiving")
++        CheckCore.require(
++            !settings.anyHistoryEnabled() && !settings.anyRetentionEnabled(),
++            "ad blocking does not enable message archiving")
+         try settings.save(AddonProfile(), account: "99102")
+         CheckCore.require(!AdditionalAds.suppress(account: "99102"), "account override can allow ads")
+ 
+         try settings.save(AddonProfile(), account: nil)
+-        CheckCore.require(!AdditionalAds.suppress(account: "99101"), "disabling default ad blocking takes effect immediately")
++        CheckCore.require(
++            !AdditionalAds.suppress(account: "99101"), "disabling default ad blocking takes effect immediately")
+         try settings.save(blocked, account: "99101")
+         CheckCore.require(AdditionalAds.suppress(account: "99101"), "account override can block ads")
+         CheckCore.require(!AdditionalAds.suppress(account: "99102"), "ad blocking is isolated between accounts")
+         CheckCore.require(settings.anyEnabled(), "account-only ad blocking enables the addon")
+         let persisted = try JSONDecoder().decode([String: AddonProfile].self, from: defaults.data(forKey: "profiles")!)
+-        CheckCore.require(persisted["99101"]?.blockAds == true && persisted["99102"]?.blockAds == false, "ad-blocking overrides are persisted independently")
++        CheckCore.require(
++            persisted["99101"]?.blockAds == true && persisted["99102"]?.blockAds == false,
++            "ad-blocking overrides are persisted independently")
+ 
+         blocked.ghostEnabled = true
+         blocked.ghostExceptions = ["user:42"]
+         try settings.save(blocked, account: "99101")
+         CheckCore.require(AdditionalAds.suppress(account: "99101"), "ghost-mode exceptions do not disable ad blocking")
+         try settings.save(AddonProfile(), account: "99101")
+-        CheckCore.require(!AdditionalAds.suppress(account: "99101") && !settings.anyEnabled(), "disabling ad blocking restores ads without restarting")
++        CheckCore.require(
++            !AdditionalAds.suppress(account: "99101") && !settings.anyEnabled(),
++            "disabling ad blocking restores ads without restarting")
+     }
+ }
+diff --git a/Swiftgram/SGAdditionalCore/Tests/History.swift b/Swiftgram/SGAdditionalCore/Tests/History.swift
+index 31e3982b..77c9ec93 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/History.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/History.swift
+@@ -16,7 +16,9 @@ enum HistoryChecks {
+         archive.capture(edit, key: key, retentionDays: 30)
+         archive.capture(intermediate, key: key, retentionDays: 30)
+         archive.capture(original, key: key, retentionDays: 30)
+-        CheckCore.require(archive.historyForTesting(key) == [original, intermediate, edit], "ordered, deduplicated revisions; stale fetch cannot replace latest")
++        CheckCore.require(
++            archive.historyForTesting(key) == [original, intermediate, edit],
++            "ordered, deduplicated revisions; stale fetch cannot replace latest")
+         archive.capture(original, key: otherAccount, retentionDays: 30)
+         archive.capture(edit, key: otherChat, retentionDays: 30)
+         CheckCore.require(archive.historyForTesting(otherAccount) == [original], "revision account isolation")
+@@ -26,15 +28,24 @@ enum HistoryChecks {
+         CheckCore.require(archive.historyForTesting(key).last == formatEdit, "formatting-only edit is retained")
+         let sameSecondA = MessageRevision(text: "A", entities: [], messageDate: 100, editDate: 122)
+         let sameSecondB = MessageRevision(text: "B", entities: [], messageDate: 100, editDate: 122)
+-        for revision in [sameSecondA, sameSecondB, sameSecondA, sameSecondB] { archive.capture(revision, key: key, retentionDays: 30) }
+-        CheckCore.require(Array(archive.historyForTesting(key).suffix(4)) == [sameSecondA, sameSecondB, sameSecondA, sameSecondB], "repeated text edits within one second preserve reversions")
++        for revision in [sameSecondA, sameSecondB, sameSecondA, sameSecondB] {
++            archive.capture(revision, key: key, retentionDays: 30)
++        }
++        CheckCore.require(
++            Array(archive.historyForTesting(key).suffix(4)) == [sameSecondA, sameSecondB, sameSecondA, sameSecondB],
++            "repeated text edits within one second preserve reversions")
+         archive.exclude(key)
+         archive.capture(edit, key: key, retentionDays: 30)
+-        CheckCore.require(archive.historyForTesting(key).isEmpty, "TTL exclusion purges revisions and blocks future captures")
++        CheckCore.require(
++            archive.historyForTesting(key).isEmpty, "TTL exclusion purges revisions and blocks future captures")
+ 
+         var db: OpaquePointer?
+-        CheckCore.require(sqlite3_open(root.appendingPathComponent("SwiftgramAyu/messages.sqlite3").path, &db) == SQLITE_OK, "history persisted database")
+-        CheckCore.require(sqlite3_exec(db, "UPDATE revisions SET observed=1 WHERE account='88'", nil, nil, nil) == SQLITE_OK, "expiry fixture")
++        CheckCore.require(
++            sqlite3_open(root.appendingPathComponent("SwiftgramAyu/messages.sqlite3").path, &db) == SQLITE_OK,
++            "history persisted database")
++        CheckCore.require(
++            sqlite3_exec(db, "UPDATE revisions SET observed=1 WHERE account='88'", nil, nil, nil) == SQLITE_OK,
++            "expiry fixture")
+         sqlite3_close(db)
+         archive.pruneHistoryForTesting(account: "88", days: 30)
+         CheckCore.require(archive.historyForTesting(otherAccount).isEmpty, "revision expiry is persisted")
+diff --git a/Swiftgram/SGAdditionalCore/Tests/Main.swift b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+index d52d4732..ddef278c 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/Main.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/Main.swift
+@@ -1,8 +1,9 @@
+ import Foundation
++
+ #if os(Linux)
+-import Glibc
++    import Glibc
+ #else
+-import Darwin
++    import Darwin
+ #endif
+ 
+ struct CheckCore {
+@@ -13,7 +14,8 @@ struct CheckCore {
+ 
+ @main struct NativeCoreChecks {
+     static func main() throws {
+-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("swiftgram-native-tests-" + UUID().uuidString)
++        let root = FileManager.default.temporaryDirectory.appendingPathComponent(
++            "swiftgram-native-tests-" + UUID().uuidString)
+         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+         setenv("SGA_TEST_DIRECTORY", root.path, 1)
+         defer { try? FileManager.default.removeItem(at: root) }
+@@ -22,16 +24,21 @@ struct CheckCore {
+         defaults.removePersistentDomain(forName: suite)
+         defer { defaults.removePersistentDomain(forName: suite) }
+         // Fixtures use the old suite keys and Codable shape.
+-        defaults.set(Data(#"{"default":{"ghostEnabled":true,"hideRead":true,"saveEditHistory":true},"88":{"ghostEnabled":false}}"#.utf8), forKey: "profiles")
++        defaults.set(
++            Data(
++                #"{"default":{"ghostEnabled":true,"hideRead":true,"saveEditHistory":true},"88":{"ghostEnabled":false}}"#
++                    .utf8), forKey: "profiles")
+         CheckCore.require(AddonSettings.shared.profile("77").ghostEnabled, "legacy default profile")
+         CheckCore.require(!AddonSettings.shared.profile("88").ghostEnabled, "legacy account override")
+         CheckCore.require(AdditionalPrivacy.suppress(.read, account: "77", chat: "user:42"), "hide reads")
+-        CheckCore.require(!AdditionalPrivacy.suppress(.read, account: "88", chat: "user:42"), "privacy account isolation")
++        CheckCore.require(
++            !AdditionalPrivacy.suppress(.read, account: "88", chat: "user:42"), "privacy account isolation")
+         var profile = AddonSettings.shared.profile("77")
+         profile.ghostExceptions = ["user:42"]
+         try AddonSettings.shared.save(profile, account: "77")
+         CheckCore.require(!AdditionalPrivacy.suppress(.read, account: "77", chat: "user:42"), "chat exception")
+-        CheckCore.require(AdditionalPrivacy.suppress(.online, account: "77", chat: "user:42"), "online applies to account")
++        CheckCore.require(
++            AdditionalPrivacy.suppress(.online, account: "77", chat: "user:42"), "online applies to account")
+         CheckCore.require(!AdditionalPrivacy.suppress(.cancel, account: "77"), "cancel is transmitted")
+         try LocalSavedTagChecks.run()
+         try AdsChecks.run(defaults: defaults)
+@@ -43,28 +50,43 @@ struct CheckCore {
+         CheckCore.require(!MessageArchive.shared.retain(other), "typed retention never collides across chats")
+         MessageArchive.shared.exclude(key)
+         CheckCore.require(!MessageArchive.shared.retain(key), "TTL exclusion overrides retention")
+-        var rule = FilterRule(); rule.pattern = "spam"; rule.chats = ["user:42"]
+-        profile.filters = [rule]; profile.filtersEnabled = true
++        var rule = FilterRule()
++        rule.pattern = "spam"
++        rule.chats = ["user:42"]
++        profile.filters = [rule]
++        profile.filtersEnabled = true
+         let filters = CompiledFilters()
+-        CheckCore.require(filters.matches(text: "SPAM", chat: "user:42", authors: [], profile: profile, account: "77"), "legacy filter semantics")
+-        CheckCore.require(!filters.matches(text: "spam", chat: "channel:42", authors: [], profile: profile, account: "77"), "filter chat namespace")
+-        rule.mode = "regex"; rule.pattern = "["
+-        do { try rule.validate(); fatalError("invalid regex accepted") } catch { }
++        CheckCore.require(
++            filters.matches(text: "SPAM", chat: "user:42", authors: [], profile: profile, account: "77"),
++            "legacy filter semantics")
++        CheckCore.require(
++            !filters.matches(text: "spam", chat: "channel:42", authors: [], profile: profile, account: "77"),
++            "filter chat namespace")
++        rule.mode = "regex"
++        rule.pattern = "["
++        do {
++            try rule.validate()
++            fatalError("invalid regex accepted")
++        } catch {}
+         let premiumSuite = "app.swiftgram.native-premium.tests.\(ProcessInfo.processInfo.processIdentifier)"
+         let premiumDefaults = UserDefaults(suiteName: premiumSuite)!
+         premiumDefaults.removePersistentDomain(forName: premiumSuite)
+         defer { premiumDefaults.removePersistentDomain(forName: premiumSuite) }
+         let legacy: [String: [String: Data]] = ["77": ["serverUser": Data([1, 2]), "badge": Data([3, 4])]]
+         premiumDefaults.set(try JSONEncoder().encode(legacy), forKey: "localPremiumState")
+-        CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "77") == Data([3, 4]), "legacy badge imported")
++        CheckCore.require(
++            AdditionalLocalProfileState.shared.badge(account: "77") == Data([3, 4]), "legacy badge imported")
+         AdditionalLocalProfileState.shared.select(badge: Data([0]), account: "77")
+-        let saved = try JSONDecoder().decode([String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
++        let saved = try JSONDecoder().decode(
++            [String: [String: Data]].self, from: premiumDefaults.data(forKey: "localPremiumState")!)
+         CheckCore.require(saved["77"]?["serverUser"] == Data([1, 2]), "badge changes preserve legacy server snapshot")
+         CheckCore.require(AdditionalLocalProfileState.shared.badge(account: "88") == nil, "badge account isolation")
+         try PluginChecks.run(root: root)
+         try PythonPluginChecks.run(root: root)
+         try PluginActionChecks.run(root: root)
+         try DisappearingChecks.run(root: root)
+-        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, local Saved Messages tags, disappearing media, plugins")
++        print(
++            "Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, local Saved Messages tags, disappearing media, plugins"
++        )
+     }
+ }
+diff --git a/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
+index bb430085..20c74fc5 100644
+--- a/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
++++ b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
+@@ -1,7 +1,40 @@
+ import Foundation
+ 
+ enum PythonPluginChecks {
++    static func startupActions(root: URL) throws {
++        let directory = root.appendingPathComponent("startup-actions")
++        let registry = PluginRegistry(directory: directory, hostVersion: "13.0.1")
++        let source = """
++            # /// script
++            # id = "startup-actions"
++            # name = "Startup actions"
++            # ///
++            __permissions__ = ["network", "sendMessages"]
++            __hooks__ = [{"event": "preRequest", "name": "account.updateStatus"}]
++            from swiftgram import BasePlugin
++            class Plugin(BasePlugin):
++                def on_plugin_load(self):
++                    self.send_message("user:42", "Started")
++                def pre_request_hook(self, event):
++                    return None
++            """
++        let manifest = try registry.install(Data(source.utf8))
++        try registry.setEnabled(manifest.id, account: "77", enabled: true)
++        // Release the interpreter while retaining persisted enablement, as on restart.
++        let record = registry.records()[0]
++        try PythonPluginRuntime.shared.unload(
++            record, account: "77", marker: directory.appendingPathComponent("python-invocation.json"))
++        let reloaded = PluginRegistry(directory: directory, hostVersion: "13.0.1")
++        let event = PluginEvent(kind: .preRequest, name: "account.updateStatus", account: "77")
++        CheckCore.require(reloaded.dispatch(event) == event, "startup actions preserve first request")
++        CheckCore.require(
++            reloaded.records()[0].isEnabled(account: "77"),
++            "startup actions are validated as lifecycle actions, not request actions")
++        try reloaded.remove(manifest.id)
++    }
++
+     static func run(root: URL) throws {
++        try startupActions(root: root)
+         let registry = PluginRegistry(directory: root.appendingPathComponent("python-core"), hostVersion: "13.0.1")
+         guard let examples = ProcessInfo.processInfo.environment["SGA_PLUGIN_EXAMPLES"] else {
+             throw SettingsError.invalid("Run Python checks using tools/test-core.sh.")
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+index 87e0e65c..29d4dffd 100644
+--- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+@@ -1,16 +1,16 @@
+-import Foundation
+-import UIKit
+-import UniformTypeIdentifiers
++import AccountContext
+ import Display
+-import Postbox
+-import SwiftSignalKit
+-import TelegramCore
+-import TelegramPresentationData
++import Foundation
+ import ItemListUI
++import Postbox
+ import PresentationDataUtils
+-import AccountContext
+ import SGAdditionalCore
+ import SGStrings
++import SwiftSignalKit
++import TelegramCore
++import TelegramPresentationData
++import UIKit
++import UniformTypeIdentifiers
+ 
+ func additionalSettingsChanges() -> Signal<Int, NoError> {
+     Signal { subscriber in
+@@ -18,16 +18,23 @@ func additionalSettingsChanges() -> Signal<Int, NoError> {
+         let plugins = NotificationCenter.default.addObserver(forName: .pluginsChanged, object: nil, queue: .main) { _ in
+             subscriber.putNext(AddonSettings.shared.version())
+         }
+-        let token = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: .main) { _ in
++        let token = NotificationCenter.default.addObserver(
++            forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: .main
++        ) { _ in
+             subscriber.putNext(AddonSettings.shared.version())
+         }
+-        return ActionDisposable { NotificationCenter.default.removeObserver(token); NotificationCenter.default.removeObserver(plugins) }
++        return ActionDisposable {
++            NotificationCenter.default.removeObserver(token)
++            NotificationCenter.default.removeObserver(plugins)
++        }
+     }
+ }
+ 
+ func additionalError(context: AccountContext, error: Error) -> ViewController {
+     let data = context.sharedContext.currentPresentationData.with { $0 }
+-    return textAlertController(context: context, title: nil, text: error.localizedDescription, actions: [TextAlertAction(type: .defaultAction, title: data.strings.Common_OK, action: {})])
++    return textAlertController(
++        context: context, title: nil, text: error.localizedDescription,
++        actions: [TextAlertAction(type: .defaultAction, title: data.strings.Common_OK, action: {})])
+ }
+ 
+ struct AdditionalFormEntry: ItemListNodeEntry {
+@@ -42,13 +49,22 @@ struct AdditionalFormEntry: ItemListNodeEntry {
+         let model = arguments as! AdditionalForm
+         switch kind {
+         case .input:
+-            return ItemListSingleLineInputItem(presentationData: presentationData, systemStyle: .glass, title: NSAttributedString(string: title), text: value, placeholder: title, type: .regular(capitalization: false, autocorrection: false), clearType: .always, sectionId: section, textUpdated: { model.input(self.stableId, $0) }, action: {})
++            return ItemListSingleLineInputItem(
++                presentationData: presentationData, systemStyle: .glass, title: NSAttributedString(string: title),
++                text: value, placeholder: title, type: .regular(capitalization: false, autocorrection: false),
++                clearType: .always, sectionId: section, textUpdated: { model.input(self.stableId, $0) }, action: {})
+         case .toggle:
+-            return ItemListSwitchItem(presentationData: presentationData, systemStyle: .glass, title: title, value: value == "1", sectionId: section, style: .blocks, updated: { model.input(self.stableId, $0 ? "1" : "0") })
++            return ItemListSwitchItem(
++                presentationData: presentationData, systemStyle: .glass, title: title, value: value == "1",
++                sectionId: section, style: .blocks, updated: { model.input(self.stableId, $0 ? "1" : "0") })
+         case .action:
+-            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: title, kind: .generic, alignment: .natural, sectionId: section, style: .blocks, action: { model.action(self.stableId) })
++            return ItemListActionItem(
++                presentationData: presentationData, systemStyle: .glass, title: title, kind: .generic,
++                alignment: .natural, sectionId: section, style: .blocks, action: { model.action(self.stableId) })
+         case .disclosure:
+-            return ItemListDisclosureItem(presentationData: presentationData, systemStyle: .glass, title: title, label: value, sectionId: section, style: .blocks, action: { model.action(self.stableId) })
++            return ItemListDisclosureItem(
++                presentationData: presentationData, systemStyle: .glass, title: title, label: value, sectionId: section,
++                style: .blocks, action: { model.action(self.stableId) })
+         case .notice:
+             return ItemListTextItem(presentationData: presentationData, text: .plain(title), sectionId: section)
+         }
+@@ -65,16 +81,30 @@ final class AdditionalForm {
+     var documentDelegate: NSObject?
+     init(context: AccountContext) { self.context = context }
+     func refresh() { revision.set(0) }
+-    func error(_ error: Error) { controller?.present(additionalError(context: context, error: error), in: .window(.root)) }
+-    func push(_ next: ViewController) { (controller?.navigationController as? NavigationController)?.pushViewController(next) }
++    func error(_ error: Error) {
++        controller?.present(additionalError(context: context, error: error), in: .window(.root))
++    }
++    func push(_ next: ViewController) {
++        (controller?.navigationController as? NavigationController)?.pushViewController(next)
++    }
+     func make(title: String) -> ViewController {
+-        let state = combineLatest(context.sharedContext.presentationData, revision.get(), additionalSettingsChanges())
+-        |> deliverOnMainQueue
+-        |> map { [self] data, _, _ -> (ItemListControllerState, (ItemListNodeState, AdditionalForm)) in
+-            let presentation = ItemListPresentationData(data)
+-            return (ItemListControllerState(presentationData: presentation, title: .text(title), leftNavigationButton: nil, rightNavigationButton: nil, backNavigationButton: ItemListBackButton(title: data.strings.Common_Back)),
+-                (ItemListNodeState(presentationData: presentation, entries: entries(data.strings.baseLanguageCode), style: .blocks), self))
+-        }
++        let state =
++            combineLatest(context.sharedContext.presentationData, revision.get(), additionalSettingsChanges())
++            |> deliverOnMainQueue
++            |> map { [self] data, _, _ -> (ItemListControllerState, (ItemListNodeState, AdditionalForm)) in
++                let presentation = ItemListPresentationData(data)
++                return (
++                    ItemListControllerState(
++                        presentationData: presentation, title: .text(title), leftNavigationButton: nil,
++                        rightNavigationButton: nil,
++                        backNavigationButton: ItemListBackButton(title: data.strings.Common_Back)),
++                    (
++                        ItemListNodeState(
++                            presentationData: presentation, entries: entries(data.strings.baseLanguageCode),
++                            style: .blocks), self
++                    )
++                )
++            }
+         let controller = ItemListController(context: context, state: state)
+         self.controller = controller
+         return controller
+@@ -84,40 +114,62 @@ final class AdditionalForm {
+ func additionalRetentionController(context: AccountContext, account: String?) -> ViewController {
+     let model = AdditionalForm(context: context)
+     var value = String(AddonSettings.shared.profile(account).retentionDays)
+-    model.entries = { lang in [AdditionalFormEntry(stableId: 0, section: 0, kind: .input, title: i18n("Additional.Retention", lang), value: value), AdditionalFormEntry(stableId: 1, section: 1, kind: .action, title: i18n("Additional.Save", lang))] }
++    model.entries = { lang in
++        [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .input, title: i18n("Additional.Retention", lang), value: value),
++            AdditionalFormEntry(stableId: 1, section: 1, kind: .action, title: i18n("Additional.Save", lang)),
++        ]
++    }
+     model.input = { _, text in value = text }
+     model.action = { [weak model] _ in
+         guard let model else { return }
+         do {
+             guard let days = Int(value), (1...365).contains(days) else { throw SettingsError.invalid("1–365") }
+-            var profile = AddonSettings.shared.profile(account); profile.retentionDays = days
++            var profile = AddonSettings.shared.profile(account)
++            profile.retentionDays = days
+             try AddonSettings.shared.save(profile, account: account)
+             model.controller?.navigationController?.popViewController(animated: true)
+         } catch { model.error(error) }
+     }
+-    return model.make(title: i18n("Additional.Retention", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++    return model.make(
++        title: i18n(
++            "Additional.Retention", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
+ }
+ 
+-func additionalPeersController(context: AccountContext, title: String, values initial: [String], changed: @escaping ([String]) -> Void) -> ViewController {
++func additionalPeersController(
++    context: AccountContext, title: String, values initial: [String], changed: @escaping ([String]) -> Void
++) -> ViewController {
+     let model = AdditionalForm(context: context)
+     var values = initial
+     var names: [String: String] = [:]
+     model.entries = { lang in
+-        [AdditionalFormEntry(stableId: 0, section: 0, kind: .action, title: i18n("Additional.Add", lang))] + values.enumerated().map { index, id in
+-            AdditionalFormEntry(stableId: index + 1, section: 1, kind: .action, title: (names[id] ?? id) + " · " + i18n("Additional.Remove", lang))
+-        }
++        [AdditionalFormEntry(stableId: 0, section: 0, kind: .action, title: i18n("Additional.Add", lang))]
++            + values.enumerated().map { index, id in
++                AdditionalFormEntry(
++                    stableId: index + 1, section: 1, kind: .action,
++                    title: (names[id] ?? id) + " · " + i18n("Additional.Remove", lang))
++            }
+     }
+     model.action = { [weak model] id in
+         guard let model else { return }
+         if id > 0 {
+             guard values.indices.contains(id - 1) else { return }
+-            values.remove(at: id - 1); changed(values); model.refresh()
++            values.remove(at: id - 1)
++            changed(values)
++            model.refresh()
+         } else {
+-            let picker = context.sharedContext.makePeerSelectionController(PeerSelectionControllerParams(context: context, filter: [.excludeSecretChats, .doNotSearchMessages], title: title, selectForumThreads: false))
++            let picker = context.sharedContext.makePeerSelectionController(
++                PeerSelectionControllerParams(
++                    context: context, filter: [.excludeSecretChats, .doNotSearchMessages], title: title,
++                    selectForumThreads: false))
+             picker.peerSelected = { [weak model, weak picker] peer, _ in
+                 guard let model, let key = additionalChatKey(peer.id) else { return }
+                 names[key] = peer.debugDisplayTitle
+-                if !values.contains(key) { values.append(key); changed(values) }
++                if !values.contains(key) {
++                    values.append(key)
++                    changed(values)
++                }
+                 picker?.navigationController?.popViewController(animated: true)
+                 model.refresh()
+             }
+@@ -130,9 +182,16 @@ func additionalPeersController(context: AccountContext, title: String, values in
+ func additionalFiltersController(context: AccountContext, account: String?) -> ViewController {
+     let model = AdditionalForm(context: context)
+     model.entries = { lang in
+-        var entries = [AdditionalFormEntry(stableId: 0, section: 0, kind: .action, title: i18n("Additional.Add", lang)), AdditionalFormEntry(stableId: 1, section: 0, kind: .action, title: i18n("Additional.Import", lang)), AdditionalFormEntry(stableId: 2, section: 0, kind: .action, title: i18n("Additional.Export", lang))]
++        var entries = [
++            AdditionalFormEntry(stableId: 0, section: 0, kind: .action, title: i18n("Additional.Add", lang)),
++            AdditionalFormEntry(stableId: 1, section: 0, kind: .action, title: i18n("Additional.Import", lang)),
++            AdditionalFormEntry(stableId: 2, section: 0, kind: .action, title: i18n("Additional.Export", lang)),
++        ]
+         entries += AddonSettings.shared.profile(account).filters.enumerated().map { index, rule in
+-            AdditionalFormEntry(stableId: index + 10, section: 1, kind: .disclosure, title: rule.pattern.isEmpty ? rule.users.joined(separator: ", ") : rule.pattern, value: rule.enabled ? "✓" : "")
++            AdditionalFormEntry(
++                stableId: index + 10, section: 1, kind: .disclosure,
++                title: rule.pattern.isEmpty ? rule.users.joined(separator: ", ") : rule.pattern,
++                value: rule.enabled ? "✓" : "")
+         }
+         return entries
+     }
+@@ -146,7 +205,10 @@ func additionalFiltersController(context: AccountContext, account: String?) -> V
+             model.push(additionalRuleController(context: context, account: account, index: id == 0 ? nil : id - 10))
+         }
+     }
+-    return model.make(title: i18n("Additional.EditFilters", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++    return model.make(
++        title: i18n(
++            "Additional.EditFilters", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }
++        ))
+ }
+ 
+ private func additionalRuleController(context: AccountContext, account: String?, index: Int?) -> ViewController {
+@@ -154,13 +216,30 @@ private func additionalRuleController(context: AccountContext, account: String?,
+     let initial = AddonSettings.shared.profile(account).filters
+     var rule = index.flatMap { initial.indices.contains($0) ? initial[$0] : nil } ?? FilterRule()
+     model.entries = { lang in
+-        func entry(_ id: Int, _ section: Int32, _ kind: AdditionalFormEntry.Kind, _ key: String, _ value: String = "") -> AdditionalFormEntry {
+-            AdditionalFormEntry(stableId: id, section: section, kind: kind, title: i18n("Additional." + key, lang), value: value)
++        func entry(_ id: Int, _ section: Int32, _ kind: AdditionalFormEntry.Kind, _ key: String, _ value: String = "")
++            -> AdditionalFormEntry
++        {
++            AdditionalFormEntry(
++                stableId: id, section: section, kind: kind, title: i18n("Additional." + key, lang), value: value)
+         }
+-        return [entry(0, 0, .toggle, "Enabled", rule.enabled ? "1" : "0"), entry(1, 0, .input, "Pattern", rule.pattern), entry(2, 0, .disclosure, "Mode", i18n("Additional." + rule.mode, lang)), entry(3, 0, .toggle, "CaseSensitive", rule.caseSensitive ? "1" : "0"), entry(4, 0, .toggle, "Reversed", rule.reversed ? "1" : "0"), entry(5, 1, .disclosure, "Chats", String(rule.chats.count)), entry(6, 1, .disclosure, "ExcludeChats", String(rule.excludeChats.count)), entry(7, 1, .disclosure, "Users", String(rule.users.count)), entry(8, 2, .action, "Save")] + (index == nil ? [] : [entry(9, 2, .action, "Remove")])
++        return [
++            entry(0, 0, .toggle, "Enabled", rule.enabled ? "1" : "0"), entry(1, 0, .input, "Pattern", rule.pattern),
++            entry(2, 0, .disclosure, "Mode", i18n("Additional." + rule.mode, lang)),
++            entry(3, 0, .toggle, "CaseSensitive", rule.caseSensitive ? "1" : "0"),
++            entry(4, 0, .toggle, "Reversed", rule.reversed ? "1" : "0"),
++            entry(5, 1, .disclosure, "Chats", String(rule.chats.count)),
++            entry(6, 1, .disclosure, "ExcludeChats", String(rule.excludeChats.count)),
++            entry(7, 1, .disclosure, "Users", String(rule.users.count)), entry(8, 2, .action, "Save"),
++        ] + (index == nil ? [] : [entry(9, 2, .action, "Remove")])
+     }
+     model.input = { [weak model] id, text in
+-        switch id { case 0: rule.enabled = text == "1"; case 1: rule.pattern = text; case 3: rule.caseSensitive = text == "1"; case 4: rule.reversed = text == "1"; default: break }
++        switch id {
++        case 0: rule.enabled = text == "1"
++        case 1: rule.pattern = text
++        case 3: rule.caseSensitive = text == "1"
++        case 4: rule.reversed = text == "1"
++        default: break
++        }
+         if id != 1 { model?.refresh() }
+     }
+     model.action = { [weak model] id in
+@@ -170,44 +249,84 @@ private func additionalRuleController(context: AccountContext, account: String?,
+             rule.mode = modes[((modes.firstIndex(of: rule.mode) ?? 0) + 1) % modes.count]
+             model.refresh()
+         } else if (5...7).contains(id) {
+-            let keyPath: WritableKeyPath<FilterRule, [String]> = id == 5 ? \.chats : (id == 6 ? \.excludeChats : \.users)
++            let keyPath: WritableKeyPath<FilterRule, [String]> =
++                id == 5 ? \.chats : (id == 6 ? \.excludeChats : \.users)
+             let lang = context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }
+-            model.push(additionalPeersController(context: context, title: i18n("Additional." + (id == 5 ? "Chats" : id == 6 ? "ExcludeChats" : "Users"), lang), values: rule[keyPath: keyPath], changed: { values in rule[keyPath: keyPath] = values; model.refresh() }))
++            model.push(
++                additionalPeersController(
++                    context: context,
++                    title: i18n("Additional." + (id == 5 ? "Chats" : id == 6 ? "ExcludeChats" : "Users"), lang),
++                    values: rule[keyPath: keyPath],
++                    changed: { values in
++                        rule[keyPath: keyPath] = values
++                        model.refresh()
++                    }))
+         } else if id == 8 || id == 9 {
+             do {
+                 var profile = AddonSettings.shared.profile(account)
+                 // Avoid applying an index to a list replaced by an import while this editor was open.
+-                guard initial == profile.filters else { throw SettingsError.invalid("Filters changed. Reopen this editor.") }
+-                if let index { if id == 9 { profile.filters.remove(at: index) } else { try rule.validate(); profile.filters[index] = rule } }
+-                else { try rule.validate(); profile.filters.append(rule) }
++                guard initial == profile.filters else {
++                    throw SettingsError.invalid("Filters changed. Reopen this editor.")
++                }
++                if let index {
++                    if id == 9 {
++                        profile.filters.remove(at: index)
++                    } else {
++                        try rule.validate()
++                        profile.filters[index] = rule
++                    }
++                } else {
++                    try rule.validate()
++                    profile.filters.append(rule)
++                }
+                 try AddonSettings.shared.save(profile, account: account)
+                 model.controller?.navigationController?.popViewController(animated: true)
+             } catch { model.error(error) }
+         }
+     }
+-    return model.make(title: i18n("Additional.Filters", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++    return model.make(
++        title: i18n(
++            "Additional.Filters", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
+ }
+ 
+ func additionalDiagnosticsController(context: AccountContext) -> ViewController {
+     let model = AdditionalForm(context: context)
+-    model.entries = { _ in [AdditionalFormEntry(stableId: 0, section: 0, kind: .notice, title: MessageArchive.shared.status() ?? "Message archive ready"), AdditionalFormEntry(stableId: 1, section: 1, kind: .notice, title: UserDefaults.standard.string(forKey: "SwiftgramAddonStorageStatus") ?? "Storage status unavailable")] }
+-    return model.make(title: i18n("Additional.Diagnostics", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }))
++    model.entries = { _ in
++        [
++            AdditionalFormEntry(
++                stableId: 0, section: 0, kind: .notice, title: MessageArchive.shared.status() ?? "Message archive ready"
++            ),
++            AdditionalFormEntry(
++                stableId: 1, section: 1, kind: .notice,
++                title: UserDefaults.standard.string(forKey: "SwiftgramAddonStorageStatus")
++                    ?? "Storage status unavailable"),
++        ]
++    }
++    return model.make(
++        title: i18n(
++            "Additional.Diagnostics", context.sharedContext.currentPresentationData.with { $0.strings.baseLanguageCode }
++        ))
+ }
+ 
+ private final class AdditionalDocuments: NSObject, UIDocumentPickerDelegate {
+     weak var model: AdditionalForm?
+     let account: String?
+     private var exporting = false
+-    init(model: AdditionalForm, account: String?) { self.model = model; self.account = account }
++    init(model: AdditionalForm, account: String?) {
++        self.model = model
++        self.account = account
++    }
+     func open(export: Bool) throws {
+         guard let model, let controller = model.controller else { return }
+         let picker: UIDocumentPickerViewController
+         self.exporting = export
+         if export {
+-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("AdditionalExport-" + UUID().uuidString)
++            let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
++                "AdditionalExport-" + UUID().uuidString)
+             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+             let url = directory.appendingPathComponent("filters.json")
+-            let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
++            let encoder = JSONEncoder()
++            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+             try encoder.encode(AddonSettings.shared.profile(account).filters).write(to: url, options: .atomic)
+             picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
+         } else {
+@@ -233,10 +352,16 @@ private final class AdditionalDocuments: NSObject, UIDocumentPickerDelegate {
+     }
+ }
+ 
+-func additionalEditingContext(context: AccountContext, account: String?, completed: @escaping (AccountContext) -> Void) {
+-    guard let account, account != additionalAccountKey(context.account.peerId) else { completed(context); return }
++func additionalEditingContext(context: AccountContext, account: String?, completed: @escaping (AccountContext) -> Void)
++{
++    guard let account, account != additionalAccountKey(context.account.peerId) else {
++        completed(context)
++        return
++    }
+     let _ = (context.sharedContext.activeAccountsWithInfo |> take(1) |> deliverOnMainQueue).start(next: { info in
+-        guard let selected = info.accounts.first(where: { additionalAccountKey($0.account.peerId) == account }) else { return }
++        guard let selected = info.accounts.first(where: { additionalAccountKey($0.account.peerId) == account }) else {
++            return
++        }
+         completed(context.sharedContext.makeTempAccountContext(account: selected.account))
+     })
+ }
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index 5fd01f06..40068c60 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1596,6 +1596,7 @@ public class Account {
+         if !supplementary {
+             PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: AdditionalPluginActionAdapter(account: self))
+             self.managedOperationsDisposable.add((self.loggedOut |> filter { $0 } |> take(1)).start(next: { _ in
++                additionalPluginForgetOrigins(account: peerId)
+                 PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: nil)
+             }))
+         }
+@@ -1608,7 +1609,10 @@ public class Account {
+     }
+     
+     deinit {
+-        if !self.supplementary { PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(self.peerId), adapter: nil) }
++        if !self.supplementary {
++            additionalPluginForgetOrigins(account: self.peerId)
++            PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(self.peerId), adapter: nil)
++        }
+         self.managedContactsDisposable.dispose()
+         self.managedStickerPacksDisposable.dispose()
+         self.managedServiceViewsDisposable.dispose()
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift
+index 05bea6c0..3e29195c 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalAds.swift
+@@ -1,6 +1,6 @@
+ import Postbox
+-import SwiftSignalKit
+ import SGAdditionalCore
++import SwiftSignalKit
+ 
+ public func additionalAdsBlocked(account: PeerId) -> Bool {
+     return AdditionalAds.suppress(account: additionalAccountKey(account))
+@@ -8,6 +8,6 @@ public func additionalAdsBlocked(account: PeerId) -> Bool {
+ 
+ public func additionalAdsBlockingChanges(account: PeerId) -> Signal<Bool, NoError> {
+     return additionalPresentationChanges()
+-    |> map { additionalAdsBlocked(account: account) }
+-    |> distinctUntilChanged
++        |> map { additionalAdsBlocked(account: account) }
++        |> distinctUntilChanged
+ }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
+index 46c6c552..e2abc9be 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
+@@ -1,13 +1,15 @@
+ import Foundation
+ import Postbox
++import SGAdditionalCore
+ import SwiftSignalKit
+ import TelegramApi
+-import SGAdditionalCore
+ 
+ func additionalPresentationChanges() -> Signal<Void, NoError> {
+     Signal { subscriber in
+         subscriber.putNext(())
+-        let token = NotificationCenter.default.addObserver(forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil) { _ in subscriber.putNext(()) }
++        let token = NotificationCenter.default.addObserver(
++            forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: nil
++        ) { _ in subscriber.putNext(()) }
+         return ActionDisposable { NotificationCenter.default.removeObserver(token) }
+     }
+ }
+@@ -31,16 +33,23 @@ private final class AdditionalBadgeExpiration {
+ 
+ public func additionalPresentationPeer(_ peer: Peer, account: PeerId) -> Peer {
+     guard peer.id == account, let user = peer as? TelegramUser,
+-          AddonSettings.shared.profile(additionalAccountKey(account)).localPremium else { return peer }
++        AddonSettings.shared.profile(additionalAccountKey(account)).localPremium
++    else { return peer }
+     // This copy is used only in view signals. Transactions and server subscription checks use the raw peer.
+-    var flags = user.flags; flags.insert(.isPremium)
++    var flags = user.flags
++    flags.insert(.isPremium)
+     var result = user.withUpdatedFlags(flags)
+-    if !user.flags.contains(.isPremium), let bytes = AdditionalLocalProfileState.shared.badge(account: additionalAccountKey(account)), !bytes.isEmpty,
+-       let status = Api.parse(Buffer(data: bytes)) as? Api.EmojiStatus {
++    if !user.flags.contains(.isPremium),
++        let bytes = AdditionalLocalProfileState.shared.badge(account: additionalAccountKey(account)), !bytes.isEmpty,
++        let status = Api.parse(Buffer(data: bytes)) as? Api.EmojiStatus
++    {
+         var badge = PeerEmojiStatus(apiStatus: status)
+         if let until = badge?.expirationDate {
+-            if TimeInterval(until) <= Date().timeIntervalSince1970 { badge = nil }
+-            else { AdditionalBadgeExpiration.shared.schedule(account: additionalAccountKey(account), until: until) }
++            if TimeInterval(until) <= Date().timeIntervalSince1970 {
++                badge = nil
++            } else {
++                AdditionalBadgeExpiration.shared.schedule(account: additionalAccountKey(account), until: until)
++            }
+         }
+         result = result.withUpdatedEmojiStatus(badge)
+     }
+@@ -52,7 +61,8 @@ func additionalPresentationView(_ view: PostboxView, account: PeerId) -> Postbox
+         return view.withUpdatedPeer(additionalPresentationPeer(peer, account: account))
+     }
+     if let view = view as? PeerView, let peer = view.peers[account] {
+-        var peers = view.peers; peers[account] = additionalPresentationPeer(peer, account: account)
++        var peers = view.peers
++        peers[account] = additionalPresentationPeer(peer, account: account)
+         return view.withUpdatedPeers(peers)
+     }
+     return view
+@@ -61,11 +71,14 @@ func additionalPresentationView(_ view: PostboxView, account: PeerId) -> Postbox
+ func additionalSelectBadgeIfLocal(account: Account, badge: Api.EmojiStatus, media: [Media]) -> Signal<Bool, NoError> {
+     account.postbox.transaction { transaction in
+         guard AddonSettings.shared.profile(additionalAccountKey(account.peerId)).localPremium,
+-              let user = transaction.getPeer(account.peerId) as? TelegramUser,
+-              !user.flags.contains(.isPremium) else { return false }
++            let user = transaction.getPeer(account.peerId) as? TelegramUser,
++            !user.flags.contains(.isPremium)
++        else { return false }
+         for file in media { transaction.storeMediaIfNotPresent(media: file) }
+-        let buffer = Buffer(); badge.serialize(buffer, true)
+-        AdditionalLocalProfileState.shared.select(badge: buffer.makeData(), account: additionalAccountKey(account.peerId))
++        let buffer = Buffer()
++        badge.serialize(buffer, true)
++        AdditionalLocalProfileState.shared.select(
++            badge: buffer.makeData(), account: additionalAccountKey(account.peerId))
+         return true
+     }
+ }
+@@ -74,13 +87,16 @@ func additionalSelectBadgeIfLocal(account: Account, badge: Api.EmojiStatus, medi
+ func additionalRestoreLegacyProfile(transaction: Transaction, account: PeerId) -> Bool {
+     let key = additionalAccountKey(account)
+     guard AdditionalLocalProfileState.shared.legacyProfileNeedsRestoration(account: key),
+-          let data = AdditionalLocalProfileState.shared.legacyServerUser(account: key), !data.isEmpty,
+-          let apiUser = Api.parse(Buffer(data: data)) as? Api.User,
+-          let current = transaction.getPeer(account) as? TelegramUser else { return false }
++        let data = AdditionalLocalProfileState.shared.legacyServerUser(account: key), !data.isEmpty,
++        let apiUser = Api.parse(Buffer(data: data)) as? Api.User,
++        let current = transaction.getPeer(account) as? TelegramUser
++    else { return false }
+     let server = TelegramUser(user: apiUser)
+     guard server.id == account else { return false }
+     var flags = current.flags
+     if server.flags.contains(.isPremium) { flags.insert(.isPremium) } else { flags.remove(.isPremium) }
+-    updatePeersCustom(transaction: transaction, peers: [current.withUpdatedFlags(flags).withUpdatedEmojiStatus(server.emojiStatus)], update: { _, updated in updated })
++    updatePeersCustom(
++        transaction: transaction, peers: [current.withUpdatedFlags(flags).withUpdatedEmojiStatus(server.emojiStatus)],
++        update: { _, updated in updated })
+     return true
+ }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+index 90c0a1dd..d4842639 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -27,8 +27,10 @@ public func additionalCanArchive(attributes: [MessageAttribute], media: [Media])
+ }
+ 
+ public func additionalRevision(text: String, timestamp: Int32, attributes: [MessageAttribute]) -> MessageRevision {
+-    let entities = (attributes.first { $0 is TextEntitiesMessageAttribute } as? TextEntitiesMessageAttribute)?.entities ?? []
+-    return MessageRevision(text: text, entities: entities.map(additionalRevisionEntity), messageDate: Int64(timestamp),
++    let entities =
++        (attributes.first { $0 is TextEntitiesMessageAttribute } as? TextEntitiesMessageAttribute)?.entities ?? []
++    return MessageRevision(
++        text: text, entities: entities.map(additionalRevisionEntity), messageDate: Int64(timestamp),
+         editDate: (attributes.first { $0 is EditedMessageAttribute } as? EditedMessageAttribute).map { Int64($0.date) })
+ }
+ 
+@@ -39,15 +41,25 @@ private func additionalRevisionEntity(_ entity: MessageTextEntity) -> RevisionEn
+     case .Bold: kind = "Bold"
+     case .Italic: kind = "Italic"
+     case .Code: kind = "Code"
+-    case let .Pre(language): kind = "Pre"; value = language
++    case .Pre(let language):
++        kind = "Pre"
++        value = language
+     case .Underline: kind = "Underline"
+     case .Strikethrough: kind = "Strike"
+     case .Spoiler: kind = "Spoiler"
+     case .Url: kind = "Url"
+-    case let .TextUrl(url): kind = "TextUrl"; value = url
+-    case let .TextMention(peerId): kind = "MentionName"; value = String(peerId.id._internalGetInt64Value())
+-    case let .CustomEmoji(_, fileId): kind = "CustomEmoji"; value = String(fileId)
+-    case let .BlockQuote(collapsed): kind = "Blockquote"; value = collapsed ? "1" : "0"
++    case .TextUrl(let url):
++        kind = "TextUrl"
++        value = url
++    case .TextMention(let peerId):
++        kind = "MentionName"
++        value = String(peerId.id._internalGetInt64Value())
++    case .CustomEmoji(_, let fileId):
++        kind = "CustomEmoji"
++        value = String(fileId)
++    case .BlockQuote(let collapsed):
++        kind = "Blockquote"
++        value = collapsed ? "1" : "0"
+     case .Mention: kind = "Mention"
+     case .Hashtag: kind = "Hashtag"
+     case .BotCommand: kind = "BotCommand"
+@@ -56,13 +68,15 @@ private func additionalRevisionEntity(_ entity: MessageTextEntity) -> RevisionEn
+     case .BankCard: kind = "BankCard"
+     default: kind = "Unknown"
+     }
+-    return RevisionEntity(kind: "messageEntity" + kind, offset: entity.range.lowerBound, length: entity.range.count, value: value)
++    return RevisionEntity(
++        kind: "messageEntity" + kind, offset: entity.range.lowerBound, length: entity.range.count, value: value)
+ }
+ 
+ public func additionalTextEntities(_ revision: MessageRevision) -> [MessageTextEntity] {
+     revision.entities.compactMap { entity in
+         guard entity.offset >= 0, entity.length > 0, entity.offset <= revision.text.utf16.count,
+-              entity.length <= revision.text.utf16.count - entity.offset else { return nil }
++            entity.length <= revision.text.utf16.count - entity.offset
++        else { return nil }
+         let type: MessageTextEntityType
+         switch entity.kind {
+         case "messageEntityBold": type = .Bold
+@@ -86,10 +100,11 @@ public func additionalTextEntities(_ revision: MessageRevision) -> [MessageTextE
+             type = .CustomEmoji(stickerPack: nil, fileId: id)
+         case "messageEntityMentionName":
+             guard let id = entity.value.flatMap(Int64.init) else { return nil }
+-            type = .TextMention(peerId: PeerId(namespace: Namespaces.Peer.CloudUser, id: PeerId.Id._internalFromInt64Value(id)))
++            type = .TextMention(
++                peerId: PeerId(namespace: Namespaces.Peer.CloudUser, id: PeerId.Id._internalFromInt64Value(id)))
+         default: return nil
+         }
+-        return MessageTextEntity(range: entity.offset ..< entity.offset + entity.length, type: type)
++        return MessageTextEntity(range: entity.offset..<entity.offset + entity.length, type: type)
+     }
+ }
+ 
+@@ -102,12 +117,16 @@ final class AdditionalMessageProcessor {
+         self.account = account
+         self.disappearing = AdditionalDisappearingMedia(account: account, mediaBox: mediaBox)
+     }
+-    func deleted(_ ids: [MessageId]) { disappearing.deleted(ids) }
++    func deleted(_ ids: [MessageId]) {
++        additionalPluginForgetOrigins(account: account, messages: ids)
++        disappearing.deleted(ids)
++    }
+     func process(_ proposed: StoreMessage, previous: Message?, transaction: Transaction) -> StoreMessage? {
+         let proposed = additionalApplyLocalSavedTags(proposed, account: account, transaction: transaction)
+         let message = disappearing.process(proposed, previous: previous)
+-        guard case let .Id(id) = message.id,
+-              let key = additionalMessageKey(account: account, id: id) else { return message }
++        guard case .Id(let id) = message.id,
++            let key = additionalMessageKey(account: account, id: id)
++        else { return message }
+         let profile = AddonSettings.shared.profile(key.account)
+         let allowed = additionalCanArchive(attributes: message.attributes, media: message.media)
+         if !allowed, profile.saveDeleted || profile.saveEditHistory {
+@@ -117,17 +136,32 @@ final class AdditionalMessageProcessor {
+         if allowed {
+             if profile.saveDeleted { MessageArchive.shared.observe(key) }
+             if profile.saveEditHistory {
+-                MessageArchive.shared.capture(additionalRevision(text: message.text, timestamp: message.timestamp, attributes: message.attributes), key: key, retentionDays: profile.retentionDays)
++                if let previous, additionalCanArchive(attributes: previous.attributes, media: previous.media) {
++                    MessageArchive.shared.capture(
++                        additionalRevision(
++                            text: previous.text, timestamp: previous.timestamp, attributes: previous.attributes),
++                        key: key, retentionDays: profile.retentionDays)
++                }
++                MessageArchive.shared.capture(
++                    additionalRevision(
++                        text: message.text, timestamp: message.timestamp, attributes: message.attributes), key: key,
++                    retentionDays: profile.retentionDays)
+             }
+             if profile.saveDeleted || profile.saveEditHistory { MessageArchive.shared.synchronize() }
+         }
+         if profile.filtersEnabled, message.flags.contains(.Incoming) {
+             var authors = [additionalChatKey(message.authorId ?? id.peerId)].compactMap { $0 }
+-            if let original = message.forwardInfo?.authorId, let value = additionalChatKey(original) { authors.append(value) }
++            if let original = message.forwardInfo?.authorId, let value = additionalChatKey(original) {
++                authors.append(value)
++            }
+             for attribute in message.attributes {
+-                if let bot = (attribute as? InlineBotMessageAttribute)?.peerId, let value = additionalChatKey(bot) { authors.append(value) }
++                if let bot = (attribute as? InlineBotMessageAttribute)?.peerId, let value = additionalChatKey(bot) {
++                    authors.append(value)
++                }
+             }
+-            if filters.matches(text: message.text, chat: key.chat, authors: authors, profile: profile, account: key.account) {
++            if filters.matches(
++                text: message.text, chat: key.chat, authors: authors, profile: profile, account: key.account)
++            {
+                 disappearing.deleted([id])
+                 return nil
+             }
+@@ -140,7 +174,8 @@ final class AdditionalMessageProcessor {
+ 
+ func additionalRetainDeleted(account: PeerId, id: MessageId, transaction: Transaction) -> Bool {
+     guard AddonSettings.shared.anyRetentionEnabled(), let key = additionalMessageKey(account: account, id: id),
+-          AddonSettings.shared.profile(key.account).saveDeleted, let message = transaction.getMessage(id) else { return false }
++        AddonSettings.shared.profile(key.account).saveDeleted, let message = transaction.getMessage(id)
++    else { return false }
+     if !additionalCanArchive(attributes: message.attributes, media: message.media) {
+         return additionalRetainDisappearingAtExpiry(account: key.account, message: message, transaction: transaction)
+     }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
+index c3a3524e..b2a3f2de 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPluginActions.swift
+@@ -6,25 +6,41 @@ import SGAdditionalCore
+ import SwiftSignalKit
+ import UIKit
+ 
+-private let pluginOrigins = Atomic<(Set<Int64>, Set<MessageId>)>(value: ([], []))
++private struct PluginOriginState {
++    var correlations = Set<Int64>()
++    var messages = Set<MessageId>()
++}
++private let pluginOrigins = Atomic<[PeerId: PluginOriginState]>(value: [:])
+ 
+-func additionalPluginCorrelation() -> Int64 {
++func additionalPluginCorrelation(account: PeerId) -> Int64 {
+     let value = Int64.random(in: Int64.min ... -1)
+     _ = pluginOrigins.modify { current in
+         var current = current
+-        current.0.insert(value)
++        current[account, default: PluginOriginState()].correlations.insert(value)
+         return current
+     }
+     return value
+ }
+ 
+-func additionalPluginIsOrigin(_ correlation: Int64?) -> Bool {
++func additionalPluginIsOrigin(_ correlation: Int64?, account: PeerId) -> Bool {
+     guard let correlation else { return false }
+-    return pluginOrigins.with { $0.0.contains(correlation) }
++    return pluginOrigins.with { $0[account]?.correlations.contains(correlation) == true }
++}
++
++public func additionalPluginIsOrigin(_ message: MessageId, account: PeerId) -> Bool {
++    pluginOrigins.with { $0[account]?.messages.contains(message) == true }
+ }
+ 
+-public func additionalPluginIsOrigin(_ message: MessageId) -> Bool {
+-    pluginOrigins.with { $0.1.contains(message) }
++func additionalPluginForgetOrigins(account: PeerId, messages: [MessageId]? = nil) {
++    _ = pluginOrigins.modify { current in
++        var current = current
++        if let messages {
++            current[account]?.messages.subtract(messages)
++        } else {
++            current.removeValue(forKey: account)
++        }
++        return current
++    }
+ }
+ 
+ private func pluginPeer(_ chat: String) -> PeerId? {
+@@ -97,7 +113,15 @@ final class AdditionalPluginActionAdapter: PluginActionAdapter {
+                         messageId: MessageId(peerId: peer, namespace: Namespaces.Message.Cloud, id: $0), quote: nil,
+                         innerSubject: nil)
+                 }
+-                let correlation = additionalPluginCorrelation()
++                let correlation = additionalPluginCorrelation(account: account.peerId)
++                disposables.add(
++                    ActionDisposable {
++                        _ = pluginOrigins.modify { current in
++                            var current = current
++                            current[account.peerId]?.correlations.remove(correlation)
++                            return current
++                        }
++                    })
+                 let message = EnqueueMessage.message(
+                     text: action.text ?? "", attributes: attributes, inlineStickers: [:], mediaReference: media,
+                     threadId: action.threadID, replyToMessageId: reply, replyToStoryId: nil, localGroupingKey: nil,
+@@ -107,7 +131,7 @@ final class AdditionalPluginActionAdapter: PluginActionAdapter {
+                         let localIDs = ids.compactMap { $0 }
+                         _ = pluginOrigins.modify { current in
+                             var current = current
+-                            current.1.formUnion(localIDs)
++                            current[account.peerId, default: PluginOriginState()].messages.formUnion(localIDs)
+                             return current
+                         }
+                         completion(.init(id: action.id, status: "accepted", messageIDs: localIDs.map { $0.id }))
+@@ -126,7 +150,9 @@ final class AdditionalPluginActionAdapter: PluginActionAdapter {
+                                 {
+                                     _ = pluginOrigins.modify { current in
+                                         var current = current
+-                                        current.1.insert(sent)
++                                        current[account.peerId]?.correlations.remove(correlation)
++                                        current[account.peerId]?.messages.subtract(localIDs)
++                                        current[account.peerId, default: PluginOriginState()].messages.insert(sent)
+                                         return current
+                                     }
+                                     completion(.init(id: action.id, status: "completed", messageIDs: [sent.id]))
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
+index ff0c14f4..eda1e3b6 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalPlugins.swift
+@@ -37,7 +37,7 @@ func additionalPluginEnqueue(_ message: EnqueueMessage, account: PeerId, peerId:
+     else { return message }
+     var event = PluginEvent(
+         kind: .sendMessage, name: "send_message", account: additionalAccountKey(account), chat: chat, text: text)
+-    event.pluginOrigin = additionalPluginIsOrigin(correlationId)
++    event.pluginOrigin = additionalPluginIsOrigin(correlationId, account: account)
+     event.message = additionalPluginSnapshot(
+         id: nil, sender: account, timestamp: nil, thread: threadId, text: text, attributes: attributes, media: [])
+     guard let result = PluginRegistry.shared.dispatch(event) else { return nil }
+diff --git a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+index 92143bd7..a7f6e4f5 100644
+--- a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
++++ b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+@@ -1,19 +1,19 @@
+-import Foundation
+-import UIKit
++import AccountContext
+ import AsyncDisplayKit
++import ChatControllerInteraction
++import ChatInterfaceState
++import ChatPresentationInterfaceState
+ import Display
++import Foundation
+ import Postbox
++import SGAdditionalCore
++import SGStrings
+ import SwiftSignalKit
+ import TelegramCore
+ import TelegramPresentationData
+ import TelegramUIPreferences
+-import AccountContext
+-import ChatControllerInteraction
+-import ChatInterfaceState
+-import ChatPresentationInterfaceState
++import UIKit
+ import WallpaperBackgroundNode
+-import SGAdditionalCore
+-import SGStrings
+ 
+ /// Read-only history. Its messages are constructed in memory and never enter Postbox.
+ final class AdditionalHistoryController: ViewController {
+@@ -29,14 +29,20 @@ final class AdditionalHistoryController: ViewController {
+     private var presentationDisposable: Disposable?
+     private var latestVersion: Int64?
+ 
+-    init(context: AccountContext, message: Message, key: MessageKey, updatedPresentationData: (initial: PresentationData, signal: Signal<PresentationData, NoError>)) {
+-        self.context = context; self.original = message; self.key = key
++    init(
++        context: AccountContext, message: Message, key: MessageKey,
++        updatedPresentationData: (initial: PresentationData, signal: Signal<PresentationData, NoError>)
++    ) {
++        self.context = context
++        self.original = message
++        self.key = key
+         self.historyPresentationData = updatedPresentationData
+         self.presentationData = updatedPresentationData.initial
+         let data = updatedPresentationData.initial
+         super.init(navigationBarPresentationData: NavigationBarPresentationData(presentationData: data, style: .glass))
+         self.title = i18n("Additional.History", data.strings.baseLanguageCode)
+-        self.navigationItem.backBarButtonItem = UIBarButtonItem(title: data.strings.Common_Back, style: .plain, target: nil, action: nil)
++        self.navigationItem.backBarButtonItem = UIBarButtonItem(
++            title: data.strings.Common_Back, style: .plain, target: nil, action: nil)
+         self.ready.set(.single(true))
+     }
+     required init(coder: NSCoder) { fatalError("init(coder:) is unavailable") }
+@@ -51,28 +57,47 @@ final class AdditionalHistoryController: ViewController {
+             guard let self else { return }
+             let current = self.presentationData
+             let sheet = ActionSheetController(presentationData: current)
+-            sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Conversation_ContextMenuCopy, color: .accent, action: { [weak sheet] in
+-                UIPasteboard.general.string = message.text; sheet?.dismissAnimated()
+-            })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: current.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
++            sheet.setItemGroups([
++                ActionSheetItemGroup(items: [
++                    ActionSheetButtonItem(
++                        title: current.strings.Conversation_ContextMenuCopy, color: .accent,
++                        action: { [weak sheet] in
++                            UIPasteboard.general.string = message.text
++                            sheet?.dismissAnimated()
++                        })
++                ]),
++                ActionSheetItemGroup(items: [
++                    ActionSheetButtonItem(
++                        title: current.strings.Common_Cancel, color: .accent,
++                        action: { [weak sheet] in sheet?.dismissAnimated() })
++                ]),
++            ])
+             self.present(sheet, in: .window(.root))
+         }
+         interaction.canReadHistory = false
+-        let history = ChatHistoryListNodeImpl(context: context, updatedPresentationData: historyPresentationData, systemStyle: .glass,
+-            chatLocation: .peer(id: original.id.peerId), chatLocationContextHolder: Atomic(value: nil), adMessagesContext: nil, tag: nil,
+-            source: .custom(messages: messages.get(), messageId: nil, quote: nil, isSavedMusic: false, canReorder: false, richMessageId: nil, loadMore: nil),
+-            subject: nil, controllerInteraction: interaction, selectedMessages: .single(nil), mode: .bubbles, rotated: true, isChatPreview: true, messageTransitionNode: { nil })
++        let history = ChatHistoryListNodeImpl(
++            context: context, updatedPresentationData: historyPresentationData, systemStyle: .glass,
++            chatLocation: .peer(id: original.id.peerId), chatLocationContextHolder: Atomic(value: nil),
++            adMessagesContext: nil, tag: nil,
++            source: .custom(
++                messages: messages.get(), messageId: nil, quote: nil, isSavedMusic: false, canReorder: false,
++                richMessageId: nil, loadMore: nil),
++            subject: nil, controllerInteraction: interaction, selectedMessages: .single(nil), mode: .bubbles,
++            rotated: true, isChatPreview: true, messageTransitionNode: { nil })
+         history.canReadHistory.set(Signal<Bool, NoError>.single(false))
+         history.enableUnreadAlignment = false
+         self.history = history
+         displayNode.addSubnode(history)
+-        notice.numberOfLines = 0; notice.textAlignment = .center
++        notice.numberOfLines = 0
++        notice.textAlignment = .center
+         notice.adjustsFontForContentSizeCategory = true
+         notice.font = UIFont.preferredFont(forTextStyle: .footnote)
+         notice.isAccessibilityElement = true
+         notice.layer.cornerRadius = 12
+         notice.clipsToBounds = true
+         displayNode.view.addSubview(notice)
+-        presentationDisposable = (historyPresentationData.signal |> deliverOnMainQueue).start(next: { [weak self] data in
++        presentationDisposable = (historyPresentationData.signal |> deliverOnMainQueue).start(next: {
++            [weak self] data in
+             self?.apply(data)
+             self?.requestLayout(transition: .immediate)
+         })
+@@ -80,12 +105,20 @@ final class AdditionalHistoryController: ViewController {
+             guard let self else { return }
+             self.latestVersion = revisions.last?.version
+             let result: [Message] = revisions.enumerated().map { index, revision in
+-                let id = MessageId(peerId: self.original.id.peerId, namespace: Namespaces.Message.Local, id: Int32(clamping: index + 1))
+-                return Message(stableId: UInt32(index + 1), stableVersion: 0, id: id, globallyUniqueId: nil, groupingKey: nil, groupInfo: nil, threadId: nil,
+-                    timestamp: Int32(clamping: revision.version), flags: self.original.flags.contains(.Incoming) ? [.Incoming] : [], tags: [], globalTags: [], localTags: [], customTags: [],
++                let id = MessageId(
++                    peerId: self.original.id.peerId, namespace: Namespaces.Message.Local, id: Int32(clamping: index + 1)
++                )
++                return Message(
++                    stableId: UInt32(index + 1), stableVersion: 0, id: id, globallyUniqueId: nil, groupingKey: nil,
++                    groupInfo: nil, threadId: nil,
++                    timestamp: Int32(clamping: revision.version),
++                    flags: self.original.flags.contains(.Incoming) ? [.Incoming] : [], tags: [], globalTags: [],
++                    localTags: [], customTags: [],
+                     forwardInfo: nil, author: self.original.author, text: revision.text,
+-                    attributes: [TextEntitiesMessageAttribute(entities: additionalTextEntities(revision))], media: [], peers: self.original.peers,
+-                    associatedMessages: SimpleDictionary(), associatedMessageIds: [], associatedMedia: [:], associatedThreadInfo: nil, associatedStories: [:])
++                    attributes: [TextEntitiesMessageAttribute(entities: additionalTextEntities(revision))], media: [],
++                    peers: self.original.peers,
++                    associatedMessages: SimpleDictionary(), associatedMessageIds: [], associatedMedia: [:],
++                    associatedThreadInfo: nil, associatedStories: [:])
+             }
+             self.messages.set(.single((Array(result.reversed()), 0, false)))
+             self.apply(self.presentationData)
+@@ -102,10 +135,18 @@ final class AdditionalHistoryController: ViewController {
+         notice.backgroundColor = noticeColors.fill
+         let lang = data.strings.baseLanguageCode
+         if let version = latestVersion {
+-            let formatter = DateFormatter(); formatter.dateStyle = .medium; formatter.timeStyle = .medium
+-            notice.text = i18n("Additional.Latest", lang) + " · " + formatter.string(from: Date(timeIntervalSince1970: TimeInterval(version))) + "\n" + i18n("Additional.HistoryNotice", lang)
+-        } else { notice.text = i18n("Additional.EmptyHistory", lang) }
+-        self.navigationBar?.updatePresentationData(NavigationBarPresentationData(presentationData: data, style: .glass), transition: .immediate)
++            let formatter = DateFormatter()
++            formatter.dateStyle = .medium
++            formatter.timeStyle = .medium
++            notice.text =
++                i18n("Additional.Latest", lang) + " · "
++                + formatter.string(from: Date(timeIntervalSince1970: TimeInterval(version))) + "\n"
++                + i18n("Additional.HistoryNotice", lang)
++        } else {
++            notice.text = i18n("Additional.EmptyHistory", lang)
++        }
++        self.navigationBar?.updatePresentationData(
++            NavigationBarPresentationData(presentationData: data, style: .glass), transition: .immediate)
+         self.statusBar.statusBarStyle = data.theme.rootController.statusBarStyle.style
+         self.title = i18n("Additional.History", lang)
+     }
+@@ -115,253 +156,262 @@ final class AdditionalHistoryController: ViewController {
+         transition.updateFrame(node: background, frame: CGRect(origin: .zero, size: layout.size))
+         background.updateLayout(size: layout.size, displayMode: .aspectFill, transition: transition)
+         let top = self.navigationLayout(layout: layout).navigationFrame.maxY
+-        let height = notice.sizeThatFits(CGSize(width: max(1, layout.size.width - 32), height: .greatestFiniteMagnitude)).height + 16
++        let height =
++            notice.sizeThatFits(CGSize(width: max(1, layout.size.width - 32), height: .greatestFiniteMagnitude)).height
++            + 16
+         notice.frame = CGRect(x: 16, y: top + 8, width: layout.size.width - 32, height: height)
+         // Bubble rows are rotated inside the bottom-up list, so its insets are reversed too.
+         transition.updatePosition(node: history, position: CGPoint(x: layout.size.width / 2, y: layout.size.height / 2))
+         transition.updateBounds(node: history, bounds: CGRect(origin: .zero, size: layout.size))
+-        history.updateLayout(transition: transition, updateSizeAndInsets: ListViewUpdateSizeAndInsets(size: layout.size,
+-            insets: UIEdgeInsets(top: layout.intrinsicInsets.bottom + 12, left: layout.safeInsets.right, bottom: top + height + 24, right: layout.safeInsets.left), duration: 0, curve: .Default(duration: nil)))
++        history.updateLayout(
++            transition: transition,
++            updateSizeAndInsets: ListViewUpdateSizeAndInsets(
++                size: layout.size,
++                insets: UIEdgeInsets(
++                    top: layout.intrinsicInsets.bottom + 12, left: layout.safeInsets.right, bottom: top + height + 24,
++                    right: layout.safeInsets.left), duration: 0, curve: .Default(duration: nil)))
+     }
+ }
+ 
+-private func historyInteraction(context: AccountContext, backgroundNode: WallpaperBackgroundNode, copy: @escaping (Message) -> Void) -> ChatControllerInteraction {
+-return ChatControllerInteraction(
+-            openMessage: { message, _ in
+-                copy(message)
+-                return true
+-            },
+-            openPeer: { _, _, _, _ in },
+-            openPeerMention: { _, _ in },
+-            openMessageContextMenu: { message, _, _, _, _, _ in copy(message) },
+-            openMessageReactionContextMenu: { _, _, _, _ in
+-            },
+-            updateMessageReaction: { _, _, _, _ in },
+-            activateMessagePinch: { _ in
+-            },
+-            openMessageContextActions: { _, _, _, _ in },
+-            navigateToMessage: { _, _, _ in },
+-            navigateToMessageStandalone: { _ in
+-            },
+-            navigateToThreadMessage: { _, _, _ in
+-            },
+-            tapMessage: { message in copy(message) },
+-            clickThroughMessage: { _, _ in },
+-            toggleMessagesSelection: { _, _ in },
+-            sendCurrentMessage: { _, _ in },
+-            sendMessage: { _, _ in },
+-            sendSticker: { _, _, _, _, _, _, _, _, _ in return false },
+-            sendEmoji: { _, _, _ in },
+-            sendGif: { _, _, _, _, _ in return false },
+-            sendBotContextResultAsGif: { _, _, _, _, _, _ in
+-                return false
+-            },
+-            editGif: { _, _ in
+-            },
+-            requestMessageActionCallback: { _, _, _, _, _ in },
+-            requestMessageActionUrlAuth: { _, _ in },
+-            activateSwitchInline: { _, _, _ in },
+-            openUrl: { _ in },
+-            openExternalInstantPage: { _ in
+-            },
+-            shareCurrentLocation: { _ in },
+-            shareAccountContact: { _ in },
+-            sendBotCommand: { _, _ in },
+-            openInstantPage: { _, _ in  },
+-            openWallpaper: { _ in  },
+-            openTheme: { _ in  },
+-            openHashtag: { _, _ in },
+-            updateInputState: { _ in },
+-            updateInputMode: { _ in },
+-            updatePresentationState: { _ in },
+-            openMessageShareMenu: { _ in
+-            },
+-            presentController: { _, _ in
+-            },
+-            presentControllerInCurrent: { _, _ in
+-            },
+-            navigationController: {
+-                return nil
+-            },
+-            chatControllerNode: {
+-                return nil
+-            },
+-            presentGlobalOverlayController: { _, _ in },
+-            callPeer: { _, _ in },
+-            openConferenceCall: { _ in
+-            },
+-            longTap: { _, _ in
+-            },
+-            todoItemLongTap: { _, _ in
+-            },
+-            pollOptionLongTap: { _, _ in
+-            },
+-            openCheckoutOrReceipt: { _, _ in
+-            },
+-            openSearch: {
+-            },
+-            setupReply: { _ in
+-            },
+-            canSetupReply: { _ in
+-                return .none
+-            },
+-            canSendMessages: {
+-                return false
+-            },
+-            navigateToFirstDateMessage: { _, _ in
+-            },
+-            requestRedeliveryOfFailedMessages: { _ in
+-            },
+-            addContact: { _ in
+-            },
+-            rateCall: { _, _, _ in
+-            },
+-            requestSelectMessagePollOptions: { _, _ in
+-            },
+-            requestAddMessagePollOption: { _, _, _, _, _ in
+-            },
+-            requestOpenMessagePollResults: { _, _ in
+-            },
+-            openAppStorePage: {
+-            },
+-            displayMessageTooltip: { _, _, _, _, _ in
+-            },
+-            seekToTimecode: { _, _, _ in
+-            },
+-            scheduleCurrentMessage: { _ in
+-            },
+-            sendScheduledMessagesNow: { _ in
+-            },
+-            editScheduledMessagesTime: { _ in
+-            },
+-            performTextSelectionAction: { _, _, _, _, _ in
+-            },
+-            displayImportedMessageTooltip: { _ in
+-            },
+-            displaySwipeToReplyHint: {
+-            },
+-            dismissReplyMarkupMessage: { _ in
+-            },
+-            openMessagePollResults: { _, _ in
+-            },
+-            openPollCreation: { _, _ in
+-            },
+-            openPollMedia: { _, _ in
+-            },
+-            displayPollSolution: { _, _ in
+-            },
+-            displayPsa: { _, _ in
+-            },
+-            displayDiceTooltip: { _ in
+-            },
+-            animateDiceSuccess: { _, _ in
+-            },
+-            displayPremiumStickerTooltip: { _, _ in
+-            },
+-            displayEmojiPackTooltip: { _, _ in
+-            },
+-            openPeerContextMenu: { _, _, _, _, _ in
+-            },
+-            openMessageReplies: { _, _, _ in
+-            },
+-            openReplyThreadOriginalMessage: { _ in
+-            },
+-            openMessageStats: { _ in
+-            },
+-            editMessageMedia: { _, _ in
+-            },
+-            copyText: { text in UIPasteboard.general.string = text },
+-            displayUndo: { _ in
+-            },
+-            isAnimatingMessage: { _ in
+-                return false
+-            },
+-            getMessageTransitionNode: {
+-                return nil
+-            },
+-            updateChoosingSticker: { _ in
+-            },
+-            commitEmojiInteraction: { _, _, _, _ in
+-            },
+-            openLargeEmojiInfo: { _, _, _ in
+-            },
+-            openJoinLink: { _ in
+-            },
+-            openWebView: { _, _, _, _, _ in
+-            },
+-            activateAdAction: { _, _, _, _ in
+-            },
+-            adContextAction: { _, _, _ in
+-            },
+-            removeAd: { _ in
+-            },
+-            openRequestedPeerSelection: { _, _, _, _ in
+-            },
+-            saveMediaToFiles: { _ in
+-            },
+-            openNoAdsDemo: {
+-            },
+-            openAdsInfo: {
+-            },
+-            displayGiveawayParticipationStatus: { _ in
+-            },
+-            openPremiumStatusInfo: { _, _, _, _ in
+-            },
+-            openRecommendedChannelContextMenu: { _, _, _ in
+-            },
+-            openGroupBoostInfo: { _, _ in
+-            },
+-            openStickerEditor: {
+-            },
+-            openAgeRestrictedMessageMedia: { _, _ in
+-            },
+-            playMessageEffect: { _ in
+-            },
+-            editMessageFactCheck: { _ in
+-            },
+-            sendGift: { _ in
+-            },
+-            openUniqueGift: { _ in
+-            },
+-            openMessageFeeException: {
+-            },
+-            requestMessageUpdate: { _, _, _ in
+-            },
+-            cancelInteractiveKeyboardGestures: {
+-            },
+-            dismissTextInput: {
+-            },
+-            scrollToMessageId: { _, _ in
+-            },
+-            scrollToMessageIdWithAnchor: { _, _ in
+-            },
+-            navigateToStory: { _, _ in
+-            },
+-            attemptedNavigationToPrivateQuote: { _ in
+-            },
+-            forceUpdateWarpContents: {
+-            },
+-            playShakeAnimation: {
+-            },
+-            displayQuickShare: { _, _ ,_ in
+-            },
+-            updateChatLocationThread: { _, _ in
+-            },
+-            requestToggleTodoMessageItem: { _, _, _ in
+-            },
+-            displayTodoToggleUnavailable: { _ in
+-            },
+-            openStarsPurchase: { _ in
+-            },
+-            openRankInfo: { _, _, _ in
+-            },
+-            openSetPeerAvatar: {
+-            },
+-            displayPollRestrictedToast: { _ in
+-            },
+-            automaticMediaDownloadSettings: MediaAutoDownloadSettings.defaultSettings,
+-            pollActionState: ChatInterfacePollActionState(),
+-            stickerSettings: ChatInterfaceStickerSettings(),
+-            presentationContext: ChatPresentationContext(context: context, backgroundNode: backgroundNode)
+-        )
++private func historyInteraction(
++    context: AccountContext, backgroundNode: WallpaperBackgroundNode, copy: @escaping (Message) -> Void
++) -> ChatControllerInteraction {
++    return ChatControllerInteraction(
++        openMessage: { message, _ in
++            copy(message)
++            return true
++        },
++        openPeer: { _, _, _, _ in },
++        openPeerMention: { _, _ in },
++        openMessageContextMenu: { message, _, _, _, _, _ in copy(message) },
++        openMessageReactionContextMenu: { _, _, _, _ in
++        },
++        updateMessageReaction: { _, _, _, _ in },
++        activateMessagePinch: { _ in
++        },
++        openMessageContextActions: { _, _, _, _ in },
++        navigateToMessage: { _, _, _ in },
++        navigateToMessageStandalone: { _ in
++        },
++        navigateToThreadMessage: { _, _, _ in
++        },
++        tapMessage: { message in copy(message) },
++        clickThroughMessage: { _, _ in },
++        toggleMessagesSelection: { _, _ in },
++        sendCurrentMessage: { _, _ in },
++        sendMessage: { _, _ in },
++        sendSticker: { _, _, _, _, _, _, _, _, _ in return false },
++        sendEmoji: { _, _, _ in },
++        sendGif: { _, _, _, _, _ in return false },
++        sendBotContextResultAsGif: { _, _, _, _, _, _ in
++            return false
++        },
++        editGif: { _, _ in
++        },
++        requestMessageActionCallback: { _, _, _, _, _ in },
++        requestMessageActionUrlAuth: { _, _ in },
++        activateSwitchInline: { _, _, _ in },
++        openUrl: { _ in },
++        openExternalInstantPage: { _ in
++        },
++        shareCurrentLocation: { _ in },
++        shareAccountContact: { _ in },
++        sendBotCommand: { _, _ in },
++        openInstantPage: { _, _ in },
++        openWallpaper: { _ in },
++        openTheme: { _ in },
++        openHashtag: { _, _ in },
++        updateInputState: { _ in },
++        updateInputMode: { _ in },
++        updatePresentationState: { _ in },
++        openMessageShareMenu: { _ in
++        },
++        presentController: { _, _ in
++        },
++        presentControllerInCurrent: { _, _ in
++        },
++        navigationController: {
++            return nil
++        },
++        chatControllerNode: {
++            return nil
++        },
++        presentGlobalOverlayController: { _, _ in },
++        callPeer: { _, _ in },
++        openConferenceCall: { _ in
++        },
++        longTap: { _, _ in
++        },
++        todoItemLongTap: { _, _ in
++        },
++        pollOptionLongTap: { _, _ in
++        },
++        openCheckoutOrReceipt: { _, _ in
++        },
++        openSearch: {
++        },
++        setupReply: { _ in
++        },
++        canSetupReply: { _ in
++            return .none
++        },
++        canSendMessages: {
++            return false
++        },
++        navigateToFirstDateMessage: { _, _ in
++        },
++        requestRedeliveryOfFailedMessages: { _ in
++        },
++        addContact: { _ in
++        },
++        rateCall: { _, _, _ in
++        },
++        requestSelectMessagePollOptions: { _, _ in
++        },
++        requestAddMessagePollOption: { _, _, _, _, _ in
++        },
++        requestOpenMessagePollResults: { _, _ in
++        },
++        openAppStorePage: {
++        },
++        displayMessageTooltip: { _, _, _, _, _ in
++        },
++        seekToTimecode: { _, _, _ in
++        },
++        scheduleCurrentMessage: { _ in
++        },
++        sendScheduledMessagesNow: { _ in
++        },
++        editScheduledMessagesTime: { _ in
++        },
++        performTextSelectionAction: { _, _, _, _, _ in
++        },
++        displayImportedMessageTooltip: { _ in
++        },
++        displaySwipeToReplyHint: {
++        },
++        dismissReplyMarkupMessage: { _ in
++        },
++        openMessagePollResults: { _, _ in
++        },
++        openPollCreation: { _, _ in
++        },
++        openPollMedia: { _, _ in
++        },
++        displayPollSolution: { _, _ in
++        },
++        displayPsa: { _, _ in
++        },
++        displayDiceTooltip: { _ in
++        },
++        animateDiceSuccess: { _, _ in
++        },
++        displayPremiumStickerTooltip: { _, _ in
++        },
++        displayEmojiPackTooltip: { _, _ in
++        },
++        openPeerContextMenu: { _, _, _, _, _ in
++        },
++        openMessageReplies: { _, _, _ in
++        },
++        openReplyThreadOriginalMessage: { _ in
++        },
++        openMessageStats: { _ in
++        },
++        editMessageMedia: { _, _ in
++        },
++        copyText: { text in UIPasteboard.general.string = text },
++        displayUndo: { _ in
++        },
++        isAnimatingMessage: { _ in
++            return false
++        },
++        getMessageTransitionNode: {
++            return nil
++        },
++        updateChoosingSticker: { _ in
++        },
++        commitEmojiInteraction: { _, _, _, _ in
++        },
++        openLargeEmojiInfo: { _, _, _ in
++        },
++        openJoinLink: { _ in
++        },
++        openWebView: { _, _, _, _, _ in
++        },
++        activateAdAction: { _, _, _, _ in
++        },
++        adContextAction: { _, _, _ in
++        },
++        removeAd: { _ in
++        },
++        openRequestedPeerSelection: { _, _, _, _ in
++        },
++        saveMediaToFiles: { _ in
++        },
++        openNoAdsDemo: {
++        },
++        openAdsInfo: {
++        },
++        displayGiveawayParticipationStatus: { _ in
++        },
++        openPremiumStatusInfo: { _, _, _, _ in
++        },
++        openRecommendedChannelContextMenu: { _, _, _ in
++        },
++        openGroupBoostInfo: { _, _ in
++        },
++        openStickerEditor: {
++        },
++        openAgeRestrictedMessageMedia: { _, _ in
++        },
++        playMessageEffect: { _ in
++        },
++        editMessageFactCheck: { _ in
++        },
++        sendGift: { _ in
++        },
++        openUniqueGift: { _ in
++        },
++        openMessageFeeException: {
++        },
++        requestMessageUpdate: { _, _, _ in
++        },
++        cancelInteractiveKeyboardGestures: {
++        },
++        dismissTextInput: {
++        },
++        scrollToMessageId: { _, _ in
++        },
++        scrollToMessageIdWithAnchor: { _, _ in
++        },
++        navigateToStory: { _, _ in
++        },
++        attemptedNavigationToPrivateQuote: { _ in
++        },
++        forceUpdateWarpContents: {
++        },
++        playShakeAnimation: {
++        },
++        displayQuickShare: { _, _, _ in
++        },
++        updateChatLocationThread: { _, _ in
++        },
++        requestToggleTodoMessageItem: { _, _, _ in
++        },
++        displayTodoToggleUnavailable: { _ in
++        },
++        openStarsPurchase: { _ in
++        },
++        openRankInfo: { _, _, _ in
++        },
++        openSetPeerAvatar: {
++        },
++        displayPollRestrictedToast: { _ in
++        },
++        automaticMediaDownloadSettings: MediaAutoDownloadSettings.defaultSettings,
++        pollActionState: ChatInterfacePollActionState(),
++        stickerSettings: ChatInterfaceStickerSettings(),
++        presentationContext: ChatPresentationContext(context: context, backgroundNode: backgroundNode)
++    )
+ }
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 78686458..85f9ffff 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -2304,7 +2304,7 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+ 
+         if message.id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(message.id.peerId) {
+             var event = PluginEvent(kind: .message, name: "message_menu", account: additionalAccountKey(context.account.peerId), chat: chat, text: message.text)
+-            event.pluginOrigin = additionalPluginIsOrigin(message.id)
++            event.pluginOrigin = additionalPluginIsOrigin(message.id, account: context.account.peerId)
+             event.message = additionalPluginSnapshot(id: message.id.id, sender: message.author?.id, timestamp: message.timestamp, thread: message.threadId, text: message.text, attributes: message.attributes, media: message.media)
+             for item in PluginRegistry.shared.menuItems(location: .message, event: event) {
+                 actions.append(.action(ContextMenuActionItem(text: item.title, icon: { theme in
