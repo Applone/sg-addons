@@ -14,5 +14,6 @@ core/addons.patch
 core/local-saved-tags.patch
 build/python-runtime-ci.patch
 core/reliability-and-formatting.patch
+core/network-telemetry-tests.patch
 core/deleted-message-archive.patch
 ui/deleted-message-archive.patch
