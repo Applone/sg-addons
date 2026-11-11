@@ -1027,10 +1027,10 @@ index d52d4732..ddef278c 100644
      }
  }
 diff --git a/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
-index bb430085..20c74fc5 100644
+index bb430085..a2e0c3d0 100644
 --- a/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
 +++ b/Swiftgram/SGAdditionalCore/Tests/PythonPluginChecks.swift
-@@ -1,7 +1,40 @@
+@@ -1,7 +1,51 @@
  import Foundation
  
  enum PythonPluginChecks {
@@ -1051,18 +1051,29 @@ index bb430085..20c74fc5 100644
 +                def pre_request_hook(self, event):
 +                    return None
 +            """
++        let adapter = StartupActionAdapter()
++        registry.registerActionAdapter(account: "77", adapter: adapter)
 +        let manifest = try registry.install(Data(source.utf8))
 +        try registry.setEnabled(manifest.id, account: "77", enabled: true)
-+        // Release the interpreter while retaining persisted enablement, as on restart.
-+        let record = registry.records()[0]
-+        try PythonPluginRuntime.shared.unload(
-+            record, account: "77", marker: directory.appendingPathComponent("python-invocation.json"))
++        CheckCore.require(adapter.started.wait(timeout: .now() + 2) == .success, "initial startup action reaches host")
++        let file = directory.appendingPathComponent("registry.json")
++        let desired = try Data(contentsOf: file)
++        // A process restart retires the old action executor as well as its interpreter.
++        // Use the lifecycle API to invalidate old generations before restoring desired state.
++        try registry.setSafeMode(true)
++        try desired.write(to: file, options: .atomic)
 +        let reloaded = PluginRegistry(directory: directory, hostVersion: "13.0.1")
++        reloaded.registerActionAdapter(account: "77", adapter: adapter)
 +        let event = PluginEvent(kind: .preRequest, name: "account.updateStatus", account: "77")
 +        CheckCore.require(reloaded.dispatch(event) == event, "startup actions preserve first request")
++        CheckCore.require(adapter.started.wait(timeout: .now() + 2) == .success, "restored startup action reaches host")
++        adapter.reply()  // Deliberately late completion from the retired registry.
++        adapter.reply()  // Completion belonging to the restored registry.
++        let restored = reloaded.records()[0]
 +        CheckCore.require(
-+            reloaded.records()[0].isEnabled(account: "77"),
-+            "startup actions are validated as lifecycle actions, not request actions")
++            restored.isEnabled(account: "77"),
++            "startup actions are validated as lifecycle actions, not request actions: " + (restored.error ?? "no error")
++        )
 +        try reloaded.remove(manifest.id)
 +    }
 +
@@ -1071,6 +1082,36 @@ index bb430085..20c74fc5 100644
          let registry = PluginRegistry(directory: root.appendingPathComponent("python-core"), hostVersion: "13.0.1")
          guard let examples = ProcessInfo.processInfo.environment["SGA_PLUGIN_EXAMPLES"] else {
              throw SettingsError.invalid("Run Python checks using tools/test-core.sh.")
+@@ -100,3 +144,29 @@ enum PythonPluginChecks {
+             "failed activation stays inactive")
+     }
+ }
++
++private final class StartupActionAdapter: PluginActionAdapter {
++    let started = DispatchSemaphore(value: 0)
++    private let lock = NSLock()
++    private var replies: [() -> Void] = []
++
++    func execute(
++        _ action: PluginAction, directory: URL, progress: @escaping (Double) -> Void,
++        completion: @escaping (PluginActionResult) -> Void
++    ) -> () -> Void {
++        lock.lock()
++        replies.append { completion(.init(id: action.id, status: "completed")) }
++        lock.unlock()
++        started.signal()
++        // Keep the reply available after cancellation to exercise late delivery.
++        return {}
++    }
++
++    func reply() {
++        lock.lock()
++        let reply = replies.isEmpty ? nil : replies.removeFirst()
++        lock.unlock()
++        CheckCore.require(reply != nil, "startup action has a pending reply")
++        reply?()
++    }
++}
 diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
 index 87e0e65c..29d4dffd 100644
 --- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
