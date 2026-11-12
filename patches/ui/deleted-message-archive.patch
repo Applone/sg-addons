@@ -49,13 +49,14 @@ index aaee9800..319bc28d 100644
 +)
 diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift
 new file mode 100644
-index 00000000..da3e1372
+index 00000000..6d6deeb6
 --- /dev/null
 +++ b/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift
-@@ -0,0 +1,748 @@
+@@ -0,0 +1,747 @@
 +import AccountContext
 +import Display
 +import Foundation
++import Postbox
 +import QuickLook
 +import SGAdditionalCore
 +import SGStrings
@@ -109,9 +110,8 @@ index 00000000..da3e1372
 +    var generation = 0
 +    var loading = false
 +    var failure: String?
-+    weak var weakModel = model
-+    func load(reset: Bool) {
-+        guard let model = weakModel else { return }
++    let load: (Bool) -> Void = { [weak model] reset in
++        guard let model else { return }
 +        generation += 1
 +        let request = generation
 +        loading = true
@@ -207,13 +207,13 @@ index 00000000..da3e1372
 +            date = value
 +        } else if id == 7 {
 +            deletedOnly = value == "1"
-+            load(reset: true)
++            load(true)
 +        }
 +    }
 +    model.action = { [weak model] id in
 +        guard let model else { return }
 +        if id == 2 {
-+            load(reset: true)
++            load(true)
 +        } else if id == 3 {
 +            let data = context.sharedContext.currentPresentationData.with { $0 }
 +            let sheet = ActionSheetController(presentationData: data)
@@ -225,7 +225,7 @@ index 00000000..da3e1372
 +                    action: { [weak sheet] in
 +                        sheet?.dismissAnimated()
 +                        kind = value
-+                        load(reset: true)
++                        load(true)
 +                    })
 +            }
 +            sheet.setItemGroups([ActionSheetItemGroup(items: items)])
@@ -235,15 +235,15 @@ index 00000000..da3e1372
 +        } else if id == 8 {
 +            model.push(additionalArchiveChatsController(context: context, account: account))
 +        } else if id == 10 {
-+            load(reset: false)
++            load(false)
 +        } else if id >= 100, entries.indices.contains(id - 100) {
 +            model.push(
 +                additionalArchivedMessageController(
-+                    context: context, message: entries[id - 100].message, refresh: { load(reset: true) }))
++                    context: context, message: entries[id - 100].message, refresh: { load(true) }))
 +        }
 +    }
 +    let controller = model.make(title: archiveTitle("Title", context))
-+    load(reset: true)
++    load(true)
 +    return controller
 +}
 +
@@ -400,9 +400,8 @@ index 00000000..da3e1372
 +            model?.refresh()
 +        }
 +    }
-+    weak var weakModel = model
-+    func loadDetails() {
-+        guard let model = weakModel else { return }
++    let loadDetails: () -> Void = { [weak model] in
++        guard let model else { return }
 +        loadGeneration += 1
 +        let generation = loadGeneration
 +        DispatchQueue.global(qos: .utility).async { [weak model] in

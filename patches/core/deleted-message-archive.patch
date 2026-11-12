@@ -2583,10 +2583,10 @@ index e833bda0..1fe1d79f 100644
      }
 diff --git a/submodules/TelegramCore/Tests/AdditionalArchiveTests.swift b/submodules/TelegramCore/Tests/AdditionalArchiveTests.swift
 new file mode 100644
-index 00000000..33467a94
+index 00000000..b5fb02b4
 --- /dev/null
 +++ b/submodules/TelegramCore/Tests/AdditionalArchiveTests.swift
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,94 @@
 +import Foundation
 +import Postbox
 +import SGAdditionalCore
@@ -2595,6 +2595,12 @@ index 00000000..33467a94
 +@testable import TelegramCore
 +
 +final class AdditionalArchiveTests: XCTestCase {
++    override class func setUp() {
++        super.setUp()
++        // Match app startup before decoding archived Postbox objects without a live account.
++        initializeAccountManagement()
++    }
++
 +    private func archived(
 +        version: Int = 1, attributes: [MessageAttribute] = [], forward: AdditionalArchivedPayload.Forward? = nil
 +    ) throws -> ArchivedMessage {
@@ -2626,8 +2632,10 @@ index 00000000..33467a94
 +        XCTAssertEqual(revision.messageDate, 100)
 +        let restored = additionalTextEntities(revision)
 +        XCTAssertEqual(restored.count, 2)
-+        XCTAssertEqual(restored[0].range, 0..<5)
-+        if case .TextUrl(let url) = restored[1].type {
++        let first = try XCTUnwrap(restored.first)
++        let link = try XCTUnwrap(restored.dropFirst().first)
++        XCTAssertEqual(first.range, 0..<5)
++        if case .TextUrl(let url) = link.type {
 +            XCTAssertEqual(url, "https://example.com")
 +        } else {
 +            XCTFail("Archived link lost its target")
