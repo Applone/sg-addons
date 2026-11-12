@@ -39,6 +39,8 @@ swift format lint --strict --configuration "$repo_dir/tools/swift-format.json" \
     "$core_dir"/Sources/*.swift "$core_dir"/Tests/*.swift \
     "$source_dir"/submodules/TelegramCore/Sources/AdditionalFunctions/*.swift \
     "$source_dir"/submodules/TelegramCore/Tests/Additional*.swift \
+    "$source_dir/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift" \
+    "$source_dir/submodules/TelegramApi/Sources/LegacyConstructors.swift" \
     "$source_dir"/submodules/Postbox/Tests/Additional*.swift \
     "$source_dir"/Swiftgram/SGSettingsUI/Sources/Additional*.swift \
     "$source_dir"/Swiftgram/SGSettingsUI/Tests/Additional*.swift \

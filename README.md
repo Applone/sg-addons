@@ -104,6 +104,34 @@ The workflow fetches pinned sources and submodules, applies patches, runs core
 tests, and builds on macOS with the upstream Xcode version. Pushes and pull
 requests run lint, patch verification, and core tests automatically.
 
+### BuildBuddy build cache
+
+The IPA workflow uses [BuildBuddy](https://www.buildbuddy.io/docs/quickstart/)
+to share Bazel build outputs across release tags and manual runs. Both the Apple
+integration suite and device build read and populate the remote cache. Tests still
+execute on every run; builds run on the existing macOS runner.
+
+Before starting a build:
+
+1. Create a BuildBuddy account and an API key with permission to read and write
+   the action cache and cached artifacts. See the
+   [authentication guide](https://www.buildbuddy.io/docs/guide-auth/).
+2. Add that key as the GitHub repository Actions secret `BUILDBUDDY_API_KEY`.
+3. If your BuildBuddy account uses a different endpoint, set the repository Actions
+   variable `BUILDBUDDY_CACHE_URL` to its `grpcs://` URL. The default is
+   `grpcs://remote.buildbuddy.io`; it serves both the remote cache and build events.
+
+The workflow requires the key and writes authenticated Bazel settings into a
+temporary file on the runner. It enables compressed cache transfers and uploads
+build events, with a BuildBuddy invocation link in each Bazel build/test log for
+inspecting cache hits and misses.
+
+The first build populates the cache. Later tags reuse unchanged actions while
+Bazel rebuilds outputs whose inputs, configuration, or toolchain changed. No
+default-branch warm-up build is needed. Reuse depends on BuildBuddy retention and
+the cached outputs still being available; source preparation and submodule
+downloads run as before.
+
 ## Build configuration
 
 Use this complete JSON for the CI secret or a local configuration file.

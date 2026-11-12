@@ -49,7 +49,7 @@ index aaee9800..319bc28d 100644
 +)
 diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift
 new file mode 100644
-index 00000000..6d6deeb6
+index 00000000..746fc846
 --- /dev/null
 +++ b/Swiftgram/SGSettingsUI/Sources/AdditionalArchive.swift
 @@ -0,0 +1,747 @@
@@ -342,7 +342,7 @@ index 00000000..6d6deeb6
 +        } else if id == 3 {
 +            archiveConfirm(model) {
 +                archivePurge(context: context, account: message.id.account, message: message.id) {
-+                    [weak model] success in
++                    [weak model = model] success in
 +                    guard let model else { return }
 +                    if success {
 +                        refresh()
@@ -618,7 +618,7 @@ index 00000000..6d6deeb6
 +            archiveConfirm(model) {
 +                archivePurge(
 +                    context: context, account: account ?? additionalAccountKey(context.account.peerId), chat: chat
-+                ) { [weak model] success in
++                ) { [weak model = model] success in
 +                    guard let model else { return }
 +                    if success {
 +                        usage = archiveTitle("Loading", context)

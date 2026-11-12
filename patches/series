@@ -17,3 +17,4 @@ core/reliability-and-formatting.patch
 core/network-telemetry-tests.patch
 core/deleted-message-archive.patch
 ui/deleted-message-archive.patch
+core/upstream-compatibility.patch
