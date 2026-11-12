@@ -1,0 +1,16 @@
+diff --git a/submodules/TelegramCore/Tests/NetworkTelemetryTests.swift b/submodules/TelegramCore/Tests/NetworkTelemetryTests.swift
+index 7364ae1d..48ba071a 100644
+--- a/submodules/TelegramCore/Tests/NetworkTelemetryTests.swift
++++ b/submodules/TelegramCore/Tests/NetworkTelemetryTests.swift
+@@ -1132,7 +1132,10 @@ final class NetworkTelemetryTests: XCTestCase {
+ 
+     func testConfigurationParsing() {
+         func configuration(_ values: [String: JSON]?) -> NetworkTelemetryConfiguration {
+-            return NetworkTelemetryConfiguration.with(appConfiguration: AppConfiguration(data: values.map { .dictionary($0) }, hash: 0))
++            var configuration = AppConfiguration.defaultValue
++            configuration.data = values.map { .dictionary($0) }
++            configuration.hash = 0
++            return NetworkTelemetryConfiguration.with(appConfiguration: configuration)
+         }
+         XCTAssertEqual(configuration(nil), .disabled)
+         XCTAssertEqual(configuration([:]), .disabled)
