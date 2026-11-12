@@ -51,6 +51,25 @@ jobs:
                   raise SystemExit(f'BUILD_CONFIGURATION_JSON is missing {key}')
           Path(os.environ['RUNNER_TEMP'], 'sg-addons-build.json').write_text(raw)
           PY
+      - name: Configure BuildBuddy remote cache
+        env:
+          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+          BUILDBUDDY_CACHE_URL: ${{ vars.BUILDBUDDY_CACHE_URL || 'grpcs://remote.buildbuddy.io' }}
+        run: |
+          if [[ -z "$BUILDBUDDY_API_KEY" ]]; then
+            echo '::error::Set the BUILDBUDDY_API_KEY repository secret; see README.md'
+            exit 1
+          fi
+          umask 077
+          {
+            printf 'build --remote_cache=%s\n' "$BUILDBUDDY_CACHE_URL"
+            printf 'build --remote_header=x-buildbuddy-api-key=%s\n' "$BUILDBUDDY_API_KEY"
+            printf 'build --remote_cache_compression\n'
+            printf 'build --bes_backend=%s\n' "$BUILDBUDDY_CACHE_URL"
+            printf 'build --bes_header=x-buildbuddy-api-key=%s\n' "$BUILDBUDDY_API_KEY"
+            printf 'build --bes_results_url=https://app.buildbuddy.io/invocation/\n'
+          } > "$RUNNER_TEMP/sg-addons-buildbuddy.bazelrc"
+          printf '\nimport %s\n' "$RUNNER_TEMP/sg-addons-buildbuddy.bazelrc" >> "$HOME/.bazelrc"
       - name: Fetch pinned upstream, apply patches and fetch build submodules
         run: python3 tools/patches.py prepare "$SOURCE_DIR" --submodules
       - name: Select upstream Xcode

@@ -1,0 +1,277 @@
+diff --git a/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift b/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift
+index 8437591b..76d403dc 100644
+--- a/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift
++++ b/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift
+@@ -586,6 +586,17 @@ enum CodeGenerator {
+             }
+         }
+ 
++        // The pinned layer still receives these older server layouts.
++        if apiPrefix == "Api" {
++            let ids = Set(types.flatMap { $0.constructors.values.map { $0.id } })
++            if ids.contains(114026053) {
++                writer.line("dict[2145859780] = { return Api.UserFull.parseLegacyUserFull($0) }")
++            }
++            if ids.contains(UInt32(bitPattern: -25628980)) {
++                writer.line("dict[-1581738523] = { return Api.WalletUserAddress.parseLegacyWalletUserAddress($0) }")
++            }
++        }
++
+         writer.line("return dict")
+         writer.dedent()
+         writer.line("}()")
+diff --git a/submodules/Postbox/BUILD b/submodules/Postbox/BUILD
+index 0b37fe7e..83c17bb5 100644
+--- a/submodules/Postbox/BUILD
++++ b/submodules/Postbox/BUILD
+@@ -55,4 +55,6 @@ ios_test_runner(
+ ios_unit_test(
+     name = "PostboxTests",
++    # Includes timed cleanup scans plus simulator startup on shared CI runners.
++    timeout = "long",
+     minimum_os_version = "15.0",
+     runner = ":PostboxTestRunner",
+diff --git a/submodules/TelegramApi/Sources/Api0.swift b/submodules/TelegramApi/Sources/Api0.swift
+index 3fca6d28..7bf071d2 100644
+--- a/submodules/TelegramApi/Sources/Api0.swift
++++ b/submodules/TelegramApi/Sources/Api0.swift
+@@ -1764,6 +1764,8 @@ fileprivate let parsers: [Int32 : (BufferReader) -> Any?] = {
+     dict[236939414] = { return Api.wallet.TonConnectSessions.parse_tonConnectSessions($0) }
+     dict[1126356389] = { return Api.wallet.Transactions.parse_transactions($0) }
+     dict[-1836156075] = { return Api.wallet.UserAddresses.parse_userAddresses($0) }
++    dict[2145859780] = { return Api.UserFull.parseLegacyUserFull($0) }
++    dict[-1581738523] = { return Api.WalletUserAddress.parseLegacyWalletUserAddress($0) }
+     return dict
+ }()
+ 
+diff --git a/submodules/TelegramApi/Sources/LegacyConstructors.swift b/submodules/TelegramApi/Sources/LegacyConstructors.swift
+new file mode 100644
+index 00000000..e910b5c5
+--- /dev/null
++++ b/submodules/TelegramApi/Sources/LegacyConstructors.swift
+@@ -0,0 +1,22 @@
++// Legacy constructors still sent by servers at the pinned API layer.
++// Keep current serialization unchanged; adapt only the older incoming layouts.
++extension Api.UserFull {
++    static func parseLegacyUserFull(_ reader: BufferReader) -> Api.UserFull? {
++        guard let value = parse_userFull(reader), case .userFull(let data) = value else { return nil }
++        if data.flags2 & (1 << 27) != 0 {
++            guard parseString(reader) != nil else { return nil }
++        }
++        return value
++    }
++}
++
++extension Api.WalletUserAddress {
++    static func parseLegacyWalletUserAddress(_ reader: BufferReader) -> Api.WalletUserAddress? {
++        guard let userId = reader.readInt64(), let address = parseString(reader), let publicKey = parseBytes(reader)
++        else {
++            return nil
++        }
++        return .walletUserAddress(
++            Cons_walletUserAddress(flags: 1, userId: userId, address: address, publicKey: publicKey))
++    }
++}
+diff --git a/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift b/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift
+index 38e9f8ba..64d6d394 100644
+--- a/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift
++++ b/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift
+@@ -1,5 +1,6 @@
+-import XCTest
+ import TelegramApi
++import XCTest
++
+ @testable import TelegramCore
+ 
+ private func appendTLBytes(_ bytes: Data, to buffer: Buffer) {
+@@ -28,8 +29,18 @@ final class ApiConstructorCompatibilityTests: XCTestCase {
+         buffer.appendInt32(0)
+         buffer.appendInt32(flags2)
+         buffer.appendInt64(777)
+-        Api.PeerSettings.peerSettings(Api.PeerSettings.Cons_peerSettings(flags: 0, geoDistance: nil, requestChatTitle: nil, requestChatDate: nil, businessBotId: nil, businessBotManageUrl: nil, chargePaidMessageStars: nil, registrationMonth: nil, phoneCountry: nil, nameChangeDate: nil, photoChangeDate: nil)).serialize(buffer, true)
+-        Api.PeerNotifySettings.peerNotifySettings(Api.PeerNotifySettings.Cons_peerNotifySettings(flags: 0, showPreviews: nil, silent: nil, muteUntil: nil, iosSound: nil, androidSound: nil, otherSound: nil, storiesMuted: nil, storiesHideSender: nil, storiesIosSound: nil, storiesAndroidSound: nil, storiesOtherSound: nil)).serialize(buffer, true)
++        Api.PeerSettings.peerSettings(
++            Api.PeerSettings.Cons_peerSettings(
++                flags: 0, geoDistance: nil, requestChatTitle: nil, requestChatDate: nil, businessBotId: nil,
++                businessBotManageUrl: nil, chargePaidMessageStars: nil, registrationMonth: nil, phoneCountry: nil,
++                nameChangeDate: nil, photoChangeDate: nil)
++        ).serialize(buffer, true)
++        Api.PeerNotifySettings.peerNotifySettings(
++            Api.PeerNotifySettings.Cons_peerNotifySettings(
++                flags: 0, showPreviews: nil, silent: nil, muteUntil: nil, iosSound: nil, androidSound: nil,
++                otherSound: nil, storiesMuted: nil, storiesHideSender: nil, storiesIosSound: nil,
++                storiesAndroidSound: nil, storiesOtherSound: nil)
++        ).serialize(buffer, true)
+         buffer.appendInt32(5)
+         if let gramAddress {
+             appendTLBytes(gramAddress.data(using: .utf8)!, to: buffer)
+@@ -38,36 +49,41 @@ final class ApiConstructorCompatibilityTests: XCTestCase {
+     }
+ 
+     private func parsedUserFull(_ buffer: Buffer) -> Api.UserFull.Cons_userFull? {
+-        buffer.appendInt32(0x0badf00d)
++        buffer.appendInt32(0x0bad_f00d)
+         let reader = BufferReader(buffer)
+-        guard let signature = reader.readInt32(), let value = Api.parse(reader, signature: signature) as? Api.UserFull, case let .userFull(data) = value else {
++        guard let signature = reader.readInt32(), let value = Api.parse(reader, signature: signature) as? Api.UserFull,
++            case .userFull(let data) = value
++        else {
+             return nil
+         }
+-        XCTAssertEqual(reader.readInt32(), 0x0badf00d, "the parser must consume exactly the userFull bytes")
++        XCTAssertEqual(reader.readInt32(), 0x0bad_f00d, "the parser must consume exactly the userFull bytes")
+         return data
+     }
+ 
+     func testUserFullParsesWithAndWithoutTheGramAddressLayout() {
+-        let current = parsedUserFull(self.userFullBytes(constructor: 114026053, flags2: 0, gramAddress: nil))
++        let current = parsedUserFull(self.userFullBytes(constructor: 114_026_053, flags2: 0, gramAddress: nil))
+         XCTAssertEqual(current?.id, 777)
+         XCTAssertEqual(current?.commonChatsCount, 5)
+ 
+-        let previous = parsedUserFull(self.userFullBytes(constructor: 2145859780, flags2: 0, gramAddress: nil))
++        let previous = parsedUserFull(self.userFullBytes(constructor: 2_145_859_780, flags2: 0, gramAddress: nil))
+         XCTAssertEqual(previous?.id, 777, "the layout production still sends at this layer")
+         XCTAssertEqual(previous?.commonChatsCount, 5)
+ 
+-        let previousWithAddress = parsedUserFull(self.userFullBytes(constructor: 2145859780, flags2: 1 << 27, gramAddress: "UQAddress"))
++        let previousWithAddress = parsedUserFull(
++            self.userFullBytes(constructor: 2_145_859_780, flags2: 1 << 27, gramAddress: "UQAddress"))
+         XCTAssertEqual(previousWithAddress?.id, 777)
+         XCTAssertEqual(previousWithAddress?.commonChatsCount, 5)
+     }
+ 
+     func testWalletUserAddressParsesBothLayouts() {
+         let previous = Buffer()
+-        previous.appendInt32(-1581738523)
++        previous.appendInt32(-1_581_738_523)
+         previous.appendInt64(42)
+         appendTLBytes("UQAddress".data(using: .utf8)!, to: previous)
+         appendTLBytes(Data([1, 2, 3]), to: previous)
+-        guard let parsedPrevious = Api.parse(previous) as? Api.WalletUserAddress, case let .walletUserAddress(previousData) = parsedPrevious else {
++        guard let parsedPrevious = Api.parse(previous) as? Api.WalletUserAddress,
++            case .walletUserAddress(let previousData) = parsedPrevious
++        else {
+             return XCTFail("the previous walletUserAddress layout must still parse")
+         }
+         XCTAssertEqual(previousData.flags, 1 << 0)
+@@ -76,11 +92,27 @@ final class ApiConstructorCompatibilityTests: XCTestCase {
+         XCTAssertEqual(previousData.publicKey.makeData(), Data([1, 2, 3]))
+ 
+         let current = Buffer()
+-        Api.WalletUserAddress.walletUserAddress(Api.WalletUserAddress.Cons_walletUserAddress(flags: 0, userId: nil, address: "UQOther", publicKey: Buffer(data: Data([4])))).serialize(current, true)
+-        guard let parsedCurrent = Api.parse(current) as? Api.WalletUserAddress, case let .walletUserAddress(currentData) = parsedCurrent else {
++        Api.WalletUserAddress.walletUserAddress(
++            Api.WalletUserAddress.Cons_walletUserAddress(
++                flags: 0, userId: nil, address: "UQOther", publicKey: Buffer(data: Data([4])))
++        ).serialize(current, true)
++        guard let parsedCurrent = Api.parse(current) as? Api.WalletUserAddress,
++            case .walletUserAddress(let currentData) = parsedCurrent
++        else {
+             return XCTFail("the current walletUserAddress layout must parse")
+         }
+         XCTAssertNil(currentData.userId)
+         XCTAssertEqual(currentData.address, "UQOther")
+     }
++
++    func testLegacyConstructorsRejectMissingFields() {
++        let missingAddress = self.userFullBytes(constructor: 2_145_859_780, flags2: 1 << 27, gramAddress: nil)
++        XCTAssertNil(Api.parse(missingAddress))
++        let missingKey = Buffer()
++        missingKey.appendInt32(-1_581_738_523)
++        missingKey.appendInt64(42)
++        appendTLBytes(Data("UQAddress".utf8), to: missingKey)
++        XCTAssertNil(Api.parse(missingKey))
++    }
++
+ }
+diff --git a/submodules/TgVoipWebrtc/BUILD b/submodules/TgVoipWebrtc/BUILD
+index 1e4080dc..074ff83e 100644
+--- a/submodules/TgVoipWebrtc/BUILD
++++ b/submodules/TgVoipWebrtc/BUILD
+@@ -331,13 +331,12 @@ cc_test(
+         "-Ithird-party/webrtc/absl",
+         "-Ithird-party/libyuv",
+         "-DRTC_ENABLE_VP9",
+-        "-DNDEBUG",
+         "-std=c++17",
+         "-w",
+     ] + select({
+         "@platforms//os:linux": ["-DWEBRTC_LINUX", "-DWEBRTC_POSIX"],
+         "//conditions:default": ["-DWEBRTC_MAC", "-DWEBRTC_POSIX"],
+-    }),
++    }) + optimization_flags,
+     linkopts = select({
+         "@platforms//os:linux": ["-lpthread", "-lm", "-ldl"],
+         "//conditions:default": ["-framework", "CoreFoundation", "-framework", "Security"],
+@@ -355,13 +354,12 @@ cc_test(
+         "-Ithird-party/webrtc/absl",
+         "-Ithird-party/libyuv",
+         "-DRTC_ENABLE_VP9",
+-        "-DNDEBUG",
+         "-std=c++17",
+         "-w",
+     ] + select({
+         "@platforms//os:linux": ["-DWEBRTC_LINUX", "-DWEBRTC_POSIX"],
+         "//conditions:default": ["-DWEBRTC_MAC", "-DWEBRTC_POSIX"],
+-    }),
++    }) + optimization_flags,
+     linkopts = select({
+         "@platforms//os:linux": ["-lpthread", "-lm", "-ldl"],
+         "//conditions:default": ["-framework", "CoreFoundation", "-framework", "Security"],
+@@ -379,13 +377,12 @@ cc_test(
+         "-Ithird-party/webrtc/absl",
+         "-Ithird-party/libyuv",
+         "-DRTC_ENABLE_VP9",
+-        "-DNDEBUG",
+         "-std=c++17",
+         "-w",
+     ] + select({
+         "@platforms//os:linux": ["-DWEBRTC_LINUX", "-DWEBRTC_POSIX"],
+         "//conditions:default": ["-DWEBRTC_MAC", "-DWEBRTC_POSIX"],
+-    }),
++    }) + optimization_flags,
+     linkopts = select({
+         "@platforms//os:linux": ["-lpthread", "-lm", "-ldl"],
+         "//conditions:default": ["-framework", "CoreFoundation", "-framework", "Security"],
+@@ -513,3 +510,14 @@ cc_library(
+         "//visibility:public",
+     ],
+ )
++
++# Preserve the aggregate label used by Tests/AllTests after the call core split.
++test_suite(
++    name = "TgCallsTests",
++    tests = [
++        ":mtproto_dtls_transport_test",
++        ":streaming_audio_renderer_test",
++        ":group_frame_transformer_test",
++    ],
++    visibility = ["//visibility:public"],
++)
+diff --git a/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift b/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift
+index 730fdd58..5b06e1a3 100644
+--- a/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift
++++ b/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift
+@@ -168,7 +168,7 @@ class SliderPercentageItemNode: ListViewItemNode {
+     func asyncLayout() -> (_ item: SliderPercentageItem, _ params: ListViewItemLayoutParams, _ neighbors: ItemListNeighbors) -> (ListViewItemNodeLayout, () -> Void) {
+         let currentItem = self.item
+         
+-        return { item, params, neighbors in
++        return { [weak self] item, params, neighbors in
+             var themeUpdated = false
+             if currentItem?.theme !== item.theme {
+                 themeUpdated = true
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index 3111030f..de8be2be 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -808,7 +808,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+             case .languageSettings:
+                 pushControllerImpl?(context.sharedContext.makeLocalizationListController(context: context))
+             case .contentSettings:
+-                let _ = (getSGSettingsURL(context: context) |> deliverOnMainQueue).start(next: { [weak context] url in
++                let _ = (getSGSettingsURL(context: context) |> deliverOnMainQueue).start(next: { [weak context = context] url in
+                     guard let strongContext = context else {
+                         return
+                     }
