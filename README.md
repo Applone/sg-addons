@@ -35,42 +35,29 @@ and patched in `patches/series` order when preparing a build.
 
 ## Local message archive
 
-Enable **Keep deleted messages** under **Additional functions** to capture cloud
-messages observed by this client. **Deleted messages** opens a searchable archive
-from settings or a chat menu, including archived chats no longer available in the
-live chat list. Search supports message-type filters and a saved-before UTC date.
-Recorded edits, copy actions, attachment status, and locally saved file previews
-are available from each archived entry. **Captured chats** lists stored peers
-independently of current membership; turn off **Show deleted messages only** to
-view their other captured messages. Voice attachments use Telegram's local audio
-player with play, pause, and seek controls. Archived details include reply and
-forward metadata. Spoilers stay masked until **Show spoilers** is enabled. Open a
-recorded version to inspect its own media attachments. Attachment status refreshes
-when a download completes.
+Enable **Keep deleted messages** under **Additional functions**. Open a message
+menu and choose **Swiftgram → View Deleted** to see saved deletions from that chat.
+Tap the magnifying glass to search its text. Tap a message to see its details,
+recorded edits, and available attachments. Enable **Dim deleted messages** to
+make retained deletions translucent in the original chat.
 
-Archive files live outside Telegram's ordinary cache. Clearing that cache does
-not remove them. Explicit message/chat deletion and archive purge remove the
-corresponding saved content; logout removes the account's archive and legacy
-history. Purge markers prevent a later history refresh from restoring explicitly
-purged entries. Disabling capture preserves already archived content.
+Attachments use Telegram’s existing cache and expire according to its storage
+settings. The archive stores message content and attachment references. An upgrade
+from the earlier archive format removes its separate attachment copies while
+preserving message records. Timed cloud messages also require **Save disappearing
+media**, and secret chats are excluded.
 
-The defaults are 30 days, 1 GiB per account, a 100 MiB per-file limit, and downloads
-over Wi-Fi. Cached attachments are copied when available. The oldest archived
-messages are evicted when the quota is exceeded. Archive settings expose these
-limits, attachment download status, bot capture, and per-chat overrides. New
-profiles exclude bot dialogs; existing profiles preserve their previous behavior.
-Timed cloud media still requires **Save disappearing media**. Secret chats are
-excluded. iOS background suspension and unavailable server files can prevent media
-capture.
-
-Legacy metadata is migrated in restartable batches. Cached originals are copied
-when available; entries whose original content is missing are labeled explicitly.
-No message or attachment that the client never received can be recovered.
+Archived snapshots and their versions have a **16 MiB metadata limit per
+account** and are retained for 30 days by default. Use **Swiftgram → Clear
+Deleted** to remove the saved deletions for one chat, or **Clear all archives**
+in **Additional functions** to clear deleted messages and edit history for the
+selected account, or all signed-in accounts when using default settings. Both
+actions clear local data. Logout clears the account’s archive.
 
 ## Verification
 
 Run `just check` and `just test` after preparing the source tree. The native core
-suite includes archive migration, retention, attachment ownership, purge, and
+suite includes archive migration, retention, cache behavior, purge, and
 session-lifecycle regressions. On an Apple Silicon Mac with the pinned Xcode and
 prepared build submodules, run `just test-apple` with `build/configuration.json` in
 place. It runs the upstream Apple suite, including TelegramCore archive adapter
