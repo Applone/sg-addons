@@ -1047,7 +1047,7 @@ index 85f9fff..ae5accd 100644
                  })
              })))
 diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
-index c8cf0659..2292fbf9 100644
+index c8cf0659..eb701ebb 100644
 --- a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
 +++ b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
 @@ -1,3 +1,4 @@
@@ -1055,7 +1055,7 @@ index c8cf0659..2292fbf9 100644
  import SGSimpleSettings
  import Foundation
  import UIKit
-@@ -664,7 +665,40 @@ public protocol ChatMessageBubblelessStickySelectionCheck: AnyObject {
+@@ -664,7 +665,52 @@ public protocol ChatMessageBubblelessStickySelectionCheck: AnyObject {
  open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
      public let layoutConstants = (ChatMessageItemLayoutConstants.compact, ChatMessageItemLayoutConstants.regular)
      
@@ -1066,8 +1066,13 @@ index c8cf0659..2292fbf9 100644
 +    private func updateAdditionalAppearance() {
 +        guard Thread.isMainThread else { return }
 +        let dim: Bool
-+        if let item, !item.context.account.supplementary, let key = additionalMessageKey(account: item.context.account.peerId, id: item.message.id) {
-+            dim = AddonSettings.shared.profile(key.account).dimDeleted && MessageArchive.shared.isDeleted(key)
++        if let item, !item.context.account.supplementary,
++            let key = additionalMessageKey(account: item.context.account.peerId, id: item.message.id)
++        {
++            let archived = ArchivedMessageID(
++                account: key.account, chat: key.chat, namespace: item.message.id.namespace, message: item.message.id.id)
++            dim = AddonSettings.shared.profile(key.account).dimDeleted
++                && (MessageArchive.shared.isDeleted(key) || DeletedMessageArchive.shared.isDeleted(archived))
 +        } else {
 +            dim = false
 +        }
@@ -1084,20 +1089,27 @@ index c8cf0659..2292fbf9 100644
 +        }
 +    }
 +
++    override open func didLoad() {
++        super.didLoad()
++        for name in [Notification.Name.retainedMessagesChanged, Notification.Name("SGASettingsDidChange")] {
++            additionalObservers.append(
++                NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
++                    self?.updateAdditionalAppearance()
++                })
++        }
++        // The initial item can be assigned on the layout queue before the node loads.
++        updateAdditionalAppearance()
++    }
++
 +    open var item: ChatMessageItem? {
 +        didSet {
-+            if additionalObservers.isEmpty {
-+                for name in [Notification.Name.retainedMessagesChanged, Notification.Name("SGASettingsDidChange")] {
-+                    additionalObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.updateAdditionalAppearance() })
-+                }
-+            }
 +            updateAdditionalAppearance()
 +        }
 +    }
      open var accessibilityData: ChatMessageAccessibilityData?
      open var safeInsets = UIEdgeInsets()
      open var scrollTiltProvider: ((CFTimeInterval) -> Float)?
-@@ -696,6 +730,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+@@ -696,6 +742,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
      }
      
      deinit {
@@ -1105,7 +1117,7 @@ index c8cf0659..2292fbf9 100644
          self.fetchEffectDisposable?.dispose()
      }
      
-@@ -707,6 +742,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+@@ -707,6 +754,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
          self.frame = CGRect()
          self.wasFilteredKeywordTested = false
          self.matchedFilterKeyword = nil

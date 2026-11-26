@@ -96,10 +96,10 @@ index 0000000..9c4e5e0
 +}
 diff --git a/Swiftgram/SGAdditionalCore/Sources/DeletedMessageArchive.swift b/Swiftgram/SGAdditionalCore/Sources/DeletedMessageArchive.swift
 new file mode 100644
-index 0000000..58cacbe
+index 00000000..84e90fcf
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Sources/DeletedMessageArchive.swift
-@@ -0,0 +1,661 @@
+@@ -0,0 +1,711 @@
 +import Foundation
 +import SQLite3
 +
@@ -180,6 +180,9 @@ index 0000000..58cacbe
 +    }()
 +
 +    private let queue = DispatchQueue(label: "app.swiftgram.archive.snapshots", qos: .utility)
++    private let deletedLock = NSLock()
++    private var deletedMessages = Set<ArchivedMessageID>()
++    private var deletionNotificationPending = false
 +    private var database: OpaquePointer?
 +    private var failure: String?
 +    private let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -243,6 +246,7 @@ index 0000000..58cacbe
 +                    try FileManager.default.removeItem(at: file)
 +                }
 +            }
++            deletedMessages = Set(try readDeletedMessageIDs())
 +        } catch {
 +            failure = error.localizedDescription
 +            sqlite3_close(database)
@@ -255,6 +259,39 @@ index 0000000..58cacbe
 +    public func status() -> String? { queue.sync { failure } }
 +
 +    public func reportFailure(_ error: Error) { queue.sync { failure = error.localizedDescription } }
++
++    /// Used by chat rows without blocking on SQLite.
++    public func isDeleted(_ id: ArchivedMessageID) -> Bool {
++        deletedLock.lock()
++        defer { deletedLock.unlock() }
++        return deletedMessages.contains(id)
++    }
++
++    private func updateDeletedMessages(_ update: (inout Set<ArchivedMessageID>) -> Bool) {
++        deletedLock.lock()
++        let changed = update(&deletedMessages)
++        let notify = changed && !deletionNotificationPending
++        if notify { deletionNotificationPending = true }
++        deletedLock.unlock()
++        if notify {
++            DispatchQueue.main.async { [weak self] in
++                guard let self else { return }
++                self.deletedLock.lock()
++                self.deletionNotificationPending = false
++                self.deletedLock.unlock()
++                NotificationCenter.default.post(name: .retainedMessagesChanged, object: nil)
++            }
++        }
++    }
++
++    private func removeDeletedMessages(_ ids: [ArchivedMessageID]) {
++        guard !ids.isEmpty else { return }
++        updateDeletedMessages { deleted in
++            let previousCount = deleted.count
++            deleted.subtract(ids)
++            return deleted.count != previousCount
++        }
++    }
 +
 +    private func execute(_ sql: String) throws {
 +        guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
@@ -389,7 +426,9 @@ index 0000000..58cacbe
 +            sqlite3_bind_int(statement, 4, id.namespace)
 +            sqlite3_bind_int(statement, 5, id.message)
 +            try done(statement)
-+            return sqlite3_changes(database) > 0
++            guard sqlite3_changes(database) > 0 else { return false }
++            updateDeletedMessages { $0.insert(id).inserted }
++            return true
 +        }
 +    }
 +
@@ -465,6 +504,7 @@ index 0000000..58cacbe
 +                bind(statement, id: id)
 +                if sqlite3_step(statement) == SQLITE_ROW { try removeSnapshot(sqlite3_column_int64(statement, 0)) }
 +            }
++            removeDeletedMessages([id])
 +        }
 +    }
 +
@@ -503,6 +543,11 @@ index 0000000..58cacbe
 +                bind(progress, 1, account)
 +                try done(progress)
 +            }
++            updateDeletedMessages { deleted in
++                let previousCount = deleted.count
++                deleted = deleted.filter { $0.account != account }
++                return deleted.count != previousCount
++            }
 +        }
 +    }
 +
@@ -526,7 +571,7 @@ index 0000000..58cacbe
 +            throw SettingsError.invalid("Invalid archive storage policy.")
 +        }
 +        return try queue.sync {
-+            try transaction { () -> [ArchivedMessageID] in
++            let evicted = try transaction { () -> [ArchivedMessageID] in
 +                let rows = try prepare(
 +                    """
 +                    SELECT sequence,COALESCE(deleted,observed),deleted IS NOT NULL FROM snapshots WHERE account=?
@@ -578,6 +623,8 @@ index 0000000..58cacbe
 +                }
 +                return evicted
 +            }
++            removeDeletedMessages(evicted)
++            return evicted
 +        }
 +    }
 +}
@@ -609,7 +656,7 @@ index 0000000..58cacbe
 +        minTimestamp: Int32? = nil, maxTimestamp: Int32? = nil, deletedOnly: Bool = false
 +    ) throws -> [ArchivedMessageID] {
 +        try queue.sync {
-+            try transaction { () -> [ArchivedMessageID] in
++            let purged = try transaction { () -> [ArchivedMessageID] in
 +                let rows = try prepare(
 +                    """
 +                    SELECT sequence,payload FROM snapshots WHERE account=? AND (? IS NULL OR chat=?)
@@ -647,6 +694,8 @@ index 0000000..58cacbe
 +                }
 +                return selected.map { $0.1 }
 +            }
++            removeDeletedMessages(purged)
++            return purged
 +        }
 +    }
 +}
@@ -720,27 +769,28 @@ index 0000000..58cacbe
 +
 +extension DeletedMessageArchive {
 +    public func deletedMessageIDs(account: String, chat: String? = nil) throws -> [ArchivedMessageID] {
-+        try queue.sync {
-+            let sql = try prepare(
-+                "SELECT chat,namespace,message FROM snapshots WHERE account=? AND deleted IS NOT NULL AND (? IS NULL OR chat=?)"
-+            )
-+            defer { sqlite3_finalize(sql) }
-+            bind(sql, 1, account)
-+            if let chat {
-+                bind(sql, 2, chat)
-+                bind(sql, 3, chat)
-+            }
-+            var result: [ArchivedMessageID] = []
-+            while true {
-+                let step = sqlite3_step(sql)
-+                if step == SQLITE_DONE { break }
-+                guard step == SQLITE_ROW else { throw SettingsError.invalid("Cannot read deleted-message identities.") }
-+                result.append(
-+                    ArchivedMessageID(
-+                        account: account, chat: String(cString: sqlite3_column_text(sql, 0)),
-+                        namespace: sqlite3_column_int(sql, 1), message: sqlite3_column_int(sql, 2)))
-+            }
-+            return result
++        try queue.sync { try readDeletedMessageIDs(account: account, chat: chat) }
++    }
++
++    private func readDeletedMessageIDs(account: String? = nil, chat: String? = nil) throws -> [ArchivedMessageID] {
++        let filter = account == nil ? "" : " AND account=? AND (? IS NULL OR chat=?)"
++        let sql = try prepare("SELECT account,chat,namespace,message FROM snapshots WHERE deleted IS NOT NULL\(filter)")
++        defer { sqlite3_finalize(sql) }
++        if let account { bind(sql, 1, account) }
++        if let chat {
++            bind(sql, 2, chat)
++            bind(sql, 3, chat)
++        }
++        var result: [ArchivedMessageID] = []
++        while true {
++            let step = sqlite3_step(sql)
++            if step == SQLITE_DONE { return result }
++            guard step == SQLITE_ROW else { throw SettingsError.invalid("Cannot read deleted-message identities.") }
++            result.append(
++                ArchivedMessageID(
++                    account: String(cString: sqlite3_column_text(sql, 0)),
++                    chat: String(cString: sqlite3_column_text(sql, 1)),
++                    namespace: sqlite3_column_int(sql, 2), message: sqlite3_column_int(sql, 3)))
 +        }
 +    }
 +}
@@ -1020,10 +1070,10 @@ index 0000000..e371033
 +}
 diff --git a/Swiftgram/SGAdditionalCore/Tests/DeletedArchiveChecks.swift b/Swiftgram/SGAdditionalCore/Tests/DeletedArchiveChecks.swift
 new file mode 100644
-index 0000000..85d9a74
+index 00000000..1be1aa6a
 --- /dev/null
 +++ b/Swiftgram/SGAdditionalCore/Tests/DeletedArchiveChecks.swift
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,311 @@
 +import Foundation
 +import SQLite3
 +
@@ -1042,7 +1092,8 @@ index 0000000..85d9a74
 +        let page = try store.page(account: "77", deletedOnly: false)
 +        CheckCore.require(page.entries.isEmpty, "SQLITE_FULL rolls back the entire snapshot transaction")
 +        let deleted = try store.markDeleted(id)
-+        CheckCore.require(!deleted, "failed persistence cannot be marked as successfully retained")
++        CheckCore.require(
++            !deleted && !store.isDeleted(id), "failed persistence cannot be marked as successfully retained")
 +        let indexed = try store.page(account: "77", search: "Not committed", deletedOnly: false)
 +        CheckCore.require(indexed.entries.isEmpty, "failed storage leaves no search index row")
 +    }
@@ -1075,7 +1126,8 @@ index 0000000..85d9a74
 +        let stillRecent = try store.enforcePolicy(account: "77", days: 1, now: 100_000)
 +        CheckCore.require(stillRecent.isEmpty, "retention age starts at deletion")
 +        let evicted = try store.enforcePolicy(account: "77", days: 1, now: 200_000)
-+        CheckCore.require(evicted == [id], "expiry reports identities for host metadata cleanup")
++        CheckCore.require(
++            evicted == [id] && !store.isDeleted(id), "expiry clears deletion lookup and reports identities for cleanup")
 +        let expired = try store.versions(id)
 +        CheckCore.require(expired.isEmpty, "expiry deletes version payloads")
 +        let resurrected = try store.capture(original, now: 200_001)
@@ -1212,6 +1264,9 @@ index 0000000..85d9a74
 +        CheckCore.require(page.entries.map { $0.message.id } == [deleted], "search is confined to chat deletions")
 +        let cleared = try store.purgeAll(account: "77", chat: "user:42", deletedOnly: true)
 +        CheckCore.require(cleared == [deleted], "clear deleted preserves live messages and other chats")
++        CheckCore.require(
++            !store.isDeleted(deleted) && store.isDeleted(otherChat),
++            "chat clear updates only matching deletion identities")
 +        let remaining = try store.page(account: "77", chat: "user:42", deletedOnly: false)
 +        CheckCore.require(remaining.entries.map { $0.message.id } == [live], "live snapshot survives chat clear")
 +        let bytes = try store.storageBytes(account: "77")
@@ -1261,10 +1316,14 @@ index 0000000..85d9a74
 +        let captured = try archive!.capture(original, now: now)
 +        CheckCore.require(captured, "snapshot captured")
 +        let deleted = try archive!.markDeleted(original.id, now: now + 1)
-+        CheckCore.require(deleted, "remote deletion is durable")
++        CheckCore.require(deleted && archive!.isDeleted(original.id), "remote deletion is visible after it is saved")
 +        _ = try archive!.capture(message(2), now: now)
 +        _ = try archive!.capture(message(1, namespace: 1), now: now)
 +        _ = try archive!.capture(message(1, account: "88"), now: now)
++        CheckCore.require(
++            !archive!.isDeleted(message(2).id) && !archive!.isDeleted(message(1, namespace: 1).id)
++                && !archive!.isDeleted(message(1, account: "88").id),
++            "live snapshots stay outside the deletion lookup across message IDs, namespaces and accounts")
 +        _ = try archive!.markDeleted(message(2).id, now: now + 1)
 +        _ = try archive!.markDeleted(message(1, namespace: 1).id, now: now + 1)
 +        let deletedIDs = try archive!.deletedMessageIDs(account: "77", chat: "channel:42")
@@ -1282,6 +1341,9 @@ index 0000000..85d9a74
 +        CheckCore.require(foreign.entries.isEmpty, "account and deletion status isolation")
 +        archive = nil
 +        archive = DeletedMessageArchive(directory: directory)
++        CheckCore.require(
++            archive!.isDeleted(original.id) && !archive!.isDeleted(message(1, account: "88").id),
++            "archive-only deletion status survives reopening with no legacy metadata")
 +        let reopened = try archive!.page(account: "77", chat: "channel:42")
 +        CheckCore.require(
 +            reopened.entries.count == 3 && reopened.entries.contains { $0.message == original },
@@ -1291,7 +1353,11 @@ index 0000000..85d9a74
 +        CheckCore.require(!resurrection, "purge tombstone rejects delayed history")
 +        let otherNamespace = try archive!.page(account: "77")
 +        CheckCore.require(otherNamespace.entries.count == 2, "purge respects namespace")
++        CheckCore.require(
++            !archive!.isDeleted(original.id) && archive!.isDeleted(message(1, namespace: 1).id),
++            "individual purge clears the matching deletion lookup")
 +        try archive!.removeAccount("77")
++        CheckCore.require(!archive!.isDeleted(message(2).id), "account removal clears the deletion lookup")
 +        let removed = try archive!.capture(message(9), now: now)
 +        CheckCore.require(!removed, "removed account rejects late callbacks")
 +        let empty = try archive!.page(account: "77", deletedOnly: false)
@@ -1520,7 +1586,7 @@ index 857c0e4..6234b6e 100644
                  |> map(Optional.init)
 diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalArchiveMaintenance.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalArchiveMaintenance.swift
 new file mode 100644
-index 0000000..b182c88
+index 00000000..299e3530
 --- /dev/null
 +++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalArchiveMaintenance.swift
 @@ -0,0 +1,83 @@
@@ -1592,10 +1658,10 @@ index 0000000..b182c88
 +                        let ids = try DeletedMessageArchive.shared.enforcePolicy(
 +                            account: key, days: AddonSettings.shared.profile(key).retentionDays)
 +                        let messages = ids.compactMap { id -> MessageId? in
-+                            let legacy = MessageKey(account: key, chat: id.chat, id: Int64(id.message))
-+                            guard MessageArchive.shared.isDeleted(legacy), let peer = additionalArchivePeer(id.chat)
++                            guard id.namespace == Namespaces.Message.Cloud, let peer = additionalArchivePeer(id.chat)
 +                            else { return nil }
-+                            MessageArchive.shared.exclude(legacy)
++                            MessageArchive.shared.exclude(
++                                MessageKey(account: key, chat: id.chat, id: Int64(id.message)))
 +                            return MessageId(peerId: peer, namespace: id.namespace, id: id.message)
 +                        }
 +                        if !messages.isEmpty {
