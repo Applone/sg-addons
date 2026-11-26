@@ -401,3 +401,170 @@ index df58e7f18cc0b0baa30886408ed2e0716c6aed59..44ed755e2ee9380ac518f2fe3bd419ca
      func testSeededAccountAndChannelReadBack() {
          let channelId = StateSyncFixture.channelPeerId(500)
          let state = AuthorizedAccountState.State(pts: 100, qts: 5, date: 1_700_000_000, seq: 3)
+diff --git a/Tests/AllTests/BUILD b/Tests/AllTests/BUILD
+index a4148d8d..cea73869 100644
+--- a/Tests/AllTests/BUILD
++++ b/Tests/AllTests/BUILD
+@@ -4,10 +4,11 @@ test_suite(
+     tests = [
+         "//Swiftgram/SGSettingsUI:SGSettingsUITests",
+         "//submodules/TelegramCore:TelegramCoreTests",
++        "//submodules/TelegramUI/Components/NavigationExpansionTransition:NavigationExpansionTransitionTests",
+         "//submodules/Postbox:PostboxTests",
+         "//submodules/TgVoipWebrtc:TgCallsTests",
+     ],
+     visibility = [
+         "//visibility:public",
+     ],
+-)
+\ No newline at end of file
++)
+diff --git a/submodules/TelegramUI/Components/NavigationExpansionTransition/BUILD b/submodules/TelegramUI/Components/NavigationExpansionTransition/BUILD
+index 1730187b..1006f3ac 100644
+--- a/submodules/TelegramUI/Components/NavigationExpansionTransition/BUILD
++++ b/submodules/TelegramUI/Components/NavigationExpansionTransition/BUILD
+@@ -42,7 +42,7 @@ swift_library(
+ ios_test_runner(
+     name = "NavigationExpansionTransitionTestRunner",
+     device_type = "iPhone 17",
+-    os_version = "26.5",
++    os_version = "27.0",
+ )
+ 
+ ios_unit_test(
+diff --git a/submodules/TelegramUI/Components/NavigationExpansionTransition/Sources/NavigationExpansionRendererImpl.swift b/submodules/TelegramUI/Components/NavigationExpansionTransition/Sources/NavigationExpansionRendererImpl.swift
+index 74e68b07..54be7c6a 100644
+--- a/submodules/TelegramUI/Components/NavigationExpansionTransition/Sources/NavigationExpansionRendererImpl.swift
++++ b/submodules/TelegramUI/Components/NavigationExpansionTransition/Sources/NavigationExpansionRendererImpl.swift
+@@ -219,22 +219,36 @@ public final class NavigationExpansionRendererImpl: NavigationExpansionRenderer
+         }
+ 
+         var labels: [ExpansionLabelGeometry] = []
+-        for (index, sourceLabel) in sourceLoan.labels.enumerated() where index < destinationLoan.labels.count {
+-            let destinationLabel = destinationLoan.labels[index]
+-            labels.append(ExpansionLabelGeometry(sourceCenter: sourceLabel.screenCenter, sourceSize: sourceLabel.textSize, destinationCenter: destinationLabel.screenCenter, destinationSize: destinationLabel.textSize, photoCenter: destinationLabel.screenCenter, photoSize: destinationLabel.textSize))
++        for (index, sourceLabel) in sourceLoan.labels.enumerated() {
++            let destinationLabel = index < destinationLoan.labels.count ? destinationLoan.labels[index] : sourceLabel
++            // A chat status with no profile counterpart still needs a frame so it can fade out.
++            labels.append(
++                ExpansionLabelGeometry(
++                    sourceCenter: sourceLabel.screenCenter, sourceSize: sourceLabel.textSize,
++                    destinationCenter: destinationLabel.screenCenter, destinationSize: destinationLabel.textSize,
++                    photoCenter: destinationLabel.screenCenter, photoSize: destinationLabel.textSize))
+         }
+         // A label the lower screen does not show (a channel's title without a status line) comes from where it would
+         // stand there: under the label above it, at that label's scale. It fades in as the labels cross; without a place
+         // it was never shown until the upper screen had it back.
+-        for index in labels.count ..< destinationLoan.labels.count {
+-            guard let above = labels.last else {
+-                break
++        for destinationLabel in destinationLoan.labels.dropFirst(sourceLoan.labels.count) {
++            let size: CGSize
++            let center: CGPoint
++            if let above = labels.last {
++                let scale = above.sourceSize.height / max(1.0, above.destinationSize.height)
++                size = CGSize(
++                    width: destinationLabel.textSize.width * scale, height: destinationLabel.textSize.height * scale)
++                center = CGPoint(
++                    x: above.sourceCenter.x, y: above.sourceCenter.y + (above.sourceSize.height + size.height) * 0.5)
++            } else {
++                size = destinationLabel.textSize
++                center = destinationLabel.screenCenter
+             }
+-            let destinationLabel = destinationLoan.labels[index]
+-            let scale = above.sourceSize.height / max(1.0, above.destinationSize.height)
+-            let size = CGSize(width: destinationLabel.textSize.width * scale, height: destinationLabel.textSize.height * scale)
+-            let center = CGPoint(x: above.sourceCenter.x, y: above.sourceCenter.y + (above.sourceSize.height + size.height) * 0.5)
+-            labels.append(ExpansionLabelGeometry(sourceCenter: center, sourceSize: size, destinationCenter: destinationLabel.screenCenter, destinationSize: destinationLabel.textSize, photoCenter: destinationLabel.screenCenter, photoSize: destinationLabel.textSize))
++            labels.append(
++                ExpansionLabelGeometry(
++                    sourceCenter: center, sourceSize: size,
++                    destinationCenter: destinationLabel.screenCenter, destinationSize: destinationLabel.textSize,
++                    photoCenter: destinationLabel.screenCenter, photoSize: destinationLabel.textSize))
+         }
+         var geometry = ExpansionGeometry(screenSize: size, screenCornerRadii: destinationLoan.screenCornerRadii, origin: sourceLoan.origin, companion: sourceLoan.companion, companionPhotoDiameter: sourceLoan.companionPhotoDiameter, avatar: destinationLoan.avatar, photo: destinationLoan.photo, labels: labels, carriedEdge: destinationLoan.carriedEdge, appearing: destinationLoan.appearingViews.map { $0.convert($0.bounds, to: screen) })
+         if let backgroundOpening = destinationLoan.backgroundOpening {
+@@ -341,9 +355,9 @@ public final class NavigationExpansionRendererImpl: NavigationExpansionRenderer
+             self.labelHosts.append(host)
+         }
+         // The upper screen's labels the lower screen does not show, on the places measured for them above.
+-        for index in sourceLoan.labels.count ..< destinationLoan.labels.count {
+-            let destinationLabel = destinationLoan.labels[index]
+-            let destinationColor = index < destinationLoan.labelColors.count ? destinationLoan.labelColors[index] : .white
++        for (index, destinationLabel) in destinationLoan.labels.enumerated().dropFirst(sourceLoan.labels.count) {
++            let destinationColor =
++                index < destinationLoan.labelColors.count ? destinationLoan.labelColors[index] : .white
+             let host = LabelHost(source: nil, destination: destinationLabel, destinationColor: destinationColor)
+             self.view.addSubview(host.sourceHost)
+             self.mount(destinationLabel, in: host.destinationHost, group: nil, colorLayer: nil)
+diff --git a/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift b/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift
+index c70d24f4..0149b5f9 100644
+--- a/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift
++++ b/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift
+@@ -77,6 +77,7 @@ private final class FakeDestination: NavigationExpansionDestinationProviding {
+     var pageViews: [UIView] = []
+     /// Views clipping at the page's top edge (the profile's cover).
+     var pageEdgeViews: [UIView] = []
++    var labelCount = 2
+     /// The rest of the background, landing with the page (the profile's gifts around its avatar).
+     var landingViews: [UIView] = []
+     var path: ExpansionPath = .origin
+@@ -110,11 +111,27 @@ private final class FakeDestination: NavigationExpansionDestinationProviding {
+     func lendExpansionDestination(in screenView: UIView) -> NavigationExpansionDestinationLoan? {
+         self.lends += 1
+         let g = makeExpansionGeometry()
++        let labels = [
++            NavigationExpansionLabel(
++                view: self.titleView, textCenter: CGPoint(x: 79.0, y: 17.0),
++                textSize: CGSize(width: 158.0, height: 34.0), screenCenter: g.labels[0].destinationCenter,
++                coloring: .multiply([self.titleView.layer], .white)),
++            NavigationExpansionLabel(
++                view: self.statusView, textCenter: CGPoint(x: 65.0, y: 10.0),
++                textSize: CGSize(width: 130.0, height: 20.0), screenCenter: g.labels[1].destinationCenter,
++                coloring: .multiply([self.statusView.layer], .white), followers: self.statusFollowers),
++        ]
+         // On the photo path its avatar view is the expanded photo, as the profile's is.
+-        return NavigationExpansionDestinationLoan(avatar: g.avatar, photo: g.photo, avatarView: self.avatarView, avatarRestFrame: self.path == .photo ? g.photo! : g.avatar!, labels: [
+-            NavigationExpansionLabel(view: self.titleView, textCenter: CGPoint(x: 79.0, y: 17.0), textSize: CGSize(width: 158.0, height: 34.0), screenCenter: g.labels[0].destinationCenter, coloring: .multiply([self.titleView.layer], .white)),
+-            NavigationExpansionLabel(view: self.statusView, textCenter: CGPoint(x: 65.0, y: 10.0), textSize: CGSize(width: 130.0, height: 20.0), screenCenter: g.labels[1].destinationCenter, coloring: .multiply([self.statusView.layer], .white), followers: self.statusFollowers)
+-        ], labelColors: [.white, .white], carriedEdge: g.carriedEdge, appearingViews: self.buttons, appearingCompanions: self.platters.map { [$0] }, overlayViews: self.overlays, backgroundViews: [self.background], listViews: [self.list], pageViews: self.pageViews, pageEdgeViews: self.pageEdgeViews, landingViews: self.landingViews, patternViews: [], glassTint: .purple, screenCornerRadii: self.screenCornerRadii, backButtonFrame: CGRect(x: 16.0, y: 64.0, width: 44.0, height: 44.0), avatarCornerFraction: self.avatarCornerFraction)
++        return NavigationExpansionDestinationLoan(
++            avatar: g.avatar, photo: g.photo, avatarView: self.avatarView,
++            avatarRestFrame: self.path == .photo ? g.photo! : g.avatar!, labels: Array(labels.prefix(self.labelCount)),
++            labelColors: Array(repeating: .white, count: self.labelCount), carriedEdge: g.carriedEdge,
++            appearingViews: self.buttons, appearingCompanions: self.platters.map { [$0] }, overlayViews: self.overlays,
++            backgroundViews: [self.background], listViews: [self.list], pageViews: self.pageViews,
++            pageEdgeViews: self.pageEdgeViews, landingViews: self.landingViews, patternViews: [], glassTint: .purple,
++            screenCornerRadii: self.screenCornerRadii,
++            backButtonFrame: CGRect(x: 16.0, y: 64.0, width: 44.0, height: 44.0),
++            avatarCornerFraction: self.avatarCornerFraction)
+     }
+ 
+     func returnExpansionDestination() {
+@@ -671,6 +688,26 @@ final class NavigationExpansionRendererTests: XCTestCase {
+         XCTAssertEqual(hosts[1].layer.position.y, g.labels[1].destinationCenter.y, accuracy: 0.1)
+     }
+ 
++    func test_chatStatusFadesOutWhenProfileHasFewerLabels() throws {
++        for labelCount in 0...1 {
++            let (renderer, container, _, source, destination) = self.make(configure: { $0.labelCount = labelCount })
++            let statusHost = try XCTUnwrap(source.statusView.superview?.superview)
++            XCTAssertTrue(statusHost.isDescendant(of: container))
++            XCTAssertEqual(statusHost.alpha, 1.0, accuracy: 1e-6)
++
++            renderer.animate(timeline: self.timeline(from: 0.0, to: 1.0, opening: true))
++            let animation = try XCTUnwrap(
++                statusHost.layer.animation(forKey: "navigationExpansion.opacity") as? CAKeyframeAnimation)
++            let values = try XCTUnwrap(animation.values as? [NSNumber])
++            XCTAssertEqual(try XCTUnwrap(values.first).doubleValue, 1.0, accuracy: 1e-6)
++            XCTAssertEqual(try XCTUnwrap(values.last).doubleValue, 0.0, accuracy: 1e-6)
++
++            renderer.end(atTop: true)
++            XCTAssertTrue(source.statusView.superview === source.home)
++            XCTAssertTrue(destination.statusView.superview === destination.home)
++        }
++    }
++
+     // The chat's avatar (live, animated avatars included) rides the flying circle above the profile's: at the open's
+     // start it is exactly where it was, so nothing jumps when the circle takes over.
+     func test_companion_ridesTheCircle_fromItsOwnPlace() {
