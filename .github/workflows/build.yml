@@ -65,7 +65,7 @@ jobs:
           BUILDBUDDY_CACHE_URL: ${{ vars.BUILDBUDDY_CACHE_URL || 'grpcs://remote.buildbuddy.io' }}
         run: |
           if [[ -z "$BUILDBUDDY_API_KEY" ]]; then
-            echo '::error::Set the BUILDBUDDY_API_KEY repository secret; see README.md'
+            echo '::error::Set the BUILDBUDDY_API_KEY repository secret'
             exit 1
           fi
           umask 077
@@ -166,4 +166,14 @@ jobs:
             --verify-tag \
             --title "$RELEASE_TAG" \
             --generate-notes \
-            --notes 'Unsigned iOS build. Sign the IPA before installing it on a device.'
+            --notes-file - <<'NOTES'
+          ## Editions
+
+          - **Lite** (`Swiftgram-lite.ipa`) includes the native add-ons and displays HTML
+            message widgets as unsupported media. Its `.lite` bundle ID suffix lets it
+            install alongside Full.
+          - **Full** (`Swiftgram-full.ipa`) includes the native add-ons, HTML message
+            widgets, and Python plugins. It keeps the existing bundle ID.
+
+          Unsigned iOS build. Sign the IPA before installing it on a device.
+          NOTES
