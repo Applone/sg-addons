@@ -498,7 +498,7 @@ index 74e68b07..54be7c6a 100644
              self.view.addSubview(host.sourceHost)
              self.mount(destinationLabel, in: host.destinationHost, group: nil, colorLayer: nil)
 diff --git a/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift b/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift
-index c70d24f4..0149b5f9 100644
+index c70d24f4..b715d733 100644
 --- a/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift
 +++ b/submodules/TelegramUI/Components/NavigationExpansionTransition/Tests/NavigationExpansionRendererTests.swift
 @@ -77,6 +77,7 @@ private final class FakeDestination: NavigationExpansionDestinationProviding {
@@ -541,7 +541,93 @@ index c70d24f4..0149b5f9 100644
      }
  
      func returnExpansionDestination() {
-@@ -671,6 +688,26 @@ final class NavigationExpansionRendererTests: XCTestCase {
+@@ -162,8 +179,9 @@ final class NavigationExpansionRendererTests: XCTestCase {
+         XCTAssertEqual(mask.cornerRadius, 22.0, accuracy: 1e-6)
+         XCTAssertEqual(renderer.labelHostCentersForTesting.first ?? CGPoint(), g.labels[0].sourceCenter)
+         XCTAssertEqual(renderer.destinationLabelAlphasForTesting, [0.0, 0.0])
+-        XCTAssertEqual(destination.buttons.map { $0.alpha }, [0.0, 0.0, 0.0, 0.0])
+-        XCTAssertEqual(destination.list.alpha, 0.0)
++        for view in destination.buttons + [destination.list] {
++            assertHeldOpacity(view.layer, equals: 0.0)
++        }
+     }
+
+     // A modal's root container is shifted by its sublayer transform (scaled about its centre, moved down), and a pop
+@@ -296,14 +314,16 @@ final class NavigationExpansionRendererTests: XCTestCase {
+     func test_platters_appearWithTheirButtons() {
+         let (renderer, _, _, _, destination) = self.make()
+         for (button, platter) in zip(destination.buttons, destination.platters) {
+-            XCTAssertEqual(button.alpha, 0.0)
++            assertHeldOpacity(button.layer, equals: 0.0)
++            assertHeldOpacity(platter.layer, equals: 0.0)
+             XCTAssertEqual(platter.alpha, button.alpha)
+             XCTAssertTrue(CATransform3DEqualToTransform(platter.layer.transform, button.layer.transform))
+         }
+         renderer.end(atTop: true)
+-        for platter in destination.platters {
+-            XCTAssertEqual(platter.alpha, 1.0)
+-            XCTAssertTrue(CATransform3DIsIdentity(platter.layer.transform))
++        for view in destination.buttons + destination.platters {
++            XCTAssertNil(view.layer.animation(forKey: "navigationExpansion.opacity"))
++            XCTAssertEqual(view.alpha, 1.0)
++            XCTAssertTrue(CATransform3DIsIdentity(view.layer.transform))
+         }
+     }
+
+@@ -403,13 +423,17 @@ final class NavigationExpansionRendererTests: XCTestCase {
+         XCTAssertNil(top.layer.mask)
+     }
+
+-    // The coordinator ends a transition a frame or two after its keyframes complete (the clock's completion comes back
+-    // from the render server), and Core Animation shows the model values in between: every keyframed layer's model must
+-    // be its last keyframe, after the per-frame tint as well (it re-applies the drops' shape). The close's pill was
+-    // square for two frames when the tint applied the drop view's own corner radius (0) to the glass.
+-    func test_models_areTheLastKeyframes_afterTheTint() {
++    // A transition can outlive its keyframes. The models carry the final frame after tint updates, and the
++    // opacity animations on borrowed views keep their final sample until the renderer returns those views.
++    func test_models_areTheLastKeyframes_afterTheTint() throws {
+         for (isOpening, screenCornerRadii) in [(true, CornerRadii(uniform: 62.0)), (false, CornerRadii(uniform: 62.0)), (true, duoCoverScreenCornerRadii), (false, duoCoverScreenCornerRadii)] {
+-            let (renderer, container, top, _, _) = self.make(configure: { $0.screenCornerRadii = screenCornerRadii })
++            let (renderer, container, top, _, destination) = self.make(
++                configure: { $0.screenCornerRadii = screenCornerRadii })
++            let fadedViews = destination.buttons + destination.platters + [destination.background, destination.list]
++            let restingAlpha: CGFloat = 0.6
++            for view in fadedViews {
++                view.alpha = restingAlpha
++            }
+             let timing = NavigationKeyframeTiming(origin: .explicit(CACurrentMediaTime()), duration: 0.5, factor: 1.0)
+             let times = timing.sampleTimes.map { t -> CGFloat in
+                 let u = CGFloat(t / 0.5)
+@@ -417,11 +441,28 @@ final class NavigationExpansionRendererTests: XCTestCase {
+             }
+             renderer.animate(timeline: NavigationExpansionTimeline(timing: timing, times: times, isOpening: isOpening, poses: times.map { _ in .none }, animationTime: { 0.5 }, reinstallTiming: { nil }, schedule: { _, _ in }))
+             renderer.applyTint(atAnimationTime: 0.5)
++            for view in fadedViews {
++                let fade = try XCTUnwrap(
++                    view.layer.animation(forKey: "navigationExpansion.opacity") as? CAKeyframeAnimation)
++                let values = try XCTUnwrap(fade.values as? [NSNumber])
++                XCTAssertEqual(
++                    try XCTUnwrap(values.first).doubleValue, isOpening ? 0.0 : Double(restingAlpha), accuracy: 0.001)
++                XCTAssertEqual(
++                    try XCTUnwrap(values.last).doubleValue, isOpening ? Double(restingAlpha) : 0.0, accuracy: 0.001)
++                XCTAssertEqual(fade.fillMode, .both)
++                XCTAssertFalse(fade.isRemovedOnCompletion)
++                XCTAssertEqual(view.alpha, restingAlpha, accuracy: 0.001)
++            }
+             var checked = 0
+             for root in [container.layer, renderer.view.layer, renderer.underView.layer, top.layer] {
+                 checked += assertModelsAreLastKeyframes(root)
+             }
+             XCTAssertGreaterThan(checked, 10)
++            renderer.end(atTop: isOpening)
++            for view in fadedViews {
++                XCTAssertNil(view.layer.animation(forKey: "navigationExpansion.opacity"))
++                XCTAssertEqual(view.alpha, restingAlpha, accuracy: 0.001)
++            }
+         }
+     }
+
+@@ -671,6 +712,26 @@ final class NavigationExpansionRendererTests: XCTestCase {
          XCTAssertEqual(hosts[1].layer.position.y, g.labels[1].destinationCenter.y, accuracy: 0.1)
      }
  
@@ -568,3 +654,34 @@ index c70d24f4..0149b5f9 100644
      // The chat's avatar (live, animated avatars included) rides the flying circle above the profile's: at the open's
      // start it is exactly where it was, so nothing jumps when the circle takes over.
      func test_companion_ridesTheCircle_fromItsOwnPlace() {
+@@ -1057,7 +1118,20 @@ final class NavigationExpansionRendererTests: XCTestCase {
+     }
+ }
+
+-/// Compares every keyframe animation in `layer`'s tree with the model value it lands on; returns how many it checked.
++private func assertHeldOpacity(
++    _ layer: CALayer, equals expected: Double, file: StaticString = #filePath, line: UInt = #line
++) {
++    guard let animation = layer.animation(forKey: "navigationExpansion.opacity") as? CABasicAnimation,
++        let opacity = animation.fromValue as? NSNumber
++    else {
++        return XCTFail("Expected a held opacity animation", file: file, line: line)
++    }
++    XCTAssertEqual(opacity.doubleValue, expected, accuracy: 0.001, file: file, line: line)
++    XCTAssertEqual(animation.fillMode, .forwards, file: file, line: line)
++    XCTAssertFalse(animation.isRemovedOnCompletion, file: file, line: line)
++}
++
++/// Compares keyframes that hand off to a model value when they finish; returns how many it checked.
+ private func assertModelsAreLastKeyframes(_ layer: CALayer, file: StaticString = #filePath, line: UInt = #line) -> Int {
+     var checked = 0
+     var layers: [CALayer] = [layer]
+@@ -1084,7 +1158,7 @@ private func assertModelsAreLastKeyframes(_ layer: CALayer, file: StaticString =
+                 XCTAssertEqual(current.cornerRadius, CGFloat((last as! NSNumber).doubleValue), accuracy: 0.01, name, file: file, line: line)
+             case current.cornerRadiiKeyPath:
+                 XCTAssertEqual(current.cornerRadii, CornerRadii(boxedValue: last as! NSValue), name, file: file, line: line)
+-            case "opacity":
++            case "opacity" where animation.isRemovedOnCompletion:
+                 XCTAssertEqual(Double(current.opacity), (last as! NSNumber).doubleValue, accuracy: 0.001, name, file: file, line: line)
+             case "transform":
+                 XCTAssertTrue(CATransform3DEqualToTransform(current.transform, (last as! NSValue).caTransform3DValue), name, file: file, line: line)
