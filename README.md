@@ -72,8 +72,9 @@ Linux core tests and Swift syntax checks do not validate iOS UI or signing.
 3. Download `sg-addons-unsigned-<run number>` from the run's **Artifacts** section.
    It contains the IPA, dSYMs, and source provenance.
 
-Release tags must match `v` followed by the version in `release-version` (for example,
-`v1.1.2`). Update that manifest before tagging. Tag validation runs before the build.
+Release tags must match `v` followed by `[project].version` in `pyproject.toml`
+(for example, `v1.2.0`). Update the version and run `uv lock` before tagging.
+Tag validation runs before the build.
 Pushing a matching tag automatically starts the same build. After a successful tag
 build, the workflow publishes a GitHub Release for that tag with only
 `Swiftgram.ipa` and `Swiftgram.DSYMs.zip` as assets, plus automatically generated
@@ -83,8 +84,8 @@ release; manual runs on a branch only upload the Actions artifact.
 For example, to publish a version from the current commit:
 
 ```sh
-git tag v1.1.2
-git push origin v1.1.2
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 The workflow fetches pinned sources and submodules, applies patches, runs core
