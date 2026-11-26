@@ -1,7 +1,3 @@
-Subject: telegram engine
-Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
-Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
-
 diff --git a/submodules/Postbox/Sources/MutableBasicPeerView.swift b/submodules/Postbox/Sources/MutableBasicPeerView.swift
 index 0236960e1dc7516b730bab6f06167c9acb346d87..e35f90c4abe22d37e930003897c6948d36e6975a 100644
 --- a/submodules/Postbox/Sources/MutableBasicPeerView.swift
@@ -368,47 +364,6 @@ index 0000000000000000000000000000000000000000..fc6853463ea7a8f9698a969e55ebed35
 +        return AdditionalPrivacy.suppress(action, account: account, chat: peerId.flatMap(additionalChatKey))
 +    }
 +}
-diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
-index 2d5153e3207fde655b7a7579c6912afc5f8033ee..e8f3012ff53f7f3647de1fbaeae0ba073ceb228c 100644
---- a/submodules/TelegramCore/Sources/Network/Network.swift
-+++ b/submodules/TelegramCore/Sources/Network/Network.swift
-@@ -845,6 +845,9 @@ private final class NetworkSpeedLimitedEventState {
- }
- 
- public final class Network: NSObject {
-+    // Set once by the authorized main-app Account before its services start.
-+    var additionalAccountId: String?
-+
-     public let encryptionProvider: EncryptionProvider
-     
-     private let queue: Queue
-diff --git a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
-index ba4569edf66daa77074562b747a5baf623fd7e13..5ec271bacc182023a869a866d6b3ec699a633746 100644
---- a/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
-+++ b/submodules/TelegramCore/Sources/State/AccountStateManagementUtils.swift
-@@ -4596,7 +4596,11 @@ func replayFinalState(
-                 upsertEphemeralReplacement(transaction: transaction, anchorMessageId: anchorMessageId, message: message)
-             case let .DeleteEphemeralMessages(peerId, ids):
-                 deleteEphemeralMessages(transaction: transaction, peerId: peerId, ids: ids)
--            case let .DeleteMessagesWithGlobalIds(ids):
-+            case let .DeleteMessagesWithGlobalIds(originalIds):
-+                let retained = Set(transaction.messageIdsForGlobalIds(originalIds).filter {
-+                    additionalRetainDeleted(account: accountPeerId, id: $0, transaction: transaction)
-+                }.map { $0.id })
-+                let ids = originalIds.filter { !retained.contains($0) }
-                 var resourceIds: [MediaResourceId] = []
-                 transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
-                     addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
-@@ -4605,7 +4609,8 @@ func replayFinalState(
-                     let _ = mediaBox.removeCachedResources(Array(Set(resourceIds)), force: true).start()
-                 }
-                 deletedMessageIds.append(contentsOf: ids.map { .global($0) })
--            case let .DeleteMessages(ids):
-+            case let .DeleteMessages(originalIds):
-+                let ids = originalIds.filter { !additionalRetainDeleted(account: accountPeerId, id: $0, transaction: transaction) }
-                 _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
-                     addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
-                 })
 diff --git a/submodules/TelegramCore/Sources/State/AccountViewTracker.swift b/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
 index f13c7f6b9a99de22467f760986bc974240064d70..7ee830cd41409ff1bddae7c2968932f6f8eea1cf 100644
 --- a/submodules/TelegramCore/Sources/State/AccountViewTracker.swift
@@ -551,26 +506,6 @@ index 1b8617d22aa920705324bb9930aedbe3034cc14f..12da894ea5981ffff404ac07284f2634
      if peerId.namespace == Namespaces.Peer.SecretChat {
          // Decide whether a request is needed before looking the peer up: inputSecretChat goes
          // through loadedPeerWithId, which never emits when the peer row is missing and fails
-diff --git a/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift b/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
-index e655c31404bc71e74cd4070293551d07153366c7..b8c2429eb811814b657de53a6f9eb53aa6108fb2 100644
---- a/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
-+++ b/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
-@@ -150,6 +150,15 @@ public extension TelegramEngine {
-         }
-         
-         public func setEmojiStatus(file: TelegramMediaFile?, expirationDate: Int32?) -> Signal<Never, NoError> {
-+            let status: Api.EmojiStatus = file.map { .emojiStatus(.init(flags: expirationDate == nil ? 0 : 1, documentId: $0.fileId.id, until: expirationDate)) } ?? .emojiStatusEmpty
-+            return additionalSelectBadgeIfLocal(account: self.account, badge: status, media: file.map { [$0 as Media] } ?? [])
-+            |> mapToSignal { local -> Signal<Never, NoError> in
-+                if local { return .complete() }
-+                return self.setServerEmojiStatus(file: file, expirationDate: expirationDate)
-+            }
-+        }
-+
-+        private func setServerEmojiStatus(file: TelegramMediaFile?, expirationDate: Int32?) -> Signal<Never, NoError> {
-             let peerId = self.account.peerId
-             
-             let remoteApply = self.account.network.request(Api.functions.account.updateEmojiStatus(emojiStatus: file.flatMap({ file in
 diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift b/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift
 index 856855dd9d1f254da5dc6968054b22b853250add..5f9b86b04ba804d7e4ea5861dc9f297c1ff57a30 100644
 --- a/submodules/TelegramCore/Sources/TelegramEngine/Data/TelegramEngineData.swift
@@ -716,3 +651,23 @@ index 87a41773cb02aeaa924130fadd0a289484d933e0..d4ab0a08ae4ede16e6ebcb0c0615c523
      }()
  
      public lazy var orderedLists: OrderedLists = {
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift b/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
+index fa8e1117..580efe10 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/AccountData/TelegramEngineAccountData.swift
+@@ -191,8 +191,13 @@ public extension TelegramEngine {
+         }
+ 
+         public func setEmojiStatus(file: TelegramMediaFile?, expirationDate: Int32?) -> Signal<Never, NoError> {
+-            return self.setEmojiStatusWithResult(file: file, expirationDate: expirationDate)
+-            |> `catch` { _ in .complete() }
++            let status: Api.EmojiStatus = file.map { .emojiStatus(.init(flags: expirationDate == nil ? 0 : 1, documentId: $0.fileId.id, until: expirationDate)) } ?? .emojiStatusEmpty
++            return additionalSelectBadgeIfLocal(account: self.account, badge: status, media: file.map { [$0 as Media] } ?? [])
++            |> mapToSignal { local -> Signal<Never, NoError> in
++                if local { return .complete() }
++                return self.setEmojiStatusWithResult(file: file, expirationDate: expirationDate)
++                |> `catch` { _ in .complete() }
++            }
+         }
+         
+         public func updateAccountBusinessHours(businessHours: TelegramBusinessHours?) -> Signal<Never, NoError> {

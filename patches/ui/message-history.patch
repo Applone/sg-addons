@@ -1,5 +1,3 @@
-Subject: Use native chat presentation and restrict message history to edited messages
-
 diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
 index d9eb4b23d1df4cd2b03fdd217206b3fe850778d1..450955d58a5610f7485edc0b61146654a18473b9 100644
 --- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings

@@ -242,49 +242,6 @@ index 914ec27a5fa162021614d2529c9a5cbd493a7d07..cfe68b527df9988894a74e03018cb57c
 +        print("Native core checks passed: legacy settings, revisions, expiry, retention, privacy, filters, ad blocking, local badge storage, disappearing media")
      }
  }
-diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-index 7e537511f5af54d4d5d7d762f37d7a973a23ecaf..445502d00093a092ea8131dbc3cd8980c7e16ba1 100644
---- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-+++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-@@ -54,6 +54,7 @@ private enum SGBoolSetting: String {
-     case additionalHideOnline
-     case additionalHideTyping
-     case additionalHideUpload
-+    case additionalSaveDisappearing
-     case additionalSaveDeleted
-     case additionalDimDeleted
-     case additionalSaveEditHistory
-@@ -188,11 +189,13 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
-     entries.append(.disclosure(id: id.count, section: .additionalGhost, link: .additionalExceptions, text: text("Exceptions")))
-     entries.append(.header(id: id.count, section: .additionalHistory, text: text("History"), badge: nil))
-     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDeleted, value: profile.saveDeleted, text: text("saveDeleted"), enabled: true))
-+    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDisappearing, value: profile.saveDisappearing, text: text("saveDisappearing"), enabled: profile.saveDeleted))
-     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalDimDeleted, value: profile.dimDeleted, text: text("dimDeleted"), enabled: true))
-     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveEditHistory, value: profile.saveEditHistory, text: text("saveEditHistory"), enabled: true))
-     entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalRetention, text: text("Retention")))
-     entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("Clear")))
-     entries.append(.notice(id: id.count, section: .additionalHistory, text: text("HistoryNotice")))
-+    entries.append(.notice(id: id.count, section: .additionalHistory, text: text("DisappearingNotice")))
-     entries.append(.header(id: id.count, section: .additionalFilters, text: text("Filters"), badge: nil))
-     entries.append(.toggle(id: id.count, section: .additionalFilters, settingName: .additionalFiltersEnabled, value: profile.filtersEnabled, text: text("filtersEnabled"), enabled: true))
-     entries.append(.disclosure(id: id.count, section: .additionalFilters, link: .additionalFilters, text: text("EditFilters")))
-@@ -426,7 +429,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
-             return
-         }
-         switch setting {
--        case .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalBlockAds, .additionalLocalPremium: break
-+        case .additionalSaveDisappearing, .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalBlockAds, .additionalLocalPremium: break
-         case .hidePhoneInSettings:
-             SGSimpleSettings.shared.hidePhoneInSettings = value
-             askForRestart?()
-@@ -895,6 +898,7 @@ private extension SGBoolSetting {
-         case .additionalHideOnline: return \AddonProfile.hideOnline
-         case .additionalHideTyping: return \AddonProfile.hideTyping
-         case .additionalHideUpload: return \AddonProfile.hideUpload
-+        case .additionalSaveDisappearing: return \AddonProfile.saveDisappearing
-         case .additionalSaveDeleted: return \AddonProfile.saveDeleted
-         case .additionalDimDeleted: return \AddonProfile.dimDeleted
-         case .additionalSaveEditHistory: return \AddonProfile.saveEditHistory
 diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
 index 304ceacfeaee26b6dcc52f5f0480289b2db189f8..f8001ad7f927da76a2cbb13902964399aeb6f270 100644
 --- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings

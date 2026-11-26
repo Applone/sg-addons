@@ -54,9 +54,17 @@ jobs:
         run: python3 tools/patches.py prepare build/source
       - name: Check Python SDK, dependency resolution and interpreter isolation
         run: just test-python
+      - name: Check Postbox usage in Full
+        working-directory: build/source
+        run: python3 build-system/Make/PostboxImportCheck.py
+      - name: Apply the Lite overlay and check Postbox usage in Lite
+        working-directory: build/source
+        run: |
+          git apply --index --whitespace=error "$GITHUB_WORKSPACE/variants/lite.patch"
+          python3 build-system/Make/PostboxImportCheck.py
 
   core:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v7
         with:

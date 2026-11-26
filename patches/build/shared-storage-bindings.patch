@@ -1,5 +1,3 @@
-Subject: Remove unused bindings after shared storage migration
-
 diff --git a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift b/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
 index e965e0c1343da3b1b42b48fb08597209258800c1..7589fd1f23f6a9648889c3721e2dafe8ce8c2f74 100644
 --- a/Telegram/BroadcastUpload/BroadcastUploadExtension.swift
@@ -45,14 +43,37 @@ index f841dd4f10da89dd4633d1e3b935576f4c1b171b..e12f5ef38db8dc42ba4c9f0f33382482
      
      var hasLegacyAppData = false
 diff --git a/submodules/TelegramUI/Sources/AppDelegate.swift b/submodules/TelegramUI/Sources/AppDelegate.swift
-index c56b082f1ca56e8eb3b2eda2739fff45991c32db..ad7e3f327d2cd11ed16ae0a1b057524f6660ac95 100644
+index fe72c3ad..77128110 100644
 --- a/submodules/TelegramUI/Sources/AppDelegate.swift
 +++ b/submodules/TelegramUI/Sources/AppDelegate.swift
-@@ -326,7 +326,6 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+@@ -1,3 +1,4 @@
++import SGAppGroupIdentifier
+ // MARK: Swiftgram
+ import StoreKit
+ import SGIAP
+@@ -324,8 +325,7 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
              return existingSession
          }
          
 -        let baseAppBundleId = Bundle.main.bundleIdentifier!
-         let appGroupName = sgAppGroupIdentifier()
+-        let appGroupName = "group.\(baseAppBundleId)"
++        let appGroupName = sgAppGroupIdentifier()
  
          let configuration = URLSessionConfiguration.background(withIdentifier: identifier)
+         configuration.sharedContainerIdentifier = appGroupName
+@@ -593,13 +593,13 @@ private func extractAccountManagerState(records: AccountRecordsView<TelegramAcco
+         let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "unknown"
+         
+         let baseAppBundleId = Bundle.main.bundleIdentifier!
+-        let appGroupName = "group.\(baseAppBundleId)"
++        let appGroupName = sgAppGroupIdentifier()
+         NSLog("[SG.Launch] Configuring passcode environment") // MARK: Swiftgram
+         try! PasscodeEnvironment.shared.configure(PasscodeConfiguration(appGroupIdentifier: appGroupName, processRole: .mainApp, biometricKeychainService: walletBiometricKeychainService), privateAccessGroup: {
+             BuildConfig.keychainAccessGroup(baseAppBundleId: baseAppBundleId)
+         })
+         NSLog("[SG.Launch] Resolving app-group container") // MARK: Swiftgram
+-        let maybeAppGroupUrl = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupName)
++        let maybeAppGroupUrl = sgSharedContainerURL()
+         NSLog("[SG.Launch] App-group container resolved: \(maybeAppGroupUrl != nil)") // MARK: Swiftgram
+         
+         let buildConfig = BuildConfig(baseAppBundleId: baseAppBundleId)

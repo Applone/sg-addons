@@ -763,56 +763,6 @@ index 29d4dff..617a9e7 100644
  func additionalPeersController(
      context: AccountContext, title: String, values initial: [String], changed: @escaping ([String]) -> Void
  ) -> ViewController {
-diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-index e7c7ccd..b32aeee 100644
---- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-+++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-@@ -143,7 +143,7 @@ private enum SGSliderSetting: String {
- }
- 
- private enum SGDisclosureLink: String {
--    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
-+    case additionalAccount, additionalExceptions, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
- 
-     case contentSettings
-     case languageSettings
-@@ -192,10 +192,8 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
-     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDisappearing, value: profile.saveDisappearing, text: text("saveDisappearing"), enabled: profile.saveDeleted))
-     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalDimDeleted, value: profile.dimDeleted, text: text("dimDeleted"), enabled: true))
-     entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveEditHistory, value: profile.saveEditHistory, text: text("saveEditHistory"), enabled: true))
--    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalRetention, text: text("Retention")))
--    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("Clear")))
-+    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("ArchiveClearAll")))
-     entries.append(.notice(id: id.count, section: .additionalHistory, text: text("HistoryNotice")))
--    entries.append(.notice(id: id.count, section: .additionalHistory, text: text("DisappearingNotice")))
-     entries.append(.header(id: id.count, section: .additionalFilters, text: text("Filters"), badge: nil))
-     entries.append(.toggle(id: id.count, section: .additionalFilters, settingName: .additionalFiltersEnabled, value: profile.filtersEnabled, text: text("filtersEnabled"), enabled: true))
-     entries.append(.disclosure(id: id.count, section: .additionalFilters, link: .additionalFilters, text: text("EditFilters")))
-@@ -780,21 +778,14 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
-                 catch { presentControllerImpl?(additionalError(context: context, error: error), nil) }
-             }))
-             }
--        case .additionalRetention:
--            pushControllerImpl?(additionalRetentionController(context: context, account: account))
-         case .additionalFilters:
-             additionalEditingContext(context: context, account: account) { editingContext in
-                 pushControllerImpl?(additionalFiltersController(context: editingContext, account: account))
-             }
-         case .additionalClear:
--            let sheet = ActionSheetController(presentationData: data)
--            sheet.setItemGroups([ActionSheetItemGroup(items: [ActionSheetTextItem(title: i18n(account == nil ? "Additional.ClearAllNotice" : "Additional.ClearAccountNotice", lang)), ActionSheetButtonItem(title: i18n("Additional.Clear", lang), color: .destructive, action: { [weak sheet] in
--                sheet?.dismissAnimated()
--                MessageArchive.shared.clearHistory(account: account) { success in
--                    if !success { presentControllerImpl?(additionalError(context: context, error: SettingsError.invalid("Could not clear history")), nil) }
--                }
--            })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
--            presentControllerImpl?(sheet, nil)
-+            additionalClearArchivesConfirmation(context: context, account: account) {
-+                presentControllerImpl?($0, nil)
-+            }
-         case .additionalPlugins:
-             pushControllerImpl?(additionalPluginsController(context: context, account: account))
-         case .additionalDiagnostics:
 diff --git a/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift b/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift
 new file mode 100644
 index 0000000..7d704bb
@@ -1039,57 +989,6 @@ index a2d8850..cffcabf 100644
 +"Additional.ArchiveClearAccountNotice" = "Очистить удалённые сообщения и историю изменений этого аккаунта?";
 +"Additional.ArchiveNoResults" = "Сообщения не найдены.";
 +"Additional.ArchiveCacheMiss" = "Этого вложения больше нет в кэше Telegram.";
-diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
-index 377b802..7846480 100644
---- a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
-+++ b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
-@@ -657,21 +657,29 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
-     public let layoutConstants = (ChatMessageItemLayoutConstants.compact, ChatMessageItemLayoutConstants.regular)
-     
-     private var additionalObservers: [NSObjectProtocol] = []
--    private var additionalOriginalAlpha: CGFloat?
-+    private var additionalBaseAlpha: CGFloat = 1.0
-+    private var additionalDeletionAlpha: CGFloat = 1.0
-     private func updateAdditionalAppearance() {
-         guard Thread.isMainThread else { return }
-         let dim: Bool
-         if let item, !item.context.account.supplementary, let key = additionalMessageKey(account: item.context.account.peerId, id: item.message.id) {
--            let profile = AddonSettings.shared.profile(key.account)
--            dim = profile.saveDeleted && profile.dimDeleted && MessageArchive.shared.isDeleted(key)
--        } else { dim = false }
--        if dim {
--            if additionalOriginalAlpha == nil { additionalOriginalAlpha = self.alpha }
--            self.alpha = (additionalOriginalAlpha ?? 1) * 0.55
--        } else if let alpha = additionalOriginalAlpha {
--            self.alpha = alpha; additionalOriginalAlpha = nil
-+            dim = AddonSettings.shared.profile(key.account).dimDeleted && MessageArchive.shared.isDeleted(key)
-+        } else {
-+            dim = false
-         }
-+        additionalDeletionAlpha = dim ? 0.55 : 1.0
-+        super.alpha = additionalBaseAlpha * additionalDeletionAlpha
-     }
-+
-+    // Compose deletion opacity with ListView animations and keyword filtering.
-+    override open var alpha: CGFloat {
-+        get { additionalBaseAlpha }
-+        set {
-+            additionalBaseAlpha = newValue
-+            super.alpha = newValue * additionalDeletionAlpha
-+        }
-+    }
-+
-     open var item: ChatMessageItem? {
-         didSet {
-             if additionalObservers.isEmpty {
-@@ -720,6 +728,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
-         self.frame = CGRect()
-         self.wasFilteredKeywordTested = false
-         self.matchedFilterKeyword = nil
-+        self.alpha = 1.0
-     }
-     
-     open func setupItem(_ item: ChatMessageItem, synchronousLoad: Bool) {
 diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
 index 85f9fff..ae5accd 100644
 --- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
@@ -1147,3 +1046,70 @@ index 85f9fff..ae5accd 100644
                      controllerInteraction.navigationController()?.pushViewController(AdditionalHistoryController(context: context, message: message, key: key, updatedPresentationData: updatedPresentationData))
                  })
              })))
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
+index c8cf0659..2292fbf9 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageItemView/Sources/ChatMessageItemView.swift
+@@ -1,3 +1,4 @@
++import SGAdditionalCore
+ import SGSimpleSettings
+ import Foundation
+ import UIKit
+@@ -664,7 +665,40 @@ public protocol ChatMessageBubblelessStickySelectionCheck: AnyObject {
+ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+     public let layoutConstants = (ChatMessageItemLayoutConstants.compact, ChatMessageItemLayoutConstants.regular)
+     
+-    open var item: ChatMessageItem?
++    private var additionalObservers: [NSObjectProtocol] = []
++    private var additionalBaseAlpha: CGFloat = 1.0
++    private var additionalDeletionAlpha: CGFloat = 1.0
++    private func updateAdditionalAppearance() {
++        guard Thread.isMainThread else { return }
++        let dim: Bool
++        if let item, !item.context.account.supplementary, let key = additionalMessageKey(account: item.context.account.peerId, id: item.message.id) {
++            dim = AddonSettings.shared.profile(key.account).dimDeleted && MessageArchive.shared.isDeleted(key)
++        } else {
++            dim = false
++        }
++        additionalDeletionAlpha = dim ? 0.55 : 1.0
++        super.alpha = additionalBaseAlpha * additionalDeletionAlpha
++    }
++
++    // Compose deletion opacity with ListView animations and keyword filtering.
++    override open var alpha: CGFloat {
++        get { additionalBaseAlpha }
++        set {
++            additionalBaseAlpha = newValue
++            super.alpha = newValue * additionalDeletionAlpha
++        }
++    }
++
++    open var item: ChatMessageItem? {
++        didSet {
++            if additionalObservers.isEmpty {
++                for name in [Notification.Name.retainedMessagesChanged, Notification.Name("SGASettingsDidChange")] {
++                    additionalObservers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.updateAdditionalAppearance() })
++                }
++            }
++            updateAdditionalAppearance()
++        }
++    }
+     open var accessibilityData: ChatMessageAccessibilityData?
+     open var safeInsets = UIEdgeInsets()
+     open var scrollTiltProvider: ((CFTimeInterval) -> Float)?
+@@ -696,6 +730,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+     }
+     
+     deinit {
++        for observer in additionalObservers { NotificationCenter.default.removeObserver(observer) }
+         self.fetchEffectDisposable?.dispose()
+     }
+     
+@@ -707,6 +742,7 @@ open class ChatMessageItemView: ListViewItemNode, ChatMessageItemNodeProtocol {
+         self.frame = CGRect()
+         self.wasFilteredKeywordTested = false
+         self.matchedFilterKeyword = nil
++        self.alpha = 1.0
+     }
+     
+     open func setupItem(_ item: ChatMessageItem, synchronousLoad: Bool) {

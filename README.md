@@ -4,6 +4,16 @@ Native feature patches for [Swiftgram](https://github.com/Swiftgram/Telegram-iOS
 Upstream is pinned in `upstream.json`; sources are downloaded without history
 and patched in `patches/series` order when preparing a build.
 
+## Download
+
+[![Add AltSource](https://img.shields.io/badge/Add_AltSource-2867B2?style=for-the-badge)](https://altdirect.app/?url=https://github.com/Applone/sg-addons/releases/latest/download/altsource.json)
+[![Download Lite IPA](https://img.shields.io/badge/Download_Lite_IPA-2867B2?style=for-the-badge)](https://github.com/Applone/sg-addons/releases/latest/download/Swiftgram-lite.ipa)
+[![Download Full IPA](https://img.shields.io/badge/Download_Full_IPA-2867B2?style=for-the-badge)](https://github.com/Applone/sg-addons/releases/latest/download/Swiftgram-full.ipa)
+
+**Lite** includes the native add-ons and treats HTML message widgets as unsupported media.
+**Full** also runs HTML message widgets and Python plugins. Full keeps the existing bundle
+identifier. Lite uses the same identifier with a `.lite` suffix and installs separately.
+
 ## Features
 
 - Ghost mode: hide read receipts, story views, online status, typing, and upload
@@ -58,10 +68,11 @@ actions clear local data. Logout clears the account’s archive.
 
 Run `just check` and `just test` after preparing the source tree. The native core
 suite includes archive migration, retention, cache behavior, purge, and
-session-lifecycle regressions. On an Apple Silicon Mac with the pinned Xcode and
-prepared build submodules, run `just test-apple` with `build/configuration.json` in
-place. It runs the upstream Apple suite, including TelegramCore archive adapter
-and Postbox interception checks. The IPA workflow runs that suite before building the device artifact.
+session-lifecycle regressions. To run `just test-apple` on an Apple Silicon Mac,
+select Xcode 27.1, install the iOS 27.0 simulator runtime for iPhone 17, prepare the
+build submodules, and provide `build/configuration.json`. The Full IPA workflow runs
+this suite, including the TelegramCore archive adapter and Postbox interception tests.
+Lite runs the settings UI suite on the same simulator before building its IPA.
 Linux core tests and Swift syntax checks do not validate iOS UI or signing.
 
 ## Build in CI
@@ -69,23 +80,23 @@ Linux core tests and Swift syntax checks do not validate iOS UI or signing.
 1. Add a repository secret named `BUILD_CONFIGURATION_JSON` under
    **Settings → Secrets and variables → Actions**, using the configuration below.
 2. Open **Actions → Build unsigned IPA → Run workflow** and select `main`.
-3. Download `sg-addons-unsigned-<run number>` from the run's **Artifacts** section.
+3. Download `sg-addons-lite-<run number>` or `sg-addons-full-<run number>` from the run's **Artifacts** section.
    It contains the IPA, dSYMs, and source provenance.
 
 Release tags must match `v` followed by `[project].version` in `pyproject.toml`
-(for example, `v1.2.0`). Update the version and run `uv lock` before tagging.
+(for example, `v1.3.0`). Update the version and run `uv lock` before tagging.
 Tag validation runs before the build.
 Pushing a matching tag automatically starts the same build. After a successful tag
-build, the workflow publishes a GitHub Release for that tag with only
-`Swiftgram.ipa` and `Swiftgram.DSYMs.zip` as assets, plus automatically generated
+build, the workflow publishes a GitHub Release for that tag with both IPAs, matching dSYM archives,
+and the generated `altsource.json` feed, plus automatically generated
 release notes. Manual runs on a tag also publish a
 release; manual runs on a branch only upload the Actions artifact.
 
 For example, to publish a version from the current commit:
 
 ```sh
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
 The workflow fetches pinned sources and submodules, applies patches, runs core
@@ -97,7 +108,7 @@ requests run lint, patch verification, and core tests automatically.
 The IPA workflow uses [BuildBuddy](https://www.buildbuddy.io/docs/quickstart/)
 to share Bazel build outputs across release tags and manual runs. Both the Apple
 integration suite and device build read and populate the remote cache. Tests still
-execute on every run; builds run on the existing macOS runner.
+execute on every run with the pinned Xcode toolchain.
 
 Before starting a build:
 
@@ -155,17 +166,20 @@ and the Siri/iCloud flags as JSON booleans, exactly as shown.
 
 ## Build manually
 
-Requires macOS 26, Xcode 26.6, Git, and [uv](https://docs.astral.sh/uv/).
+Requires macOS 27, Xcode 27.1, Git, and [uv](https://docs.astral.sh/uv/).
 Run from a checkout of this repository:
 
 ```sh
 uv run --frozen python tools/patches.py prepare build/source --submodules
 ```
 
+For Lite, apply the edition patch with `git -C build/source apply --index ../../variants/lite.patch`
+and append `.lite` to the configured bundle identifier. The default source tree builds Full.
+
 Save the configuration above as `build/configuration.json`, then run:
 
 ```sh
-sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
+sudo xcode-select -s /Applications/Xcode_27.1.app/Contents/Developer
 cd build/source
 python3 build-system/Make/Make.py build \
   --configurationPath=../configuration.json \

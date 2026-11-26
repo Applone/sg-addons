@@ -18,3 +18,4 @@ core/network-telemetry-tests.patch
 core/deleted-message-archive.patch
 ui/deleted-message-archive.patch
 core/upstream-compatibility.patch
+build/xcode-27-test-runners.patch

@@ -1,0 +1,39 @@
+diff --git a/Swiftgram/SGSettingsUI/BUILD b/Swiftgram/SGSettingsUI/BUILD
+index 9f2de44e..19a53e9f 100644
+--- a/Swiftgram/SGSettingsUI/BUILD
++++ b/Swiftgram/SGSettingsUI/BUILD
+@@ -60,7 +60,7 @@ swift_library(
+ ios_test_runner(
+     name = "SGSettingsUITestRunner",
+     device_type = "iPhone 17",
+-    os_version = "26.5",
++    os_version = "27.0",
+ )
+ 
+ ios_unit_test(
+diff --git a/submodules/Postbox/BUILD b/submodules/Postbox/BUILD
+index 7ca8cb1b..beaa2335 100644
+--- a/submodules/Postbox/BUILD
++++ b/submodules/Postbox/BUILD
+@@ -113,7 +113,7 @@ swift_library(
+ ios_test_runner(
+     name = "PostboxTestRunner",
+     device_type = "iPhone 17",
+-    os_version = "26.5",
++    os_version = "27.0",
+ )
+ 
+ ios_unit_test(
+diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
+index cbc8d760..d5b2a2e9 100644
+--- a/submodules/TelegramCore/BUILD
++++ b/submodules/TelegramCore/BUILD
+@@ -79,7 +79,7 @@ swift_library(
+ ios_test_runner(
+     name = "TelegramCoreTestRunner",
+     device_type = "iPhone 17",
+-    os_version = "26.5",
++    os_version = "27.0",
+ )
+ 
+ ios_unit_test(

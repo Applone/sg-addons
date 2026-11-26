@@ -1,7 +1,7 @@
 {
   "repository": "https://github.com/Swiftgram/Telegram-iOS.git",
-  "version": "13.0.1-327",
-  "revision": "11b66573267cb57474cbdb75ca756532ef9fdfbf",
-  "base_tree": "484998e0fc517ad1be5dbde314b2d7d0e95fbe94",
-  "patched_tree": "65dde58011714c582bf651df6aa8bb8004bc8116"
+  "version": "13.2.1",
+  "revision": "b460f1d8948e725331b34981cc2a563aeeae97fd",
+  "base_tree": "0effd31781e907ee62c75f7576ac14b9d94b8616",
+  "patched_tree": "c222c3b0b1401f57136f896fb44beb3cd6262c25"
 }

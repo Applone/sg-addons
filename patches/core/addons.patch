@@ -1,14 +1,3 @@
-diff --git a/MODULE.bazel b/MODULE.bazel
-index 38b95c8d..8834cc79 100644
---- a/MODULE.bazel
-+++ b/MODULE.bazel
-@@ -249,3 +249,6 @@ local_path_override(
-     module_name = "build_configuration",
-     path = "./build-input/configuration-repository",
- )
-+
-+python_ios_repository = use_repo_rule("//Swiftgram/SGPython:python_repository.bzl", "python_ios_repository")
-+python_ios_repository(name = "swiftgram_python")
 diff --git a/Swiftgram/SGAdditionalCore/BUILD b/Swiftgram/SGAdditionalCore/BUILD
 index 994a2d3e..7531d1f0 100644
 --- a/Swiftgram/SGAdditionalCore/BUILD
@@ -4769,36 +4758,6 @@ index 00000000..19f3b2e3
 +    resolve()
 +    return controller
 +}
-diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-index 445502d0..e7c7ccdf 100644
---- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-+++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-@@ -143,7 +143,7 @@ private enum SGSliderSetting: String {
- }
- 
- private enum SGDisclosureLink: String {
--    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics
-+    case additionalAccount, additionalExceptions, additionalRetention, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
- 
-     case contentSettings
-     case languageSettings
-@@ -205,6 +205,7 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
-     entries.append(.header(id: id.count, section: .additionalPremium, text: text("Premium"), badge: nil))
-     entries.append(.toggle(id: id.count, section: .additionalPremium, settingName: .additionalLocalPremium, value: profile.localPremium, text: text("localPremium"), enabled: true))
-     entries.append(.notice(id: id.count, section: .additionalPremium, text: text("PremiumNotice")))
-+    entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalPlugins, text: text("Plugins")))
-     entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalDiagnostics, text: text("Diagnostics")))
- 
-     if SGSimpleSettings.shared.canUseNY {
-@@ -794,6 +795,8 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
-                 }
-             })]), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
-             presentControllerImpl?(sheet, nil)
-+        case .additionalPlugins:
-+            pushControllerImpl?(additionalPluginsController(context: context, account: account))
-         case .additionalDiagnostics:
-             pushControllerImpl?(additionalDiagnosticsController(context: context))
-             case .languageSettings:
 diff --git a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings b/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
 index f8001ad7..f0355343 100644
 --- a/Swiftgram/SGStrings/Strings/en.lproj/SGLocalizable.strings
@@ -4897,19 +4856,6 @@ index e7e25e87..518a2b65 100644
 +"Additional.PluginPermission.editMessages" = "Редактировать текст и подписи ваших сообщений";
 +"Additional.PluginPermission.downloadMedia" = "Скачивать обычные облачные вложения";
 +"Additional.PluginPermission.sendMedia" = "Отправлять фото, видео и документы";
-diff --git a/Telegram/BUILD b/Telegram/BUILD
-index ebe01b2f..1659da3b 100644
---- a/Telegram/BUILD
-+++ b/Telegram/BUILD
-@@ -2045,6 +2045,8 @@ ios_application(
-     ],
-     resources = [
-         ":LaunchScreen",
-+        "//Swiftgram/SGPython:SDK",
-+        "@swiftgram_python//:stdlib",
-         #":DefaultAppIcon",
-     ],
-     frameworks = [
 diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
 index c94692ea..fffa55cc 100644
 --- a/submodules/TelegramCore/Sources/Account/Account.swift
@@ -5353,70 +5299,6 @@ index 00000000..ff0c14f4
 +    guard let error, let result = dispatched, let description = result.error else { return error }
 +    return MTRpcError(errorCode: error.errorCode, errorDescription: description)
 +}
-diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
-index e8f3012f..0badd158 100644
---- a/submodules/TelegramCore/Sources/Network/Network.swift
-+++ b/submodules/TelegramCore/Sources/Network/Network.swift
-@@ -1264,7 +1264,12 @@ public final class Network: NSObject {
-     
-     public func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
-         let requestService = self.requestService
-+        let pluginAccount = self.additionalAccountId
-         return Signal { [requestService] subscriber in
-+            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
-+                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
-+                return EmptyDisposable
-+            }
-             let request = NetworkEngineRequest(
-                 payload: data.1.makeData(),
-                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
-@@ -1291,6 +1296,7 @@ public final class Network: NSObject {
-                 completed: { result in
-                     switch result {
-                     case let .success(response):
-+                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
-                         if let result = (response.result as! BoxedMessage).body as? T {
-                             subscriber.putNext(.result(result))
-                             subscriber.putCompletion()
-@@ -1299,7 +1305,7 @@ public final class Network: NSObject {
-                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
-                         }
-                     case let .failure(failure):
--                        subscriber.putError(failure.error)
-+                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
-                     }
-                 }
-             )
-@@ -1310,7 +1316,12 @@ public final class Network: NSObject {
-     
-     public func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
-         let requestService = self.requestService
-+        let pluginAccount = self.additionalAccountId
-         return Signal { [requestService] subscriber in
-+            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
-+                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
-+                return EmptyDisposable
-+            }
-             let request = NetworkEngineRequest(
-                 payload: data.1.makeData(),
-                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
-@@ -1329,6 +1340,7 @@ public final class Network: NSObject {
-                 completed: { result in
-                     switch result {
-                     case let .success(response):
-+                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
-                         if let result = (response.result as! BoxedMessage).body as? T {
-                             subscriber.putNext(result)
-                             subscriber.putCompletion()
-@@ -1337,7 +1349,7 @@ public final class Network: NSObject {
-                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
-                         }
-                     case let .failure(failure):
--                        subscriber.putError(failure.error)
-+                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
-                     }
-                 }
-             )
 diff --git a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
 index 8ae2e4e7..6bbe51c7 100644
 --- a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
@@ -5484,3 +5366,188 @@ index 8383ea1b..78686458 100644
          if isEdited,
             let key = additionalMessageKey(account: context.account.peerId, id: message.id),
             additionalCanArchive(attributes: message.attributes, media: message.media),
+diff --git a/Telegram/BUILD b/Telegram/BUILD
+index dda41862..06a0942b 100644
+--- a/Telegram/BUILD
++++ b/Telegram/BUILD
+@@ -240,6 +240,7 @@ swift_library(
+         "-serialize-debugging-options",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/AsyncDisplayKit:AsyncDisplayKit",
+         "//submodules/AppBundle:AppBundle",
+         "//submodules/ObjCRuntimeUtils:ObjCRuntimeUtils",
+@@ -404,6 +405,7 @@ swift_library(
+         ":GeneratedPresentationStrings/Resources/PresentationStrings.data",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI:TelegramUI",
+         "//third-party/boringssl:crypto",
+     ],
+@@ -1114,6 +1116,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI",
+         "//submodules/PasscodeCore",
+         "//submodules/TelegramUI/Components/ShareExtensionContext"
+@@ -1216,6 +1219,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI:TelegramUI",
+         "//submodules/PasscodeCore",
+         ":NotificationContentExtensionLink",
+@@ -1317,6 +1321,7 @@ swift_library(
+         ":WidgetAssets",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/BuildConfig:BuildConfig",
+         "//submodules/WidgetItems:WidgetItems_iOS14",
+         "//submodules/WidgetItemsUtils:WidgetItemsUtils",
+@@ -1460,6 +1465,7 @@ swift_library(
+         ":IntentsAssets"
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
+@@ -1479,6 +1485,7 @@ swift_library(
+         "SiriIntentsTests/**/*.swift",
+     ]),
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         ":IntentsExtensionLib",
+         "//submodules/Postbox:Postbox",
+         "//submodules/TelegramCore:TelegramCore",
+@@ -1637,6 +1644,7 @@ swift_library(
+         ":SGActionRequestHandlerScript"
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/UrlEscaping:UrlEscaping"
+     ],
+ )
+@@ -1733,6 +1741,7 @@ swift_library(
+         "-warnings-as-errors",
+     ],
+     deps = [
++        "//Swiftgram/SGAppGroupIdentifier:SGAppGroupIdentifier",
+         "//submodules/TelegramUI:TelegramUI",
+         "//submodules/TelegramVoip:TelegramVoip",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+@@ -2105,6 +2114,8 @@ ios_application(
+     ],
+     resources = [
+         ":LaunchScreen",
++        "//Swiftgram/SGPython:SDK",
++        "@swiftgram_python//:stdlib",
+         #":DefaultAppIcon",
+     ],
+     frameworks = [
+diff --git a/MODULE.bazel b/MODULE.bazel
+index d9e3dba1..6f48e887 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -206,9 +206,12 @@ local_path_override(
+ )
+ 
+ bazel_dep(name = "rules_apple", repo_name = "build_bazel_rules_apple")
+-local_path_override(
++git_override(
+     module_name = "rules_apple",
+-    path = "./build-system/bazel-rules/rules_apple",
++    commit = "485016eb5b0948cc17307064e7977a6d68e94046",
++    patch_strip = 1,
++    patches = ["//build-system:rules_apple_unsigned.patch"],
++    remote = "https://github.com/ali-fareed/rules_apple.git",
+ )
+ 
+ # rules_apple's ios_test_runner drives xcodebuild through xctestrunner, which passes
+@@ -282,3 +285,6 @@ local_path_override(
+     module_name = "build_configuration",
+     path = "./build-input/configuration-repository",
+ )
++
++python_ios_repository = use_repo_rule("//Swiftgram/SGPython:python_repository.bzl", "python_ios_repository")
++python_ios_repository(name = "swiftgram_python")
+diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
+index e46ae2dd..2210d51e 100644
+--- a/submodules/TelegramCore/Sources/Network/Network.swift
++++ b/submodules/TelegramCore/Sources/Network/Network.swift
+@@ -906,6 +906,9 @@ private final class NetworkSpeedLimitedEventState {
+ }
+ 
+ public final class Network: NSObject {
++    // Set once by the authorized main-app Account before its services start.
++    var additionalAccountId: String?
++
+     public let encryptionProvider: EncryptionProvider
+     
+     private let queue: Queue
+@@ -1376,7 +1379,12 @@ public final class Network: NSObject {
+     
+     func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
+         let requestService = self.requestService
++        let pluginAccount = self.additionalAccountId
+         return Signal { [requestService] subscriber in
++            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
++                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
++                return EmptyDisposable
++            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1403,6 +1411,7 @@ public final class Network: NSObject {
+                 completed: { result in
+                     switch result {
+                     case let .success(response):
++                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
+                         if let result = (response.result as! BoxedMessage).body as? T {
+                             subscriber.putNext(.result(result))
+                             subscriber.putCompletion()
+@@ -1411,7 +1420,7 @@ public final class Network: NSObject {
+                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
+                         }
+                     case let .failure(failure):
+-                        subscriber.putError(failure.error)
++                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
+                     }
+                 }
+             )
+@@ -1422,7 +1431,12 @@ public final class Network: NSObject {
+     
+     func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
+         let requestService = self.requestService
++        let pluginAccount = self.additionalAccountId
+         return Signal { [requestService] subscriber in
++            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
++                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
++                return EmptyDisposable
++            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1441,6 +1455,7 @@ public final class Network: NSObject {
+                 completed: { result in
+                     switch result {
+                     case let .success(response):
++                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
+                         if let result = (response.result as! BoxedMessage).body as? T {
+                             subscriber.putNext(result)
+                             subscriber.putCompletion()
+@@ -1449,7 +1464,7 @@ public final class Network: NSObject {
+                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
+                         }
+                     case let .failure(failure):
+-                        subscriber.putError(failure.error)
++                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
+                     }
+                 }
+             )

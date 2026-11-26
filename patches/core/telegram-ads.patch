@@ -1,6 +1,3 @@
-Subject: Telegram ad blocking
-Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
-
 diff --git a/Swiftgram/SGAdditionalCore/Sources/Ads.swift b/Swiftgram/SGAdditionalCore/Sources/Ads.swift
 new file mode 100644
 index 0000000000000000000000000000000000000000..0bde3ac6fd85baeb32a78dd4abfcbc920f4c89aa

@@ -1,7 +1,3 @@
-Subject: native settings and history
-Upstream: Swiftgram/Telegram-iOS 11b66573267cb57474cbdb75ca756532ef9fdfbf
-Origin-Commit: ae31d169c6af6e6969c7ebbba028a51e085803b2
-
 diff --git a/Swiftgram/SGAdditionalCore/BUILD b/Swiftgram/SGAdditionalCore/BUILD
 new file mode 100644
 index 0000000000000000000000000000000000000000..994a2d3eb758ffd9b69c2e3d0145b736a9470095

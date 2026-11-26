@@ -1,25 +1,3 @@
-diff --git a/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift b/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift
-index 8437591b..76d403dc 100644
---- a/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift
-+++ b/build-system/SwiftTL/Sources/SwiftTL/CodeGeneration.swift
-@@ -586,6 +586,17 @@ enum CodeGenerator {
-             }
-         }
- 
-+        // The pinned layer still receives these older server layouts.
-+        if apiPrefix == "Api" {
-+            let ids = Set(types.flatMap { $0.constructors.values.map { $0.id } })
-+            if ids.contains(114026053) {
-+                writer.line("dict[2145859780] = { return Api.UserFull.parseLegacyUserFull($0) }")
-+            }
-+            if ids.contains(UInt32(bitPattern: -25628980)) {
-+                writer.line("dict[-1581738523] = { return Api.WalletUserAddress.parseLegacyWalletUserAddress($0) }")
-+            }
-+        }
-+
-         writer.line("return dict")
-         writer.dedent()
-         writer.line("}()")
 diff --git a/submodules/Postbox/BUILD b/submodules/Postbox/BUILD
 index 0b37fe7e..83c17bb5 100644
 --- a/submodules/Postbox/BUILD
@@ -31,162 +9,8 @@ index 0b37fe7e..83c17bb5 100644
 +    timeout = "long",
      minimum_os_version = "15.0",
      runner = ":PostboxTestRunner",
-diff --git a/submodules/TelegramApi/Sources/Api0.swift b/submodules/TelegramApi/Sources/Api0.swift
-index 3fca6d28..7bf071d2 100644
---- a/submodules/TelegramApi/Sources/Api0.swift
-+++ b/submodules/TelegramApi/Sources/Api0.swift
-@@ -1764,6 +1764,8 @@ fileprivate let parsers: [Int32 : (BufferReader) -> Any?] = {
-     dict[236939414] = { return Api.wallet.TonConnectSessions.parse_tonConnectSessions($0) }
-     dict[1126356389] = { return Api.wallet.Transactions.parse_transactions($0) }
-     dict[-1836156075] = { return Api.wallet.UserAddresses.parse_userAddresses($0) }
-+    dict[2145859780] = { return Api.UserFull.parseLegacyUserFull($0) }
-+    dict[-1581738523] = { return Api.WalletUserAddress.parseLegacyWalletUserAddress($0) }
-     return dict
- }()
- 
-diff --git a/submodules/TelegramApi/Sources/LegacyConstructors.swift b/submodules/TelegramApi/Sources/LegacyConstructors.swift
-new file mode 100644
-index 00000000..e910b5c5
---- /dev/null
-+++ b/submodules/TelegramApi/Sources/LegacyConstructors.swift
-@@ -0,0 +1,22 @@
-+// Legacy constructors still sent by servers at the pinned API layer.
-+// Keep current serialization unchanged; adapt only the older incoming layouts.
-+extension Api.UserFull {
-+    static func parseLegacyUserFull(_ reader: BufferReader) -> Api.UserFull? {
-+        guard let value = parse_userFull(reader), case .userFull(let data) = value else { return nil }
-+        if data.flags2 & (1 << 27) != 0 {
-+            guard parseString(reader) != nil else { return nil }
-+        }
-+        return value
-+    }
-+}
-+
-+extension Api.WalletUserAddress {
-+    static func parseLegacyWalletUserAddress(_ reader: BufferReader) -> Api.WalletUserAddress? {
-+        guard let userId = reader.readInt64(), let address = parseString(reader), let publicKey = parseBytes(reader)
-+        else {
-+            return nil
-+        }
-+        return .walletUserAddress(
-+            Cons_walletUserAddress(flags: 1, userId: userId, address: address, publicKey: publicKey))
-+    }
-+}
-diff --git a/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift b/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift
-index 38e9f8ba..64d6d394 100644
---- a/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift
-+++ b/submodules/TelegramCore/Tests/ApiConstructorCompatibilityTests.swift
-@@ -1,5 +1,6 @@
--import XCTest
- import TelegramApi
-+import XCTest
-+
- @testable import TelegramCore
- 
- private func appendTLBytes(_ bytes: Data, to buffer: Buffer) {
-@@ -28,8 +29,18 @@ final class ApiConstructorCompatibilityTests: XCTestCase {
-         buffer.appendInt32(0)
-         buffer.appendInt32(flags2)
-         buffer.appendInt64(777)
--        Api.PeerSettings.peerSettings(Api.PeerSettings.Cons_peerSettings(flags: 0, geoDistance: nil, requestChatTitle: nil, requestChatDate: nil, businessBotId: nil, businessBotManageUrl: nil, chargePaidMessageStars: nil, registrationMonth: nil, phoneCountry: nil, nameChangeDate: nil, photoChangeDate: nil)).serialize(buffer, true)
--        Api.PeerNotifySettings.peerNotifySettings(Api.PeerNotifySettings.Cons_peerNotifySettings(flags: 0, showPreviews: nil, silent: nil, muteUntil: nil, iosSound: nil, androidSound: nil, otherSound: nil, storiesMuted: nil, storiesHideSender: nil, storiesIosSound: nil, storiesAndroidSound: nil, storiesOtherSound: nil)).serialize(buffer, true)
-+        Api.PeerSettings.peerSettings(
-+            Api.PeerSettings.Cons_peerSettings(
-+                flags: 0, geoDistance: nil, requestChatTitle: nil, requestChatDate: nil, businessBotId: nil,
-+                businessBotManageUrl: nil, chargePaidMessageStars: nil, registrationMonth: nil, phoneCountry: nil,
-+                nameChangeDate: nil, photoChangeDate: nil)
-+        ).serialize(buffer, true)
-+        Api.PeerNotifySettings.peerNotifySettings(
-+            Api.PeerNotifySettings.Cons_peerNotifySettings(
-+                flags: 0, showPreviews: nil, silent: nil, muteUntil: nil, iosSound: nil, androidSound: nil,
-+                otherSound: nil, storiesMuted: nil, storiesHideSender: nil, storiesIosSound: nil,
-+                storiesAndroidSound: nil, storiesOtherSound: nil)
-+        ).serialize(buffer, true)
-         buffer.appendInt32(5)
-         if let gramAddress {
-             appendTLBytes(gramAddress.data(using: .utf8)!, to: buffer)
-@@ -38,36 +49,41 @@ final class ApiConstructorCompatibilityTests: XCTestCase {
-     }
- 
-     private func parsedUserFull(_ buffer: Buffer) -> Api.UserFull.Cons_userFull? {
--        buffer.appendInt32(0x0badf00d)
-+        buffer.appendInt32(0x0bad_f00d)
-         let reader = BufferReader(buffer)
--        guard let signature = reader.readInt32(), let value = Api.parse(reader, signature: signature) as? Api.UserFull, case let .userFull(data) = value else {
-+        guard let signature = reader.readInt32(), let value = Api.parse(reader, signature: signature) as? Api.UserFull,
-+            case .userFull(let data) = value
-+        else {
-             return nil
-         }
--        XCTAssertEqual(reader.readInt32(), 0x0badf00d, "the parser must consume exactly the userFull bytes")
-+        XCTAssertEqual(reader.readInt32(), 0x0bad_f00d, "the parser must consume exactly the userFull bytes")
-         return data
-     }
- 
-     func testUserFullParsesWithAndWithoutTheGramAddressLayout() {
--        let current = parsedUserFull(self.userFullBytes(constructor: 114026053, flags2: 0, gramAddress: nil))
-+        let current = parsedUserFull(self.userFullBytes(constructor: 114_026_053, flags2: 0, gramAddress: nil))
-         XCTAssertEqual(current?.id, 777)
-         XCTAssertEqual(current?.commonChatsCount, 5)
- 
--        let previous = parsedUserFull(self.userFullBytes(constructor: 2145859780, flags2: 0, gramAddress: nil))
-+        let previous = parsedUserFull(self.userFullBytes(constructor: 2_145_859_780, flags2: 0, gramAddress: nil))
-         XCTAssertEqual(previous?.id, 777, "the layout production still sends at this layer")
-         XCTAssertEqual(previous?.commonChatsCount, 5)
- 
--        let previousWithAddress = parsedUserFull(self.userFullBytes(constructor: 2145859780, flags2: 1 << 27, gramAddress: "UQAddress"))
-+        let previousWithAddress = parsedUserFull(
-+            self.userFullBytes(constructor: 2_145_859_780, flags2: 1 << 27, gramAddress: "UQAddress"))
-         XCTAssertEqual(previousWithAddress?.id, 777)
-         XCTAssertEqual(previousWithAddress?.commonChatsCount, 5)
-     }
- 
-     func testWalletUserAddressParsesBothLayouts() {
-         let previous = Buffer()
--        previous.appendInt32(-1581738523)
-+        previous.appendInt32(-1_581_738_523)
-         previous.appendInt64(42)
-         appendTLBytes("UQAddress".data(using: .utf8)!, to: previous)
-         appendTLBytes(Data([1, 2, 3]), to: previous)
--        guard let parsedPrevious = Api.parse(previous) as? Api.WalletUserAddress, case let .walletUserAddress(previousData) = parsedPrevious else {
-+        guard let parsedPrevious = Api.parse(previous) as? Api.WalletUserAddress,
-+            case .walletUserAddress(let previousData) = parsedPrevious
-+        else {
-             return XCTFail("the previous walletUserAddress layout must still parse")
-         }
-         XCTAssertEqual(previousData.flags, 1 << 0)
-@@ -76,11 +92,27 @@ final class ApiConstructorCompatibilityTests: XCTestCase {
-         XCTAssertEqual(previousData.publicKey.makeData(), Data([1, 2, 3]))
- 
-         let current = Buffer()
--        Api.WalletUserAddress.walletUserAddress(Api.WalletUserAddress.Cons_walletUserAddress(flags: 0, userId: nil, address: "UQOther", publicKey: Buffer(data: Data([4])))).serialize(current, true)
--        guard let parsedCurrent = Api.parse(current) as? Api.WalletUserAddress, case let .walletUserAddress(currentData) = parsedCurrent else {
-+        Api.WalletUserAddress.walletUserAddress(
-+            Api.WalletUserAddress.Cons_walletUserAddress(
-+                flags: 0, userId: nil, address: "UQOther", publicKey: Buffer(data: Data([4])))
-+        ).serialize(current, true)
-+        guard let parsedCurrent = Api.parse(current) as? Api.WalletUserAddress,
-+            case .walletUserAddress(let currentData) = parsedCurrent
-+        else {
-             return XCTFail("the current walletUserAddress layout must parse")
-         }
-         XCTAssertNil(currentData.userId)
-         XCTAssertEqual(currentData.address, "UQOther")
-     }
-+
-+    func testLegacyConstructorsRejectMissingFields() {
-+        let missingAddress = self.userFullBytes(constructor: 2_145_859_780, flags2: 1 << 27, gramAddress: nil)
-+        XCTAssertNil(Api.parse(missingAddress))
-+        let missingKey = Buffer()
-+        missingKey.appendInt32(-1_581_738_523)
-+        missingKey.appendInt64(42)
-+        appendTLBytes(Data("UQAddress".utf8), to: missingKey)
-+        XCTAssertNil(Api.parse(missingKey))
-+    }
-+
- }
 diff --git a/submodules/TgVoipWebrtc/BUILD b/submodules/TgVoipWebrtc/BUILD
-index 1e4080dc..074ff83e 100644
+index a5903412..34588f9e 100644
 --- a/submodules/TgVoipWebrtc/BUILD
 +++ b/submodules/TgVoipWebrtc/BUILD
 @@ -331,13 +331,12 @@ cc_test(
@@ -204,7 +28,7 @@ index 1e4080dc..074ff83e 100644
      linkopts = select({
          "@platforms//os:linux": ["-lpthread", "-lm", "-ldl"],
          "//conditions:default": ["-framework", "CoreFoundation", "-framework", "Security"],
-@@ -355,13 +354,12 @@ cc_test(
+@@ -403,13 +402,12 @@ cc_test(
          "-Ithird-party/webrtc/absl",
          "-Ithird-party/libyuv",
          "-DRTC_ENABLE_VP9",
@@ -219,7 +43,7 @@ index 1e4080dc..074ff83e 100644
      linkopts = select({
          "@platforms//os:linux": ["-lpthread", "-lm", "-ldl"],
          "//conditions:default": ["-framework", "CoreFoundation", "-framework", "Security"],
-@@ -379,13 +377,12 @@ cc_test(
+@@ -427,13 +425,12 @@ cc_test(
          "-Ithird-party/webrtc/absl",
          "-Ithird-party/libyuv",
          "-DRTC_ENABLE_VP9",
@@ -234,7 +58,7 @@ index 1e4080dc..074ff83e 100644
      linkopts = select({
          "@platforms//os:linux": ["-lpthread", "-lm", "-ldl"],
          "//conditions:default": ["-framework", "CoreFoundation", "-framework", "Security"],
-@@ -513,3 +510,14 @@ cc_library(
+@@ -566,3 +563,14 @@ cc_library(
          "//visibility:public",
      ],
  )
@@ -249,24 +73,161 @@ index 1e4080dc..074ff83e 100644
 +    ],
 +    visibility = ["//visibility:public"],
 +)
-diff --git a/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift b/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift
-index 730fdd58..5b06e1a3 100644
---- a/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift
-+++ b/Swiftgram/SGItemListUI/Sources/SliderPercentageItem.swift
-@@ -168,7 +168,7 @@ class SliderPercentageItemNode: ListViewItemNode {
-     func asyncLayout() -> (_ item: SliderPercentageItem, _ params: ListViewItemLayoutParams, _ neighbors: ItemListNeighbors) -> (ListViewItemNodeLayout, () -> Void) {
-         let currentItem = self.item
-         
--        return { item, params, neighbors in
-+        return { [weak self] item, params, neighbors in
-             var themeUpdated = false
-             if currentItem?.theme !== item.theme {
-                 themeUpdated = true
 diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-index 3111030f..de8be2be 100644
+index 2a7ab110..66ec13e2 100644
 --- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
 +++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
-@@ -808,7 +808,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+@@ -1,3 +1,4 @@
++import SGAdditionalCore
+ // MARK: Swiftgram
+ import SGLogging
+ import SGSimpleSettings
+@@ -26,6 +27,7 @@ import UndoUI
+ 
+ private enum SGControllerSection: Int32, SGItemListSection {
+     case search
++    case additionalAccount, additionalGhost, additionalHistory, additionalFilters, additionalAds, additionalPremium, additionalAbout
+     case trending
+     case content
+     case tabs
+@@ -45,6 +47,20 @@ private enum SGControllerSection: Int32, SGItemListSection {
+ }
+ 
+ private enum SGBoolSetting: String {
++    case additionalGhostEnabled
++    case additionalHideRead
++    case additionalHideStories
++    case additionalHideOnline
++    case additionalHideTyping
++    case additionalHideUpload
++    case additionalSaveDisappearing
++    case additionalSaveDeleted
++    case additionalDimDeleted
++    case additionalSaveEditHistory
++    case additionalFiltersEnabled
++    case additionalBlockAds
++    case additionalLocalPremium
++
+     case hidePhoneInSettings
+     case showTabNames
+     case showContactsTab
+@@ -127,6 +143,8 @@ private enum SGSliderSetting: String {
+ }
+ 
+ private enum SGDisclosureLink: String {
++    case additionalAccount, additionalExceptions, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
++
+     case contentSettings
+     case languageSettings
+ }
+@@ -138,6 +156,8 @@ private struct PeerNameColorScreenState: Equatable {
+ 
+ private struct SGSettingsControllerState: Equatable {
+     var searchQuery: String?
++    var additionalAccount: String?
++    var additionalAccountName: String?
+ }
+ 
+ private typealias SGControllerEntry = SGItemListUIEntry<SGControllerSection, SGBoolSetting, SGSliderSetting, SGOneFromManySetting, SGDisclosureLink, AnyHashable>
+@@ -154,6 +174,38 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.searchInput(id: id.count, section: .search, title: NSAttributedString(string: "🔍"), text: state.searchQuery ?? "", placeholder: strings.Common_Search))
+     
+     
++    let profile = AddonSettings.shared.profile(state.additionalAccount)
++    func text(_ key: String) -> String { i18n("Additional." + key, lang) }
++    entries.append(.header(id: id.count, section: .additionalAccount, text: text("Title"), badge: nil))
++    entries.append(.disclosure(id: id.count, section: .additionalAccount, link: .additionalAccount, text: state.additionalAccountName ?? text("Default")))
++    entries.append(.notice(id: id.count, section: .additionalAccount, text: text("AccountNotice")))
++    entries.append(.header(id: id.count, section: .additionalGhost, text: text("Ghost"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalGhostEnabled, value: profile.ghostEnabled, text: text("ghostEnabled"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideRead, value: profile.hideRead, text: text("hideRead"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideStories, value: profile.hideStories, text: text("hideStories"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideOnline, value: profile.hideOnline, text: text("hideOnline"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideTyping, value: profile.hideTyping, text: text("hideTyping"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalGhost, settingName: .additionalHideUpload, value: profile.hideUpload, text: text("hideUpload"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalGhost, link: .additionalExceptions, text: text("Exceptions")))
++    entries.append(.header(id: id.count, section: .additionalHistory, text: text("History"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDeleted, value: profile.saveDeleted, text: text("saveDeleted"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveDisappearing, value: profile.saveDisappearing, text: text("saveDisappearing"), enabled: profile.saveDeleted))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalDimDeleted, value: profile.dimDeleted, text: text("dimDeleted"), enabled: true))
++    entries.append(.toggle(id: id.count, section: .additionalHistory, settingName: .additionalSaveEditHistory, value: profile.saveEditHistory, text: text("saveEditHistory"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalHistory, link: .additionalClear, text: text("ArchiveClearAll")))
++    entries.append(.notice(id: id.count, section: .additionalHistory, text: text("HistoryNotice")))
++    entries.append(.header(id: id.count, section: .additionalFilters, text: text("Filters"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalFilters, settingName: .additionalFiltersEnabled, value: profile.filtersEnabled, text: text("filtersEnabled"), enabled: true))
++    entries.append(.disclosure(id: id.count, section: .additionalFilters, link: .additionalFilters, text: text("EditFilters")))
++    entries.append(.header(id: id.count, section: .additionalAds, text: text("Ads"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalAds, settingName: .additionalBlockAds, value: profile.blockAds, text: text("blockAds"), enabled: true))
++    entries.append(.notice(id: id.count, section: .additionalAds, text: text("AdsNotice")))
++    entries.append(.header(id: id.count, section: .additionalPremium, text: text("Premium"), badge: nil))
++    entries.append(.toggle(id: id.count, section: .additionalPremium, settingName: .additionalLocalPremium, value: profile.localPremium, text: text("localPremium"), enabled: true))
++    entries.append(.notice(id: id.count, section: .additionalPremium, text: text("PremiumNotice")))
++    entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalPlugins, text: text("Plugins")))
++    entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalDiagnostics, text: text("Diagnostics")))
++
+     if SGSimpleSettings.shared.canUseNY {
+         entries.append(.header(id: id.count, section: .trending, text: i18n("Settings.NY.Header", lang), badge: newStr))
+         entries.append(.toggle(id: id.count, section: .trending, settingName: .nyStyleSnow, value: SGSimpleSettings.shared.nyStyle == SGSimpleSettings.NYStyle.snow.rawValue, text: i18n("Settings.NY.Style.snow", lang), enabled: true))
+@@ -370,7 +422,16 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+               return updatedState
+           }
+         },*/ setBoolValue: { setting, value in
++        if let keyPath = setting.additionalKeyPath {
++            var profile = AddonSettings.shared.profile(stateValue.with { $0.additionalAccount })
++            profile[keyPath: keyPath] = value
++            do { try AddonSettings.shared.save(profile, account: stateValue.with { $0.additionalAccount }) }
++            catch { presentControllerImpl?(additionalError(context: context, error: error), nil) }
++            simplePromise.set(true)
++            return
++        }
+         switch setting {
++        case .additionalSaveDisappearing, .additionalGhostEnabled, .additionalHideRead, .additionalHideStories, .additionalHideOnline, .additionalHideTyping, .additionalHideUpload, .additionalSaveDeleted, .additionalDimDeleted, .additionalSaveEditHistory, .additionalFiltersEnabled, .additionalBlockAds, .additionalLocalPremium: break
+         case .hidePhoneInSettings:
+             SGSimpleSettings.shared.hidePhoneInSettings = value
+             askForRestart?()
+@@ -686,11 +747,49 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+         guard let context else {
+             return
+         }
++        let account = stateValue.with { $0.additionalAccount }
++        let data = context.sharedContext.currentPresentationData.with { $0 }
++        let lang = data.strings.baseLanguageCode
+         switch (link) {
++        case .additionalAccount:
++            let _ = (context.sharedContext.activeAccountsWithInfo |> take(1) |> deliverOnMainQueue).start(next: { info in
++                let sheet = ActionSheetController(presentationData: data)
++                var choices: [(String?, String)] = [(nil, i18n("Additional.Default", lang))]
++                choices += info.accounts.map { (additionalAccountKey($0.account.peerId), $0.peer.debugDisplayTitle) }
++                sheet.setItemGroups([ActionSheetItemGroup(items: choices.map { key, title in
++                    ActionSheetButtonItem(title: title, color: .accent, action: { [weak sheet] in
++                        sheet?.dismissAnimated()
++                        updateState { state in
++                            var state = state; state.additionalAccount = key; state.additionalAccountName = title; return state
++                        }
++                    })
++                }), ActionSheetItemGroup(items: [ActionSheetButtonItem(title: data.strings.Common_Cancel, color: .accent, action: { [weak sheet] in sheet?.dismissAnimated() })])])
++                presentControllerImpl?(sheet, nil)
++            })
++        case .additionalExceptions:
++            additionalEditingContext(context: context, account: account) { editingContext in
++            pushControllerImpl?(additionalPeersController(context: editingContext, title: i18n("Additional.Exceptions", lang), values: AddonSettings.shared.profile(account).ghostExceptions, changed: { values in
++                var profile = AddonSettings.shared.profile(account); profile.ghostExceptions = values
++                do { try AddonSettings.shared.save(profile, account: account) }
++                catch { presentControllerImpl?(additionalError(context: context, error: error), nil) }
++            }))
++            }
++        case .additionalFilters:
++            additionalEditingContext(context: context, account: account) { editingContext in
++                pushControllerImpl?(additionalFiltersController(context: editingContext, account: account))
++            }
++        case .additionalClear:
++            additionalClearArchivesConfirmation(context: context, account: account) {
++                presentControllerImpl?($0, nil)
++            }
++        case .additionalPlugins:
++            pushControllerImpl?(additionalPluginsController(context: context, account: account))
++        case .additionalDiagnostics:
++            pushControllerImpl?(additionalDiagnosticsController(context: context))
              case .languageSettings:
                  pushControllerImpl?(context.sharedContext.makeLocalizationListController(context: context))
              case .contentSettings:
@@ -275,3 +236,168 @@ index 3111030f..de8be2be 100644
                      guard let strongContext = context else {
                          return
                      }
+@@ -713,7 +812,7 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+     contentSettingsConfiguration.set(.single(nil)
+     |> then(updatedContentSettingsConfiguration))
+     
+-    let signal = combineLatest(simplePromise.get(), /*sliderPromise.get(),*/ statePromise.get(), context.sharedContext.presentationData, sharedData, preferences, contentSettingsConfiguration.get(),
++    let signal = combineLatest(combineLatest(simplePromise.get(), additionalSettingsChanges()) |> map { _, _ in true }, /*sliderPromise.get(),*/ statePromise.get(), context.sharedContext.presentationData, sharedData, preferences, contentSettingsConfiguration.get(),
+         context.engine.accountData.observeAvailableColorOptions(scope: .replies),
+         context.engine.accountData.observeAvailableColorOptions(scope: .profile)
+     )
+@@ -784,3 +883,24 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+     return controller
+ 
+ }
++
++private extension SGBoolSetting {
++    var additionalKeyPath: WritableKeyPath<AddonProfile, Bool>? {
++        switch self {
++        case .additionalGhostEnabled: return \AddonProfile.ghostEnabled
++        case .additionalHideRead: return \AddonProfile.hideRead
++        case .additionalHideStories: return \AddonProfile.hideStories
++        case .additionalHideOnline: return \AddonProfile.hideOnline
++        case .additionalHideTyping: return \AddonProfile.hideTyping
++        case .additionalHideUpload: return \AddonProfile.hideUpload
++        case .additionalSaveDisappearing: return \AddonProfile.saveDisappearing
++        case .additionalSaveDeleted: return \AddonProfile.saveDeleted
++        case .additionalDimDeleted: return \AddonProfile.dimDeleted
++        case .additionalSaveEditHistory: return \AddonProfile.saveEditHistory
++        case .additionalFiltersEnabled: return \AddonProfile.filtersEnabled
++        case .additionalBlockAds: return \AddonProfile.blockAds
++        case .additionalLocalPremium: return \AddonProfile.localPremium
++        default: return nil
++        }
++    }
++}
+diff --git a/submodules/TelegramCore/Sources/State/Sync/StateReplay+Messages.swift b/submodules/TelegramCore/Sources/State/Sync/StateReplay+Messages.swift
+index cf1ab15d..5387d455 100644
+--- a/submodules/TelegramCore/Sources/State/Sync/StateReplay+Messages.swift
++++ b/submodules/TelegramCore/Sources/State/Sync/StateReplay+Messages.swift
+@@ -273,7 +273,11 @@ extension ReplayContext {
+         deleteEphemeralMessages(transaction: transaction, peerId: peerId, ids: ids)
+     }
+     
+-    func applyDeleteMessagesWithGlobalIds(_ ids: [Int32]) {
++    func applyDeleteMessagesWithGlobalIds(_ originalIds: [Int32]) {
++        let retained = Set(transaction.messageIdsForGlobalIds(originalIds).filter {
++            additionalRetainDeleted(account: accountPeerId, id: $0, transaction: transaction)
++        }.map { $0.id })
++        let ids = originalIds.filter { !retained.contains($0) }
+         var resourceIds: [MediaResourceId] = []
+         transaction.deleteMessagesWithGlobalIds(ids, forEachMedia: { media in
+             addMessageMediaResourceIdsToRemove(media: media, resourceIds: &resourceIds)
+@@ -284,7 +288,8 @@ extension ReplayContext {
+         deletedMessageIds.append(contentsOf: ids.map { .global($0) })
+     }
+     
+-    func applyDeleteMessages(_ ids: [MessageId]) {
++    func applyDeleteMessages(_ originalIds: [MessageId]) {
++        let ids = originalIds.filter { !additionalRetainDeleted(account: accountPeerId, id: $0, transaction: transaction) }
+         _internal_deleteMessages(transaction: transaction, mediaBox: mediaBox, ids: ids, manualAddMessageThreadStatsDifference: { id, add, remove in
+             self.addMessageThreadStatsDifference(threadKey: id, remove: remove, addedMessagePeer: nil, addedMessageId: nil, isOutgoing: false)
+         })
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
+index e2abc9be..f6f6e01d 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalLocalPremium.swift
+@@ -2,7 +2,7 @@ import Foundation
+ import Postbox
+ import SGAdditionalCore
+ import SwiftSignalKit
+-import TelegramApi
++internal import TelegramApi
+ 
+ func additionalPresentationChanges() -> Signal<Void, NoError> {
+     Signal { subscriber in
+diff --git a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+index a7f6e4f5..bb90609a 100644
+--- a/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
++++ b/submodules/TelegramUI/Sources/AdditionalHistoryController.swift
+@@ -7,3 +7,2 @@ import Display
+ import Foundation
+-import Postbox
+ import SGAdditionalCore
+@@ -20,3 +19,3 @@ final class AdditionalHistoryController: ViewController {
+     private let context: AccountContext
+-    private let original: Message
++    private let original: EngineRawMessage
+     private let key: MessageKey
+@@ -24,3 +23,3 @@ final class AdditionalHistoryController: ViewController {
+     private var presentationData: PresentationData
+-    private let messages = Promise<([Message], Int32, Bool)>()
++    private let messages = Promise<([EngineRawMessage], Int32, Bool)>()
+     private var history: ChatHistoryListNodeImpl?
+@@ -32,3 +31,3 @@ final class AdditionalHistoryController: ViewController {
+     init(
+-        context: AccountContext, message: Message, key: MessageKey,
++        context: AccountContext, message: EngineRawMessage, key: MessageKey,
+         updatedPresentationData: (initial: PresentationData, signal: Signal<PresentationData, NoError>)
+@@ -41,3 +40,3 @@ final class AdditionalHistoryController: ViewController {
+         let data = updatedPresentationData.initial
+-        super.init(navigationBarPresentationData: NavigationBarPresentationData(presentationData: data, style: .glass))
++        super.init(navigationBarPresentationData: NavigationBarPresentationData(presentationData: data))
+         self.title = i18n("Additional.History", data.strings.baseLanguageCode)
+@@ -106,7 +105,7 @@ final class AdditionalHistoryController: ViewController {
+             self.latestVersion = revisions.last?.version
+-            let result: [Message] = revisions.enumerated().map { index, revision in
+-                let id = MessageId(
++            let result: [EngineRawMessage] = revisions.enumerated().map { index, revision in
++                let id = EngineMessage.Id(
+                     peerId: self.original.id.peerId, namespace: Namespaces.Message.Local, id: Int32(clamping: index + 1)
+                 )
+-                return Message(
++                return EngineRawMessage(
+                     stableId: UInt32(index + 1), stableVersion: 0, id: id, globallyUniqueId: nil, groupingKey: nil,
+@@ -119,3 +118,3 @@ final class AdditionalHistoryController: ViewController {
+                     peers: self.original.peers,
+-                    associatedMessages: SimpleDictionary(), associatedMessageIds: [], associatedMedia: [:],
++                    associatedMessages: EngineSimpleDictionary(), associatedMessageIds: [], associatedMedia: [:],
+                     associatedThreadInfo: nil, associatedStories: [:])
+@@ -148,3 +147,3 @@ final class AdditionalHistoryController: ViewController {
+         self.navigationBar?.updatePresentationData(
+-            NavigationBarPresentationData(presentationData: data, style: .glass), transition: .immediate)
++            NavigationBarPresentationData(presentationData: data), transition: .immediate)
+         self.statusBar.statusBarStyle = data.theme.rootController.statusBarStyle.style
+@@ -176,3 +175,3 @@ final class AdditionalHistoryController: ViewController {
+ private func historyInteraction(
+-    context: AccountContext, backgroundNode: WallpaperBackgroundNode, copy: @escaping (Message) -> Void
++    context: AccountContext, backgroundNode: WallpaperBackgroundNode, copy: @escaping (EngineRawMessage) -> Void
+ ) -> ChatControllerInteraction {
+diff --git a/submodules/TelegramCore/Tests/StateSync/StateSyncFixture.swift b/submodules/TelegramCore/Tests/StateSync/StateSyncFixture.swift
+index 6448062f97a7ce7aeb9dd562b43e6cf012879070..1c7af3dd47678b932bc45eab4493225659b4ec0e 100644
+--- a/submodules/TelegramCore/Tests/StateSync/StateSyncFixture.swift
++++ b/submodules/TelegramCore/Tests/StateSync/StateSyncFixture.swift
+@@ -496,6 +496,9 @@ final class StateSyncFixture {
+         Postbox.sharedQueue.sync {
+         }
+
++        // AccountManager opens and writes its initial state on a separate queue.
++        // Finish that work even when the test never used the manager.
++        _ = self.accountManager?._internalAccountRecordsSync()
+         self.accountManager = nil
+         let _ = try? FileManager.default.removeItem(atPath: self.basePath)
+         return released
+diff --git a/submodules/TelegramCore/Tests/StateSync/StateSyncFixtureTests.swift b/submodules/TelegramCore/Tests/StateSync/StateSyncFixtureTests.swift
+index df58e7f18cc0b0baa30886408ed2e0716c6aed59..44ed755e2ee9380ac518f2fe3bd419ca83126d31 100644
+--- a/submodules/TelegramCore/Tests/StateSync/StateSyncFixtureTests.swift
++++ b/submodules/TelegramCore/Tests/StateSync/StateSyncFixtureTests.swift
+@@ -1,3 +1,4 @@
++import Foundation
+ import XCTest
+ import Postbox
+ @testable import TelegramCore
+@@ -20,6 +21,13 @@ final class StateSyncFixtureTests: XCTestCase {
+         super.tearDown()
+     }
+
++    func testCloseRemovesDirectoryWithoutUsingAccountManager() {
++        let path = self.fixture.basePath
++        XCTAssertTrue(self.fixture.close())
++        self.fixture = nil
++        XCTAssertFalse(FileManager.default.fileExists(atPath: path))
++    }
++
+     func testSeededAccountAndChannelReadBack() {
+         let channelId = StateSyncFixture.channelPeerId(500)
+         let state = AuthorizedAccountState.State(pts: 100, qts: 5, date: 1_700_000_000, seq: 3)

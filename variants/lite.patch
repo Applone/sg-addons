@@ -1,0 +1,1141 @@
+diff --git a/MODULE.bazel b/MODULE.bazel
+index 6f48e887..705ee62c 100644
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -285,6 +285,3 @@ local_path_override(
+     module_name = "build_configuration",
+     path = "./build-input/configuration-repository",
+ )
+-
+-python_ios_repository = use_repo_rule("//Swiftgram/SGPython:python_repository.bzl", "python_ios_repository")
+-python_ios_repository(name = "swiftgram_python")
+diff --git a/Swiftgram/SGAdditionalCore/BUILD b/Swiftgram/SGAdditionalCore/BUILD
+index 7531d1f0..fda4d464 100644
+--- a/Swiftgram/SGAdditionalCore/BUILD
++++ b/Swiftgram/SGAdditionalCore/BUILD
+@@ -3,8 +3,7 @@ load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
+ swift_library(
+     name = "SGAdditionalCore",
+     module_name = "SGAdditionalCore",
+-    srcs = glob(["Sources/**/*.swift"]),
++    srcs = glob(["Sources/**/*.swift"], exclude = ["Sources/*Plugin*.swift"]),
+     linkopts = ["-lsqlite3"],
+-    deps = ["//Swiftgram/SGPython:SGPythonBridge"],
+     visibility = ["//visibility:public"],
+ )
+diff --git a/Swiftgram/SGSettingsUI/BUILD b/Swiftgram/SGSettingsUI/BUILD
+index 19a53e9f..c4850e76 100644
+--- a/Swiftgram/SGSettingsUI/BUILD
++++ b/Swiftgram/SGSettingsUI/BUILD
+@@ -13,7 +13,7 @@ swift_library(
+     module_name = "SGSettingsUI",
+     srcs = glob([
+ 		"Sources/**/*.swift",
+-    ]),
++    ], exclude = ["Sources/AdditionalPlugins.swift"]),
+     copts = [
+         "-warnings-as-errors",
+     ],
+@@ -52,6 +52,7 @@ swift_library(
+     srcs = glob(["Tests/**/*.swift"]),
+     deps = [
+         ":SGSettingsUI",
++        "//submodules/TelegramCore",
+         "//Swiftgram/SGAdditionalCore:SGAdditionalCore",
+         "//submodules/TextFormat:TextFormat",
+     ],
+diff --git a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+index 617a9e78..836ca5e0 100644
+--- a/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
++++ b/Swiftgram/SGSettingsUI/Sources/AdditionalForms.swift
+@@ -15,9 +15,6 @@ import UniformTypeIdentifiers
+ func additionalSettingsChanges() -> Signal<Int, NoError> {
+     Signal { subscriber in
+         subscriber.putNext(AddonSettings.shared.version())
+-        let plugins = NotificationCenter.default.addObserver(forName: .pluginsChanged, object: nil, queue: .main) { _ in
+-            subscriber.putNext(AddonSettings.shared.version())
+-        }
+         let token = NotificationCenter.default.addObserver(
+             forName: Notification.Name("SGASettingsDidChange"), object: nil, queue: .main
+         ) { _ in
+@@ -25,7 +22,6 @@ func additionalSettingsChanges() -> Signal<Int, NoError> {
+         }
+         return ActionDisposable {
+             NotificationCenter.default.removeObserver(token)
+-            NotificationCenter.default.removeObserver(plugins)
+         }
+     }
+ }
+diff --git a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+index 66ec13e2..e3797ada 100644
+--- a/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
++++ b/Swiftgram/SGSettingsUI/Sources/SGSettingsController.swift
+@@ -143,7 +143,7 @@ private enum SGSliderSetting: String {
+ }
+ 
+ private enum SGDisclosureLink: String {
+-    case additionalAccount, additionalExceptions, additionalClear, additionalFilters, additionalDiagnostics, additionalPlugins
++    case additionalAccount, additionalExceptions, additionalClear, additionalFilters, additionalDiagnostics
+ 
+     case contentSettings
+     case languageSettings
+@@ -203,7 +203,6 @@ private func SGControllerEntries(presentationData: PresentationData, callListSet
+     entries.append(.header(id: id.count, section: .additionalPremium, text: text("Premium"), badge: nil))
+     entries.append(.toggle(id: id.count, section: .additionalPremium, settingName: .additionalLocalPremium, value: profile.localPremium, text: text("localPremium"), enabled: true))
+     entries.append(.notice(id: id.count, section: .additionalPremium, text: text("PremiumNotice")))
+-    entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalPlugins, text: text("Plugins")))
+     entries.append(.disclosure(id: id.count, section: .additionalAbout, link: .additionalDiagnostics, text: text("Diagnostics")))
+ 
+     if SGSimpleSettings.shared.canUseNY {
+@@ -782,8 +781,6 @@ public func sgSettingsController(context: AccountContext/*, focusOnItemTag: Int?
+             additionalClearArchivesConfirmation(context: context, account: account) {
+                 presentControllerImpl?($0, nil)
+             }
+-        case .additionalPlugins:
+-            pushControllerImpl?(additionalPluginsController(context: context, account: account))
+         case .additionalDiagnostics:
+             pushControllerImpl?(additionalDiagnosticsController(context: context))
+             case .languageSettings:
+diff --git a/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift b/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift
+index 7d704bba..795d6893 100644
+--- a/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift
++++ b/Swiftgram/SGSettingsUI/Tests/AdditionalArchivePresentationTests.swift
+@@ -1,4 +1,5 @@
+ import SGAdditionalCore
++import TelegramCore
+ import TextFormat
+ import UIKit
+ import XCTest
+@@ -66,3 +67,13 @@ final class AdditionalArchivePresentationTests: XCTestCase {
+         XCTAssertFalse(font?.fontDescriptor.symbolicTraits.contains(.traitBold) == true)
+     }
+ }
++
++final class LiteWidgetTests: XCTestCase {
++    func testStoredWidgetDecodesAsUnsupportedMedia() {
++        initializeAccountManagement()
++        let encoder = EnginePostboxEncoder()
++        encoder.encodeRootObject(TelegramMediaWidget(width: 100, height: 50, payload: Data()))
++        let decoder = EnginePostboxDecoder(buffer: EngineMemoryBuffer(data: encoder.makeData()))
++        XCTAssertTrue(decoder.decodeRootObject() is TelegramMediaUnsupported)
++    }
++}
+diff --git a/Telegram/BUILD b/Telegram/BUILD
+index 06a0942b..65b365ba 100644
+--- a/Telegram/BUILD
++++ b/Telegram/BUILD
+@@ -2114,8 +2114,6 @@ ios_application(
+     ],
+     resources = [
+         ":LaunchScreen",
+-        "//Swiftgram/SGPython:SDK",
+-        "@swiftgram_python//:stdlib",
+         #":DefaultAppIcon",
+     ],
+     frameworks = [
+diff --git a/submodules/DebugSettingsUI/BUILD b/submodules/DebugSettingsUI/BUILD
+index 64d66a21..333cc756 100644
+--- a/submodules/DebugSettingsUI/BUILD
++++ b/submodules/DebugSettingsUI/BUILD
+@@ -15,7 +15,7 @@ swift_library(
+     module_name = "DebugSettingsUI",
+     srcs = glob([
+ 		"Sources/**/*.swift",
+-    ]),
++    ], exclude = ["Sources/WidgetDebugPosts.swift"]),
+     copts = [
+         "-warnings-as-errors",
+     ],
+@@ -35,8 +35,6 @@ swift_library(
+         "//submodules/UndoUI:UndoUI",
+         "//submodules/ContextUI:ContextUI",
+         "//submodules/AccountContext:AccountContext",
+-        "//submodules/TelegramUI/Components/MessageWidget/MessageWidget",
+-        "//submodules/TelegramUI/Components/MessageWidget/MessageWidgetStress",
+         "//submodules/AppBundle:AppBundle",
+         "//submodules/GZip:GZip",
+         "//third-party/ZipArchive:ZipArchive",
+diff --git a/submodules/DebugSettingsUI/Sources/DebugController.swift b/submodules/DebugSettingsUI/Sources/DebugController.swift
+index a7cae9d1..71e9173a 100644
+--- a/submodules/DebugSettingsUI/Sources/DebugController.swift
++++ b/submodules/DebugSettingsUI/Sources/DebugController.swift
+@@ -8,7 +8,6 @@ import SGDebugUI
+ 
+ import Foundation
+ import UIKit
+-import MessageWidgetStress
+ import Display
+ import SwiftSignalKit
+ import TelegramCore
+@@ -759,12 +758,8 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+     case springSendAnimation(Bool)
+     case fakeWalletTransfers(Bool)
+     case chatMediaEditorLegacy(Bool)
+-    case insertWidgetConformanceSet
+-    case insertWidgetGames
+     case mediaGridLegacy(Bool)
+     case sharedMediaGridLegacy(Bool)
+-    case runWidgetStressKit(production: Bool)
+-    case showWidgetWalletWindow
+     case storyLegacyVideoWriter(Bool)
+     case chatLegacyVideoWriter(Bool)
+     case chatSideListLegacy(Bool)
+@@ -824,7 +819,7 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+             return DebugControllerSection.experiments.rawValue
+         case .crash, .resetBiometricsData, .photoPreview, .knockoutWallpaper, .compressedEmojiCache, .storiesJpegExperiment, .checkSerializedData, .enableQuickReactionSwitch, .experimentalCompatibility, .enableDebugDataDisplay, .fakeGlass, .forceClearGlass, .debugRipple, .inputDecEngineEditor, .coreListChatBackend, .coreListScrollTrace, .respectSystemMicrophone, .useModernVideoMessagePipeline, .videoMessageCameraMode, .browserExperiment, .allForumsHaveTabs, .enableReactionOverrides, .disableReloginTokens, .liveStreamV2, .experimentalCallMute, .groupCallReferenceEngine, .playerV2, .devRequests, .enableUpdates, .pwa, .enableLocalTranslation, .testPasscodeMigration:
+             return DebugControllerSection.experiments.rawValue
+-        case .inputDecTextBackend, .springSendAnimation, .fakeWalletTransfers, .chatMediaEditorLegacy, .insertWidgetConformanceSet, .insertWidgetGames, .mediaGridLegacy, .sharedMediaGridLegacy, .storyLegacyVideoWriter, .chatLegacyVideoWriter, .chatSideListLegacy, .runWidgetStressKit, .showWidgetWalletWindow:
++        case .inputDecTextBackend, .springSendAnimation, .fakeWalletTransfers, .chatMediaEditorLegacy, .mediaGridLegacy, .sharedMediaGridLegacy, .storyLegacyVideoWriter, .chatLegacyVideoWriter, .chatSideListLegacy:
+             return DebugControllerSection.experiments.rawValue
+         case .logTranslationRecognition, .resetTranslationStates:
+             return DebugControllerSection.translation.rawValue
+@@ -993,10 +988,6 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+             return 74
+         case .chatMediaEditorLegacy:
+             return 75
+-        case .insertWidgetConformanceSet:
+-            return 76
+-        case .insertWidgetGames:
+-            return 78
+         case .mediaGridLegacy:
+             return 79
+         case .sharedMediaGridLegacy:
+@@ -1007,10 +998,6 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+             return 82
+         case .chatSideListLegacy:
+             return 83
+-        case let .runWidgetStressKit(production):
+-            return production ? 85 : 84
+-        case .showWidgetWalletWindow:
+-            return 86
+         case .disableVideoAspectScaling:
+             return 104
+         case .enableNetworkFramework:
+@@ -1626,96 +1613,6 @@ private enum DebugControllerEntry: ItemListNodeEntry {
+                     })
+                 }).start()
+             })
+-        case .insertWidgetConformanceSet, .insertWidgetGames:
+-            let title: String
+-            let posts: () -> [EngineLocalWidgetPost]
+-            switch self {
+-            case .insertWidgetConformanceSet:
+-                title = "Insert widget conformance set"
+-                posts = widgetConformanceDebugPosts
+-            default:
+-                title = "Insert widget games"
+-                posts = widgetGamesDebugPosts
+-            }
+-            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: title, kind: .generic, alignment: .natural, sectionId: self.section, style: .blocks, action: {
+-                guard let context = arguments.context else {
+-                    return
+-                }
+-                // Local messages in Saved Messages (My Notes), in the order the test channel posts them; nothing is sent.
+-                let posts = posts()
+-                if posts.isEmpty {
+-                    return
+-                }
+-                let presentationData = arguments.sharedContext.currentPresentationData.with { $0 }
+-                let controller = OverlayStatusController(theme: presentationData.theme, type: .loading(cancelled: nil))
+-                arguments.presentController(controller, nil)
+-                let _ = (context.engine.messages.debugInsertLocalWidgetMessages(peerId: context.account.peerId, posts: posts)
+-                |> deliverOnMainQueue).start(completed: {
+-                    controller.dismiss()
+-                })
+-            })
+-        case let .runWidgetStressKit(production):
+-            // widget-sandbox v0.3.0's renderer stress kit (packages/stress CLIENTS.md): run on a device, with no debugger
+-            // attached, low power mode off and the device cool; the run file is offered to share at the end. DEBUG builds
+-            // carry the kit; elsewhere the item does nothing.
+-            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: production ? "Run widget stress kit (production)" : "Run widget stress kit (measure)", kind: .generic, alignment: .natural, sectionId: self.section, style: .blocks, action: {
+-                guard let root = widgetStressDebugKitRoot(), let kit = try? MessageWidgetStressKit(root: root), let presenter = arguments.getRootController() else {
+-                    return
+-                }
+-                let controller = MessageWidgetStressViewController(kit: kit, options: MessageWidgetStressRunner.Options(pass: production ? .production : .measure))
+-                controller.modalPresentationStyle = .fullScreen
+-                controller.onFinish = { [weak controller] url in
+-                    let share = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+-                    share.completionWithItemsHandler = { [weak controller] _, _, _, _ in
+-                        controller?.dismiss(animated: true)
+-                    }
+-                    controller?.present(share, animated: true)
+-                }
+-                presenter.present(controller, animated: true)
+-            })
+-        case .showWidgetWalletWindow:
+-            // widget-sandbox v0.5.0: the wallet window a message widget opens, with a bot of the account's in its header
+-            // and its touch shield (0.8 s, as MessageWidgetWalletWindow's), to look at on a device or the simulator.
+-            // Confirm only closes it: nothing is sent.
+-            return ItemListActionItem(presentationData: presentationData, systemStyle: .glass, title: "Show widget wallet window (nothing is sent)", kind: .generic, alignment: .natural, sectionId: self.section, style: .blocks, action: {
+-                guard let context = arguments.context, let walletContext = context.walletContext else {
+-                    return
+-                }
+-                let _ = (context.engine.contacts.searchLocalPeers(query: "bot")
+-                |> take(1)
+-                |> deliverOnMainQueue).start(next: { peers in
+-                    let bot = peers.compactMap { $0.peer }.first(where: { peer in
+-                        if case let .user(user) = peer {
+-                            return user.botInfo != nil
+-                        }
+-                        return false
+-                    })
+-                    guard let bot else {
+-                        return
+-                    }
+-                    guard case let .user(user) = bot else {
+-                        return
+-                    }
+-                    let requester = WalletContext.WidgetWalletRequester(botId: user.id.id._internalGetInt64Value(), name: bot.compactDisplayTitle, username: user.addressName)
+-                    let request = WalletContext.TonConnectOperationRequest(
+-                        id: "debug-widget-wallet",
+-                        applicationName: requester.name,
+-                        domain: requester.displayDomain,
+-                        icon: nil,
+-                        method: .sendTransaction,
+-                        messages: [WalletContext.TonConnectOperationRequest.Message(id: "debug-widget-wallet:0", destination: "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N", amountNanograms: "1500000000", payload: .empty, stateInit: nil)],
+-                        feeNanograms: "3000000",
+-                        validUntil: UInt64(Date().timeIntervalSince1970) + 3600,
+-                        relayerWillSubmit: false,
+-                        needsWalletStateInit: false,
+-                        warnings: [],
+-                        actions: []
+-                    )
+-                    arguments.pushController(context.sharedContext.makeWalletTransferScreen(context: context, walletContext: walletContext, request: request, requester: bot, ignoresTouchesFor: 0.8, cancelled: {}, confirm: { completion in
+-                        completion(.success(()))
+-                    }))
+-                })
+-            })
+         case let .respectSystemMicrophone(value):
+             return ItemListSwitchItem(presentationData: presentationData, systemStyle: .glass, title: "Recording: respect system microphone", value: value, sectionId: self.section, style: .blocks, updated: { value in
+                 let _ = arguments.sharedContext.accountManager.transaction ({ transaction in
+@@ -2275,17 +2172,12 @@ private func debugControllerEntries(context: AccountContext?, sharedContext: Sha
+             entries.append(.fakeWalletTransfers(experimentalSettings.fakeWalletTransfers))
+         }
+         entries.append(.chatMediaEditorLegacy(experimentalSettings.chatMediaEditorLegacy))
+-        entries.append(.insertWidgetConformanceSet)
+-        entries.append(.insertWidgetGames)
+         entries.append(.mediaGridLegacy(experimentalSettings.mediaGridLegacy))
+         entries.append(.sharedMediaGridLegacy(experimentalSettings.sharedMediaGridLegacy))
+         entries.append(.storyLegacyVideoWriter(experimentalSettings.storyLegacyVideoWriter))
+         entries.append(.chatLegacyVideoWriter(experimentalSettings.chatLegacyVideoWriter))
+         entries.append(.chatSideListLegacy(experimentalSettings.chatSideListLegacy))
+-        entries.append(.runWidgetStressKit(production: false))
+-        entries.append(.runWidgetStressKit(production: true))
+         #if DEBUG
+-        entries.append(.showWidgetWalletWindow)
+         #endif
+         
+         entries.append(.logTranslationRecognition(experimentalSettings.logLanguageRecognition))
+diff --git a/submodules/TelegramCore/BUILD b/submodules/TelegramCore/BUILD
+index d5b2a2e9..6ed04693 100644
+--- a/submodules/TelegramCore/BUILD
++++ b/submodules/TelegramCore/BUILD
+@@ -26,7 +26,7 @@ swift_library(
+     module_name = "TelegramCore",
+     srcs = sgsrc + glob([
+         "Sources/**/*.swift",
+-    ]),
++    ], exclude = ["Sources/AdditionalFunctions/AdditionalPlugin*.swift"]),
+     copts = [
+         "-warnings-as-errors",
+     ],
+diff --git a/submodules/TelegramCore/Sources/Account/Account.swift b/submodules/TelegramCore/Sources/Account/Account.swift
+index d8bd24e4..0d30f4c3 100644
+--- a/submodules/TelegramCore/Sources/Account/Account.swift
++++ b/submodules/TelegramCore/Sources/Account/Account.swift
+@@ -1337,9 +1337,9 @@ public class Account {
+         if !supplementary {
+             let session = ArchiveSessions.shared.begin(account: additionalAccountKey(peerId), owner: String(id.rawValue))
+             self.additionalArchiveSession = session
++            network.additionalAccountId = additionalAccountKey(peerId)
+             do { try DeletedMessageArchive.shared.authorizeAccount(additionalAccountKey(peerId)) }
+             catch { DeletedMessageArchive.shared.reportFailure(error) }
+-            network.additionalAccountId = additionalAccountKey(peerId)
+             let processor = AdditionalMessageProcessor(account: peerId, session: session)
+             let _ = postbox.transaction { transaction -> Bool in
+                 transaction.setMessageProcessingSessionValidator { ArchiveSessions.shared.perform(session, { true }) == true }
+@@ -1659,10 +1659,8 @@ public class Account {
+         self.automaticCacheEvictionContext = AutomaticCacheEvictionContext(postbox: postbox, accountManager: accountManager)
+         if !supplementary {
+             self.managedOperationsDisposable.add(AdditionalArchiveMaintenance(account: self))
+-            PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: AdditionalPluginActionAdapter(account: self))
+             self.managedOperationsDisposable.add((self.loggedOut |> filter { $0 } |> take(1)).start(next: { _ in
+                 additionalRemoveArchiveAccount(peerId, record: id)
+-                PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(peerId), adapter: nil)
+             }))
+         }
+         
+@@ -1674,10 +1672,6 @@ public class Account {
+     }
+     
+     deinit {
+-        if !self.supplementary {
+-            additionalPluginForgetOrigins(account: self.peerId)
+-            PluginRegistry.shared.registerActionAdapter(account: additionalAccountKey(self.peerId), adapter: nil)
+-        }
+         self.managedContactsDisposable.dispose()
+         self.managedStickerPacksDisposable.dispose()
+         self.managedServiceViewsDisposable.dispose()
+diff --git a/submodules/TelegramCore/Sources/Account/AccountManager.swift b/submodules/TelegramCore/Sources/Account/AccountManager.swift
+index 49882237..41d90d81 100644
+--- a/submodules/TelegramCore/Sources/Account/AccountManager.swift
++++ b/submodules/TelegramCore/Sources/Account/AccountManager.swift
+@@ -186,7 +186,7 @@ private var declaredEncodables: Void = {
+     declareEncodable(SynchronizeAppLogEventsOperation.self, f: { SynchronizeAppLogEventsOperation(decoder: $0) })
+     declareEncodable(TelegramMediaPoll.self, f: { TelegramMediaPoll(decoder: $0) })
+     declareEncodable(TelegramMediaUnsupported.self, f: { TelegramMediaUnsupported(decoder: $0) })
+-    declareEncodable(TelegramMediaWidget.self, f: { TelegramMediaWidget(decoder: $0) })
++    declareEncodable(TelegramMediaWidget.self, f: { _ in TelegramMediaUnsupported() })
+     declareEncodable(EmojiKeywordCollectionInfo.self, f: { EmojiKeywordCollectionInfo(decoder: $0) })
+     declareEncodable(EmojiKeywordItem.self, f: { EmojiKeywordItem(decoder: $0) })
+     declareEncodable(SynchronizeEmojiKeywordsOperation.self, f: { SynchronizeEmojiKeywordsOperation(decoder: $0) })
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift
+index a6695da4..5f24b360 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessageArchive.swift
+@@ -148,7 +148,6 @@ func additionalRemoveArchiveAccount(_ account: PeerId, record: AccountRecordId)
+         try ArchiveSessions.shared.end(account: key, owner: String(record.rawValue)) {
+             try DeletedMessageArchive.shared.removeAccount(key)
+             try MessageArchive.shared.purgeMetadata(account: key)
+-            additionalPluginForgetOrigins(account: account)
+         }
+     } catch { DeletedMessageArchive.shared.reportFailure(error) }
+ }
+diff --git a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+index df1ff089..71d73d7c 100644
+--- a/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
++++ b/submodules/TelegramCore/Sources/AdditionalFunctions/AdditionalMessages.swift
+@@ -121,7 +121,6 @@ final class AdditionalMessageProcessor {
+     }
+     func deleted(_ ids: [MessageId]) {
+         ArchiveSessions.shared.perform(session) {
+-            additionalPluginForgetOrigins(account: account, messages: ids)
+             MessageArchive.shared.forgetDisappearing(ids.compactMap { additionalMessageKey(account: account, id: $0) })
+         }
+     }
+@@ -200,9 +199,7 @@ final class AdditionalMessageProcessor {
+                 return nil
+             }
+         }
+-        let processed = additionalPluginStoreMessage(message, previous: previous, account: account)
+-        if processed == nil { MessageArchive.shared.forgetDisappearing([key]) }
+-        return processed
++        return message
+     }
+ }
+ 
+diff --git a/submodules/TelegramCore/Sources/ApiUtils/ChatContextResult.swift b/submodules/TelegramCore/Sources/ApiUtils/ChatContextResult.swift
+index 051eeb9a..465a5d26 100644
+--- a/submodules/TelegramCore/Sources/ApiUtils/ChatContextResult.swift
++++ b/submodules/TelegramCore/Sources/ApiUtils/ChatContextResult.swift
+@@ -38,7 +38,7 @@ public enum ChatContextResultMessage: PostboxCoding, Equatable, Codable {
+             let caption = decoder.decodeStringForKey("c", orElse: "")
+             let entities = decoder.decodeObjectForKey("e") as? TextEntitiesMessageAttribute
+             let replyMarkup = decoder.decodeObjectForKey("m") as? ReplyMarkupMessageAttribute
+-            if let media = decoder.decodeObjectForKey("w") as? TelegramMediaWidget {
++            if let media = decoder.decodeObjectForKey("w", decoder: { TelegramMediaWidget(decoder: $0) }) as? TelegramMediaWidget {
+                 self = .widget(media: media, caption: caption, entities: entities, replyMarkup: replyMarkup)
+             } else {
+                 self = .auto(caption: caption, entities: entities, replyMarkup: replyMarkup)
+@@ -493,7 +493,10 @@ public final class ChatContextResultCollection: Equatable, Codable {
+         self.presentation = presentation
+         self.switchPeer = switchPeer
+         self.webView = webView
+-        self.results = results
++        self.results = results.filter { result in
++            if case .widget = result.message { return false }
++            return true
++        }
+         self.cacheTimeout = cacheTimeout
+     }
+     
+diff --git a/submodules/TelegramCore/Sources/ApiUtils/StoreMessage_Telegram.swift b/submodules/TelegramCore/Sources/ApiUtils/StoreMessage_Telegram.swift
+index a38bead0..c3091537 100644
+--- a/submodules/TelegramCore/Sources/ApiUtils/StoreMessage_Telegram.swift
++++ b/submodules/TelegramCore/Sources/ApiUtils/StoreMessage_Telegram.swift
+@@ -687,13 +687,7 @@ func textMediaAndExpirationTimerFromApiMedia(_ media: Api.MessageMedia?, _ peerI
+                     isSafe: (flags & (1 << 4)) != 0
+                 ), nil)
+             }
+-        case let .messageMediaWidget(messageMediaWidgetData):
+-            // The payload is the compressed HTML (`makeData()` copies it out of its per-access `Buffer`); the state is the
+-            // bot's text, stored as its UTF-8, and the shared state's hash beside it. The server's flags pass as they are
+-            // (widget-sandbox v0.2: the client derives none).
+-            let flags = messageMediaWidgetData.flags
+-            return (TelegramMediaWidget(width: messageMediaWidgetData.width, height: messageMediaWidgetData.height, payload: messageMediaWidgetData.payload.makeData(), isCopy: (flags & (1 << 0)) != 0, canQuery: (flags & (1 << 1)) != 0, backgroundQuery: (flags & (1 << 2)) != 0, chatData: messageMediaWidgetData.chatData.map { Data($0.utf8) }, publicData: messageMediaWidgetData.publicData.map { Data($0.utf8) }, publicDataHash: messageMediaWidgetData.publicDataHash, widgetId: messageMediaWidgetData.widgetId), nil, nil, nil, nil, nil)
+-        case .messageMediaUnsupported:
++        case .messageMediaWidget, .messageMediaUnsupported:
+             return (TelegramMediaUnsupported(), nil, nil, nil, nil, nil)
+         case .messageMediaEmpty:
+             break
+diff --git a/submodules/TelegramCore/Sources/Network/Network.swift b/submodules/TelegramCore/Sources/Network/Network.swift
+index 2210d51e..5a789324 100644
+--- a/submodules/TelegramCore/Sources/Network/Network.swift
++++ b/submodules/TelegramCore/Sources/Network/Network.swift
+@@ -1379,12 +1379,7 @@ public final class Network: NSObject {
+     
+     func requestWithAdditionalInfo<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), info: NetworkRequestAdditionalInfo, tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<NetworkRequestResult<T>, MTRpcError> {
+         let requestService = self.requestService
+-        let pluginAccount = self.additionalAccountId
+         return Signal { [requestService] subscriber in
+-            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
+-                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
+-                return EmptyDisposable
+-            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1411,7 +1406,6 @@ public final class Network: NSObject {
+                 completed: { result in
+                     switch result {
+                     case let .success(response):
+-                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
+                         if let result = (response.result as! BoxedMessage).body as? T {
+                             subscriber.putNext(.result(result))
+                             subscriber.putCompletion()
+@@ -1420,7 +1414,7 @@ public final class Network: NSObject {
+                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
+                         }
+                     case let .failure(failure):
+-                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
++                        subscriber.putError(failure.error)
+                     }
+                 }
+             )
+@@ -1431,12 +1425,7 @@ public final class Network: NSObject {
+     
+     func request<T>(_ data: (FunctionDescription, Buffer, DeserializeFunctionResponse<T>), tag: NetworkRequestDependencyTag? = nil, automaticFloodWait: Bool = true, onFloodWaitError: ((String) -> Void)? = nil) -> Signal<T, MTRpcError> {
+         let requestService = self.requestService
+-        let pluginAccount = self.additionalAccountId
+         return Signal { [requestService] subscriber in
+-            guard additionalPluginAllowRequest(account: pluginAccount, name: data.0.name) else {
+-                subscriber.putError(MTRpcError(errorCode: 406, errorDescription: "SWIFTGRAM_PLUGIN_CANCELLED"))
+-                return EmptyDisposable
+-            }
+             let request = NetworkEngineRequest(
+                 payload: data.1.makeData(),
+                 metadata: WrappedRequestMetadata(metadata: WrappedFunctionDescription(data.0), tag: tag),
+@@ -1455,7 +1444,6 @@ public final class Network: NSObject {
+                 completed: { result in
+                     switch result {
+                     case let .success(response):
+-                        additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: nil)
+                         if let result = (response.result as! BoxedMessage).body as? T {
+                             subscriber.putNext(result)
+                             subscriber.putCompletion()
+@@ -1464,7 +1452,7 @@ public final class Network: NSObject {
+                             subscriber.putError(MTRpcError(errorCode: 500, errorDescription: "TL_VERIFICATION_ERROR"))
+                         }
+                     case let .failure(failure):
+-                        subscriber.putError(additionalPluginPostRequest(account: pluginAccount, name: data.0.name, error: failure.error) ?? failure.error)
++                        subscriber.putError(failure.error)
+                     }
+                 }
+             )
+diff --git a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
+index d4807a1e..2889758c 100644
+--- a/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
++++ b/submodules/TelegramCore/Sources/PendingMessages/EnqueueMessage.swift
+@@ -603,7 +603,6 @@ private func generateEphemeralOutgoingRandomId() -> Int64 {
+ }
+ 
+ private func enqueueEphemeralOutgoingMessage(transaction: Transaction, account: Account, peerId: PeerId, transformedMedia: Bool, message: EnqueueMessage, botPeerId: PeerId, isWelcomeTemplate: Bool = false) -> MessageId? {
+-    guard let message = additionalPluginEnqueue(message, account: account.peerId, peerId: peerId) else { return nil }
+     guard case let .message(text, requestedAttributes, inlineStickers, mediaReference, threadId, replyToMessageId, _, _, correlationId, bubbleUpEmojiOrStickersets) = message else {
+         return nil
+     }
+@@ -895,22 +894,6 @@ public func resendMessages(account: Account, messageIds: [MessageId]) -> Signal<
+ }
+ 
+ func enqueueMessages(transaction: Transaction, account: Account, peerId: PeerId, messages: [(Bool, EnqueueMessage)], disableAutoremove: Bool = false, transformGroupingKeysWithPeerId: Bool = false) -> [MessageId?] {
+-    var accepted: [(Bool, EnqueueMessage)] = []
+-    var indices: [Int] = []
+-    for (index, entry) in messages.enumerated() {
+-        if let message = additionalPluginEnqueue(entry.1, account: account.peerId, peerId: peerId) {
+-            accepted.append((entry.0, message)); indices.append(index)
+-        }
+-    }
+-    guard !accepted.isEmpty else { return Array(repeating: nil, count: messages.count) }
+-    let ids = enqueuePluginProcessedMessages(transaction: transaction, account: account, peerId: peerId,
+-        messages: accepted, disableAutoremove: disableAutoremove, transformGroupingKeysWithPeerId: transformGroupingKeysWithPeerId)
+-    var result = Array<MessageId?>(repeating: nil, count: messages.count)
+-    for (index, id) in zip(indices, ids) { result[index] = id }
+-    return result
+-}
+-
+-private func enqueuePluginProcessedMessages(transaction: Transaction, account: Account, peerId: PeerId, messages: [(Bool, EnqueueMessage)], disableAutoremove: Bool = false, transformGroupingKeysWithPeerId: Bool = false) -> [MessageId?] {
+     /**
+      * If it is a support account, mark messages as read here as they are
+      * not marked as read when chat is opened.
+diff --git a/submodules/TelegramCore/Sources/TelegramEngine/Messages/OutgoingMessageWithChatContextResult.swift b/submodules/TelegramCore/Sources/TelegramEngine/Messages/OutgoingMessageWithChatContextResult.swift
+index 4995eeee..033f5d2f 100644
+--- a/submodules/TelegramCore/Sources/TelegramEngine/Messages/OutgoingMessageWithChatContextResult.swift
++++ b/submodules/TelegramCore/Sources/TelegramEngine/Messages/OutgoingMessageWithChatContextResult.swift
+@@ -189,22 +189,7 @@ func _internal_outgoingMessageWithChatContextResult(to peerId: PeerId, threadId:
+             attributes.append(previewParameters)
+         }
+         return .message(text: text, attributes: attributes, inlineStickers: [:], mediaReference: nil, threadId: threadId, replyToMessageId: replyToMessageId, replyToStoryId: replyToStoryId, localGroupingKey: nil, correlationId: correlationId, bubbleUpEmojiOrStickersets: [])
+-    case let .widget(media, caption, entities, replyMarkup):
+-        if let entities = entities {
+-            attributes.append(entities)
+-        }
+-        if peerId.namespace == Namespaces.Peer.SecretChat {
+-            // A secret chat cannot carry a widget: the result's text alone, without its buttons (as a game's), or nothing.
+-            if caption.isEmpty {
+-                return nil
+-            }
+-            return .message(text: caption, attributes: attributes, inlineStickers: [:], mediaReference: nil, threadId: threadId, replyToMessageId: replyToMessageId, replyToStoryId: replyToStoryId, localGroupingKey: nil, correlationId: correlationId, bubbleUpEmojiOrStickersets: [])
+-        }
+-        if let replyMarkup = replyMarkup {
+-            attributes.append(replyMarkup)
+-        }
+-        // widget-sandbox v0.2 (design §4 call 10): the echo is the result's widget, its state and no queries; the
+-        // server's message replaces it with its own flags.
+-        return .message(text: caption, attributes: attributes, inlineStickers: [:], mediaReference: .standalone(media: media), threadId: threadId, replyToMessageId: replyToMessageId, replyToStoryId: replyToStoryId, localGroupingKey: nil, correlationId: correlationId, bubbleUpEmojiOrStickersets: [])
++    case .widget:
++        return nil
+     }
+ }
+diff --git a/submodules/TelegramUI/BUILD b/submodules/TelegramUI/BUILD
+index 6e18a5ed..f071fd07 100644
+--- a/submodules/TelegramUI/BUILD
++++ b/submodules/TelegramUI/BUILD
+@@ -89,21 +89,10 @@ swift_library(
+     module_name = "TelegramUI",
+     srcs = glob([
+         "Sources/**/*.swift",
+-    ]) + sgsrcs,
++    ], exclude = ["Sources/VerticalListContextResultsChatInputPanelWidgetItem.swift"]) + sgsrcs,
+     copts = [
+         "-warnings-as-errors",
+     ],
+-    # DEBUG builds only: widget-sandbox's conformance set and the client's game examples, for Debug Settings' widget insertion
+-    # (DebugSettingsUI/Sources/WidgetDebugPosts.swift reads them from this framework's bundle).
+-    data = select({
+-        "//third-party/widget-sandbox:debug_build": [
+-            "//third-party/widget-sandbox:WidgetConformanceBundle",
+-            "//submodules/TelegramUI/Components/MessageWidget/Fixtures:WidgetGamesBundle",
+-            # The renderer stress kit, for Debug Settings' "Run widget stress kit" (widget-sandbox v0.3.0).
+-            "//third-party/widget-sandbox:WidgetStressBundle",
+-        ],
+-        "//conditions:default": [],
+-    }),
+     deps = sgdeps + [ # MARK: Swiftgram
+         "//submodules/CrashReporting:CrashReporting",
+         "//third-party/recaptcha:RecaptchaEnterprise",
+@@ -605,8 +594,6 @@ swift_library(
+         "//submodules/TelegramUI/Components/TranslateHeaderPanelComponent",
+         "//submodules/TelegramUI/Components/AdPanelHeaderPanelComponent",
+         "//submodules/TelegramUI/Components/MessageFeeHeaderPanelComponent",
+-        "//submodules/TelegramUI/Components/MessageWidget/MessageWidget",
+-        "//submodules/TelegramUI/Components/Chat/ChatMessageWidgetBubbleContentNode",
+         "//submodules/TelegramUI/Components/LegacyChatHeaderPanelComponent",
+         "//submodules/TelegramUI/Components/GroupCallHeaderPanelComponent",
+         "//submodules/TelegramUI/Components/Chat/ChatSearchNavigationContentNode",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
+index 385b8b9a..f88429d7 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/BUILD
+@@ -89,7 +89,6 @@ swift_library(
+         "//submodules/TelegramUI/Components/Chat/ChatMessageRestrictedBubbleContentNode",
+         "//submodules/TelegramUI/Components/Chat/ChatMessageStoryMentionContentNode",
+         "//submodules/TelegramUI/Components/Chat/ChatMessageUnsupportedBubbleContentNode",
+-        "//submodules/TelegramUI/Components/Chat/ChatMessageWidgetBubbleContentNode",
+         "//submodules/TelegramUI/Components/Chat/ChatMessageWallpaperBubbleContentNode",
+         "//submodules/TelegramUI/Components/Chat/ChatMessageGiftBubbleContentNode",
+         "//submodules/TelegramUI/Components/Chat/ChatMessageGiftOfferBubbleContentNode",
+diff --git a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
+index b05cb21f..a044a048 100644
+--- a/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
++++ b/submodules/TelegramUI/Components/Chat/ChatMessageBubbleItemNode/Sources/ChatMessageBubbleItemNode.swift
+@@ -74,7 +74,6 @@ import ChatMessageBirthdateSuggestionContentNode
+ import ChatMessageRestrictedBubbleContentNode
+ import ChatMessageStoryMentionContentNode
+ import ChatMessageUnsupportedBubbleContentNode
+-import ChatMessageWidgetBubbleContentNode
+ import ChatMessageWallpaperBubbleContentNode
+ import ChatMessageGiftBubbleContentNode
+ import ChatMessageGiftOfferBubbleContentNode
+@@ -340,11 +339,7 @@ private func contentNodeMessagesAndClassesForItem(_ item: ChatMessageItem) -> ([
+             } else if let _ = media as? TelegramMediaGiveawayResults {
+                 result.append((message, ChatMessageGiveawayBubbleContentNode.self, itemAttributes, BubbleItemAttributes(isAttachment: false, neighborType: .text, neighborSpacing: .default)))
+                 needReactions = false
+-            } else if let _ = media as? TelegramMediaWidget {
+-                // The widget node draws the unsupported pill itself when the widget cannot run, inside a normal bubble,
+-                // so the caption keeps its bubble either way (not `isUnsupportedMedia`, which drops the caption).
+-                result.append((message, ChatMessageWidgetBubbleContentNode.self, itemAttributes, BubbleItemAttributes(isAttachment: false, neighborType: .media, neighborSpacing: .default)))
+-            } else if let _ = media as? TelegramMediaUnsupported {
++            } else if media is TelegramMediaWidget || media is TelegramMediaUnsupported {
+                 isUnsupportedMedia = true
+                 needReactions = false
+             }
+@@ -9141,7 +9136,7 @@ public class ChatMessageBubbleItemNode: ChatMessageItemView, ChatMessagePreviewI
+         for contentNode in self.contentNodes {
+             if contentNode is ChatMessageTransferBubbleContentNode {
+                 contentNode.visibility = mapVisibility(self.forceStopAnimations ? .none : effectiveMediaVisibility, boundsSize: self.bounds.size, insets: self.insets, to: contentNode)
+-            } else if contentNode is ChatMessageMediaBubbleContentNode || contentNode is ChatMessageGiftBubbleContentNode || contentNode is ChatMessageWebpageBubbleContentNode || contentNode is ChatMessageInvoiceBubbleContentNode || contentNode is ChatMessageGameBubbleContentNode || contentNode is ChatMessageInstantVideoBubbleContentNode || contentNode is ChatMessageRichDataBubbleContentNode || contentNode is ChatMessageWidgetBubbleContentNode {
++            } else if contentNode is ChatMessageMediaBubbleContentNode || contentNode is ChatMessageGiftBubbleContentNode || contentNode is ChatMessageWebpageBubbleContentNode || contentNode is ChatMessageInvoiceBubbleContentNode || contentNode is ChatMessageGameBubbleContentNode || contentNode is ChatMessageInstantVideoBubbleContentNode || contentNode is ChatMessageRichDataBubbleContentNode {
+                 contentNode.visibility = mapVisibility(effectiveMediaVisibility, boundsSize: self.bounds.size, insets: self.insets, to: contentNode)
+             } else {
+                 contentNode.visibility = mapVisibility(effectiveVisibility, boundsSize: self.bounds.size, insets: self.insets, to: contentNode)
+diff --git a/submodules/TelegramUI/Components/StorageUsageScreen/BUILD b/submodules/TelegramUI/Components/StorageUsageScreen/BUILD
+index f7a53906..397646e4 100644
+--- a/submodules/TelegramUI/Components/StorageUsageScreen/BUILD
++++ b/submodules/TelegramUI/Components/StorageUsageScreen/BUILD
+@@ -11,7 +11,6 @@ swift_library(
+     ],
+     deps = [
+         "//submodules/AsyncDisplayKit:AsyncDisplayKit",
+-        "//submodules/TelegramUI/Components/MessageWidget/MessageWidgetStorage",
+         "//submodules/Display:Display",
+         "//submodules/TelegramCore:TelegramCore",
+         "//submodules/SSignalKit/SwiftSignalKit:SwiftSignalKit",
+diff --git a/submodules/TelegramUI/Components/StorageUsageScreen/Sources/StorageUsageScreen.swift b/submodules/TelegramUI/Components/StorageUsageScreen/Sources/StorageUsageScreen.swift
+index cca4c3d5..0c67d0c8 100644
+--- a/submodules/TelegramUI/Components/StorageUsageScreen/Sources/StorageUsageScreen.swift
++++ b/submodules/TelegramUI/Components/StorageUsageScreen/Sources/StorageUsageScreen.swift
+@@ -27,7 +27,6 @@ import AnimatedTextComponent
+ import BottomButtonPanelComponent
+ import GlassBackgroundComponent
+ import EdgeEffect
+-import MessageWidgetStorage
+ 
+ #if DEBUG
+ import os.signpost
+@@ -2961,10 +2960,6 @@ final class StorageUsageScreenComponent: Component {
+                 return
+             }
+             
+-            // SDK v1 §5.4: "Clear cache" also deletes every message widget's storage, which Storage Usage does not list.
+-            if MessageWidgetStorageStore.clearsWidgetStorage(chatScoped: aggregatedData.peerId != nil, clearingCategories: fromCategories) {
+-                let _ = MessageWidgetStorageStore.shared.clearAll(accountPeerId: component.context.account.peerId, writer: MessageWidgetEngineStorageWriter(engine: component.context.engine)).startStandalone()
+-            }
+             
+             if let _ = aggregatedData.peerId {
+                 var mappedCategories: [StorageUsageStats.CategoryKey] = []
+diff --git a/submodules/TelegramUI/Sources/AccountContext.swift b/submodules/TelegramUI/Sources/AccountContext.swift
+index 2c11b40c..b5c677b8 100644
+--- a/submodules/TelegramUI/Sources/AccountContext.swift
++++ b/submodules/TelegramUI/Sources/AccountContext.swift
+@@ -35,7 +35,6 @@ import WalletContext
+ import WalletConnectScreen
+ import AlertUI
+ import MetalEngine
+-import MessageWidget
+ 
+ private final class DeviceSpecificContactImportContext {
+     let disposable = MetaDisposable()
+@@ -144,7 +143,6 @@ public final class AccountContextImpl: AccountContext {
+     public let tonContext: StarsContext?
+     public let walletContext: WalletContext?
+     private let walletTonConnectDisposable = MetaDisposable()
+-    private let widgetWalletDisposable = MetaDisposable()
+     private let walletTonConnectDecisionDisposable = MetaDisposable()
+     private var walletTonConnectState: WalletContext.TonConnectState?
+     private var walletTonConnectController: ViewController?
+@@ -420,7 +418,6 @@ public final class AccountContextImpl: AccountContext {
+         let updatedAppConfiguration = getAppConfiguration(engine: self.engine)
+         self.currentAppConfiguration = Atomic(value: appConfiguration)
+         self._appConfiguration.set(.single(appConfiguration) |> then(updatedAppConfiguration))
+-        MessageWidgetKillSwitch.isEngaged = appConfiguration.data?[MessageWidgetKillSwitch.appConfigurationKey] != nil
+                 
+         let currentAppConfiguration = self.currentAppConfiguration
+         self.appConfigurationDisposable = (self._appConfiguration.get()
+@@ -431,9 +428,6 @@ public final class AccountContextImpl: AccountContext {
+             // is removed); pipelines are then compiled on first use as before.
+             MetalEngine.shared.pipelineCache.setArchiveDisabled(value.data?["ios_killswitch_disable_metal_pipeline_cache"] != nil)
+             
+-            // Read here once per configuration: bubble layout reads the flag on every pass, on any thread.
+-            MessageWidgetKillSwitch.isEngaged = value.data?[MessageWidgetKillSwitch.appConfigurationKey] != nil
+-            
+             guard let data = appConfiguration.data else {
+                 return
+             }
+@@ -644,17 +638,6 @@ public final class AccountContextImpl: AccountContext {
+ 
+         if let walletContext = self.walletContext {
+             self.account.walletTransferTasksRunning.set(walletContext.hasTransferBackgroundTasks)
+-            // widget-sandbox v0.5.0 (sdk-v1 §5.13): message widgets get the wallet where it is available to this user
+-            // (wallet_available) and this device can sign for it (the user's call of 2026-10-30).
+-            let widgetWalletAccountId = self.account.peerId.id._internalGetInt64Value()
+-            let widgetWalletOwner = ObjectIdentifier(self)
+-            self.widgetWalletDisposable.set((combineLatest(
+-                self._appConfiguration.get() |> map { WalletConfiguration.with(appConfiguration: $0).isAvailable } |> distinctUntilChanged,
+-                walletContext.widgetWalletReady
+-            )
+-            |> deliverOnMainQueue).start(next: { isAvailable, isReady in
+-                MessageWidgetWalletAvailability.set(isAvailable && isReady, accountId: widgetWalletAccountId, owner: widgetWalletOwner)
+-            }))
+             self.walletTonConnectDisposable.set((walletContext.tonConnectState
+             |> deliverOnMainQueue).start(next: { [weak self] state in
+                 self?.updateWalletTonConnectPresentation(state)
+@@ -692,10 +675,6 @@ public final class AccountContextImpl: AccountContext {
+             self.account.walletTransferTasksRunning.set(.single(false))
+         }
+         self.walletTonConnectDisposable.dispose()
+-        self.widgetWalletDisposable.dispose()
+-        if self.walletContext != nil {
+-            MessageWidgetWalletAvailability.release(accountId: self.account.peerId.id._internalGetInt64Value(), owner: ObjectIdentifier(self))
+-        }
+         self.walletTonConnectDecisionDisposable.dispose()
+         self.limitsConfigurationDisposable?.dispose()
+         self.managedAppSpecificContactsDisposable?.dispose()
+diff --git a/submodules/TelegramUI/Sources/ChatControllerNode.swift b/submodules/TelegramUI/Sources/ChatControllerNode.swift
+index a46c3808..4686a216 100644
+--- a/submodules/TelegramUI/Sources/ChatControllerNode.swift
++++ b/submodules/TelegramUI/Sources/ChatControllerNode.swift
+@@ -78,7 +78,6 @@ import RichTextEditorMediaView
+ import InstantPageUI
+ import ChatRichTextEditorComposer
+ import ChatHistoryListViewBackend
+-import MessageWidget
+ import TabBarLayout
+ 
+ final class VideoNavigationControllerDropContentItem: NavigationControllerDropContentItem {
+@@ -1129,8 +1128,6 @@ class ChatControllerNode: ASDisplayNode, ASScrollViewDelegate {
+         }
+         self.panRecognizer = recognizer
+         self.view.addGestureRecognizer(recognizer)
+-        // While a message widget's control is held, a finger anywhere else in the chat does nothing until it lifts.
+-        self.view.addGestureRecognizer(MessageWidgetChatLockRecognizer())
+         
+         self.view.disablesInteractiveTransitionGestureRecognizerNow = { [weak self] in
+             guard let strongSelf = self else {
+diff --git a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+index 3146f672..696c4899 100644
+--- a/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
++++ b/submodules/TelegramUI/Sources/ChatInterfaceStateContextMenus.swift
+@@ -2338,26 +2338,6 @@ func contextMenuForChatPresentationInterfaceState(chatPresentationInterfaceState
+             return false
+         })
+ 
+-        if message.id.namespace == Namespaces.Message.Cloud, let chat = additionalChatKey(message.id.peerId) {
+-            var event = PluginEvent(kind: .message, name: "message_menu", account: additionalAccountKey(context.account.peerId), chat: chat, text: message.text)
+-            event.pluginOrigin = additionalPluginIsOrigin(message.id, account: context.account.peerId)
+-            event.message = additionalPluginSnapshot(id: message.id.id, sender: message.author?.id, timestamp: message.timestamp, thread: message.threadId, text: message.text, attributes: message.attributes, media: message.media)
+-            for item in PluginRegistry.shared.menuItems(location: .message, event: event) {
+-                actions.append(.action(ContextMenuActionItem(text: item.title, icon: { theme in
+-                    UIImage(systemName: "puzzlepiece.extension")?.withTintColor(theme.contextMenu.primaryColor, renderingMode: .alwaysOriginal)
+-                }, action: { controller, _ in
+-                    controller?.dismiss(completion: {
+-                        guard let result = PluginRegistry.shared.performMenu(item, location: .message, event: event) else { return }
+-                        if result.action == .copyText { UIPasteboard.general.string = result.text }
+-                        else {
+-                            controllerInteraction.presentController(textAlertController(context: context, title: item.title,
+-                                text: result.text, actions: [TextAlertAction(type: .defaultAction,
+-                                    title: chatPresentationInterfaceState.strings.Common_OK, action: {})]), nil)
+-                        }
+-                    })
+-                })))
+-            }
+-        }
+ 
+         if isEdited,
+            let key = additionalMessageKey(account: context.account.peerId, id: message.id),
+diff --git a/submodules/TelegramUI/Sources/HorizontalListContextResultsChatInputContextPanelNode.swift b/submodules/TelegramUI/Sources/HorizontalListContextResultsChatInputContextPanelNode.swift
+index af1fa8fa..814b9166 100644
+--- a/submodules/TelegramUI/Sources/HorizontalListContextResultsChatInputContextPanelNode.swift
++++ b/submodules/TelegramUI/Sources/HorizontalListContextResultsChatInputContextPanelNode.swift
+@@ -21,47 +21,31 @@ import BatchVideoRendering
+ import GlassBackgroundComponent
+ import ComponentFlow
+ import ComponentDisplayAdapters
+-import ChatMessageWidgetBubbleContentNode
+ 
+ private struct ChatContextResultStableId: Hashable {
+     let result: ChatContextResult
+-    /// Drawn as a widget preview: another identity, so a change of how it draws is a delete and an insert.
+-    let isWidget: Bool
+ 
+     func hash(into hasher: inout Hasher) {
+         hasher.combine(result.id.hashValue)
+-        hasher.combine(self.isWidget)
+     }
+     
+     static func ==(lhs: ChatContextResultStableId, rhs: ChatContextResultStableId) -> Bool {
+-        return lhs.result == rhs.result && lhs.isWidget == rhs.isWidget
++        return lhs.result == rhs.result
+     }
+ }
+ 
+-/// widget-sandbox v0.2 (v0.2 W3): a widget result's preview in the strip: the widget, how it draws, and the chat's width
+-/// (its sent bubble's width follows it).
+-private struct HorizontalListWidgetPreview: Equatable {
+-    let widget: TelegramMediaWidget
+-    let appearance: ChatContextResultWidgetAppearance
+-    let chatWidth: CGFloat
+-    
+-    static func ==(lhs: HorizontalListWidgetPreview, rhs: HorizontalListWidgetPreview) -> Bool {
+-        return lhs.widget.isEqual(to: rhs.widget) && lhs.appearance == rhs.appearance && lhs.chatWidth == rhs.chatWidth
+-    }
+-}
+ 
+ private struct HorizontalListContextResultsChatInputContextPanelEntry: Comparable, Identifiable {
+     let index: Int
+     let theme: PresentationTheme
+     let result: ChatContextResult
+-    let widgetPreview: HorizontalListWidgetPreview?
+     
+     var stableId: ChatContextResultStableId {
+-        return ChatContextResultStableId(result: self.result, isWidget: self.widgetPreview != nil)
++        return ChatContextResultStableId(result: self.result)
+     }
+     
+     static func ==(lhs: HorizontalListContextResultsChatInputContextPanelEntry, rhs: HorizontalListContextResultsChatInputContextPanelEntry) -> Bool {
+-        return lhs.index == rhs.index && lhs.theme === rhs.theme && lhs.result == rhs.result && lhs.widgetPreview == rhs.widgetPreview
++        return lhs.index == rhs.index && lhs.theme === rhs.theme && lhs.result == rhs.result
+     }
+     
+     static func <(lhs: HorizontalListContextResultsChatInputContextPanelEntry, rhs: HorizontalListContextResultsChatInputContextPanelEntry) -> Bool {
+@@ -69,9 +53,6 @@ private struct HorizontalListContextResultsChatInputContextPanelEntry: Comparabl
+     }
+     
+     func item(context: AccountContext, strings: PresentationStrings, batchVideoContext: QueueLocalObject<BatchVideoRenderingContext>, resultSelected: @escaping (ChatContextResult, ASDisplayNode, CGRect) -> Bool) -> ListViewItem {
+-        if let widgetPreview = self.widgetPreview {
+-            return HorizontalListContextResultsChatInputPanelWidgetItem(strings: strings, result: self.result, widget: widgetPreview.widget, appearance: widgetPreview.appearance, chatWidth: widgetPreview.chatWidth, resultSelected: resultSelected)
+-        }
+         return HorizontalListContextResultsChatInputPanelItem(context: context, theme: self.theme, result: self.result, batchVideoContext: batchVideoContext, resultSelected: resultSelected)
+     }
+ }
+@@ -116,9 +97,6 @@ final class HorizontalListContextResultsChatInputContextPanelNode: ChatInputCont
+     private var currentProcessedResults: ChatContextResultCollection?
+     private var currentEntries: [HorizontalListContextResultsChatInputContextPanelEntry]?
+     private var isLoadingMore = false
+-    /// widget-sandbox v0.2 (v0.2 W3): how widget results draw and the chat's width, from the interface state once laid
+-    /// out; nil until then (a widget result draws as any other result until the first layout).
+-    private var widgetLayout: (appearance: ChatContextResultWidgetAppearance, chatWidth: CGFloat)?
+     private let loadMoreDisposable = MetaDisposable()
+     
+     private var enqueuedTransitions: [(HorizontalListContextResultsChatInputContextPanelTransition, Bool)] = []
+@@ -376,13 +354,8 @@ final class HorizontalListContextResultsChatInputContextPanelNode: ChatInputCont
+         var entries: [HorizontalListContextResultsChatInputContextPanelEntry] = []
+         var index = 0
+         var resultIds = Set<ChatContextResultStableId>()
+-        let widgetsEnabled = chatMessageWidgetRenderingEnabled()
+         for result in results.results {
+-            var widgetPreview: HorizontalListWidgetPreview?
+-            if let widgetLayout = self.widgetLayout, let widget = messageWidgetPreviewWidget(result.message, renderingEnabled: widgetsEnabled) {
+-                widgetPreview = HorizontalListWidgetPreview(widget: widget, appearance: widgetLayout.appearance, chatWidth: widgetLayout.chatWidth)
+-            }
+-            let entry = HorizontalListContextResultsChatInputContextPanelEntry(index: index, theme: self.theme, result: result, widgetPreview: widgetPreview)
++            let entry = HorizontalListContextResultsChatInputContextPanelEntry(index: index, theme: self.theme, result: result)
+             if resultIds.contains(entry.stableId) {
+                 continue
+             } else {
+@@ -546,13 +519,6 @@ final class HorizontalListContextResultsChatInputContextPanelNode: ChatInputCont
+             self.listView.backgroundColor = self.theme.list.plainBackgroundColor
+         }
+         
+-        let widgetAppearance = ChatContextResultWidgetAppearance(theme: interfaceState.theme, wallpaper: interfaceState.chatWallpaper, fontSize: interfaceState.fontSize, cornerRadius: interfaceState.bubbleCorners.mainRadius)
+-        if self.widgetLayout?.appearance != widgetAppearance || self.widgetLayout?.chatWidth != size.width {
+-            self.widgetLayout = (widgetAppearance, size.width)
+-            if let currentProcessedResults = self.currentProcessedResults, currentProcessedResults.results.contains(where: { messageWidgetPreviewWidget($0.message, renderingEnabled: true) != nil }) {
+-                self.updateInternalResults(currentProcessedResults)
+-            }
+-        }
+     }
+     
+     override func animateOut(completion: @escaping () -> Void) {
+diff --git a/submodules/TelegramUI/Sources/VerticalListContextResultsChatInputContextPanelNode.swift b/submodules/TelegramUI/Sources/VerticalListContextResultsChatInputContextPanelNode.swift
+index 03721b43..2d0494b3 100644
+--- a/submodules/TelegramUI/Sources/VerticalListContextResultsChatInputContextPanelNode.swift
++++ b/submodules/TelegramUI/Sources/VerticalListContextResultsChatInputContextPanelNode.swift
+@@ -13,7 +13,6 @@ import ChatInputContextPanelNode
+ import ComponentFlow
+ import ComponentDisplayAdapters
+ import GlassBackgroundComponent
+-import ChatMessageWidgetBubbleContentNode
+ import CoreList
+ import CoreListComponentHost
+ import ListViewItemCoreListHost
+@@ -21,8 +20,6 @@ import ListViewItemCoreListHost
+ private enum VerticalChatContextResultsEntryStableId: Hashable {
+     case action
+     case result(ChatContextResult)
+-    /// A result drawn as a widget preview: another identity, so a change of how it draws is a delete and an insert.
+-    case widgetResult(ChatContextResult)
+     
+     func hash(into hasher: inout Hasher) {
+         switch self {
+@@ -30,9 +27,6 @@ private enum VerticalChatContextResultsEntryStableId: Hashable {
+                 hasher.combine(0)
+             case let .result(result):
+                 hasher.combine(result.id.hashValue)
+-            case let .widgetResult(result):
+-                hasher.combine(1)
+-                hasher.combine(result.id.hashValue)
+         }
+     }
+     
+@@ -50,12 +44,6 @@ private enum VerticalChatContextResultsEntryStableId: Hashable {
+                 } else {
+                     return false
+                 }
+-            case let .widgetResult(lhsResult):
+-                if case let .widgetResult(rhsResult) = rhs, lhsResult == rhsResult {
+-                    return true
+-                } else {
+-                    return false
+-                }
+         }
+     }
+ }
+@@ -63,8 +51,6 @@ private enum VerticalChatContextResultsEntryStableId: Hashable {
+ private enum VerticalListContextResultsChatInputContextPanelEntry: Equatable {
+     case action(PresentationTheme, String)
+     case result(Int, PresentationTheme, ChatContextResult)
+-    /// widget-sandbox v0.2 (v0.2 W3): a widget result, with how it draws and the height its widget last reported.
+-    case widgetResult(Int, PresentationTheme, ChatContextResult, TelegramMediaWidget, ChatContextResultWidgetAppearance, CGFloat?)
+     
+     func withUpdatedTheme(_ theme: PresentationTheme) -> VerticalListContextResultsChatInputContextPanelEntry {
+         switch self {
+@@ -72,8 +58,6 @@ private enum VerticalListContextResultsChatInputContextPanelEntry: Equatable {
+             return .action(theme, value)
+         case let .result(index, _, result):
+             return .result(index, theme, result)
+-        case let .widgetResult(index, _, result, widget, appearance, reportedHeight):
+-            return .widgetResult(index, theme, result, widget, appearance, reportedHeight)
+         }
+     }
+     
+@@ -83,8 +67,6 @@ private enum VerticalListContextResultsChatInputContextPanelEntry: Equatable {
+                 return .action
+             case let .result(_, _, result):
+                 return .result(result)
+-            case let .widgetResult(_, _, result, _, _, _):
+-                return .widgetResult(result)
+         }
+     }
+     
+@@ -102,24 +84,15 @@ private enum VerticalListContextResultsChatInputContextPanelEntry: Equatable {
+                 } else {
+                     return false
+                 }
+-            case let .widgetResult(lhsIndex, lhsTheme, lhsResult, _, lhsAppearance, lhsReportedHeight):
+-                // The widget is the result's own (`lhsResult == rhsResult` compares it).
+-                if case let .widgetResult(rhsIndex, rhsTheme, rhsResult, _, rhsAppearance, rhsReportedHeight) = rhs, lhsIndex == rhsIndex, lhsTheme === rhsTheme, lhsResult == rhsResult, lhsAppearance == rhsAppearance, lhsReportedHeight == rhsReportedHeight {
+-                    return true
+-                } else {
+-                    return false
+-                }
+         }
+     }
+     
+-    func item(engine: TelegramEngine, strings: PresentationStrings, actionSelected: @escaping () -> Void, resultSelected: @escaping (ChatContextResult, ASDisplayNode, CGRect) -> Bool, widgetHeightReported: @escaping (String, CGFloat) -> Void) -> ListViewItem {
++    func item(engine: TelegramEngine, strings: PresentationStrings, actionSelected: @escaping () -> Void, resultSelected: @escaping (ChatContextResult, ASDisplayNode, CGRect) -> Bool) -> ListViewItem {
+         switch self {
+             case let .action(theme, title):
+                 return VerticalListContextResultsChatInputPanelButtonItem(theme: theme, title: title, pressed: actionSelected)
+             case let .result(_, theme, result):
+                 return VerticalListContextResultsChatInputPanelItem(engine: engine, theme: theme, result: result, resultSelected: resultSelected)
+-            case let .widgetResult(_, theme, result, widget, appearance, reportedHeight):
+-                return VerticalListContextResultsChatInputPanelWidgetItem(theme: theme, strings: strings, result: result, widget: widget, appearance: appearance, reportedHeight: reportedHeight, resultSelected: resultSelected, heightReported: widgetHeightReported)
+         }
+     }
+ }
+@@ -129,7 +102,7 @@ private enum VerticalListContextResultsChatInputContextPanelEntry: Equatable {
+ /// `ListViewImpl` (`ListViewItemCoreListItem`). A large top inset places the first result low, a few rows above the
+ /// input panel; the rows scroll up into that room and show there, and a short list stacks above the input panel
+ /// (`stacksFromBottom`). A row is visible wherever it shows: in that room and under the input panel's glass, not behind
+-/// the keyboard (`coveredBottomInset`, `visibleRectInsets`), so a widget result's preview runs exactly then (v0.2 W3).
++/// the keyboard (`coveredBottomInset`, `visibleRectInsets`).
+ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContextPanelNode {
+     /// The glass under the rows starts at the first result's top and stops at the panel's top once that has scrolled
+     /// past it. It rides the content on the list's content motion mirror (`backgroundMover`), which repeats the
+@@ -142,8 +115,7 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+     private var backgroundIsDark = false
+     /// The glass as it was presented when this run-loop turn's first pass began, and the turn's first animated
+     /// transition: every pass of the turn moves the glass on from there, the last one's choice standing. Between passes
+-    /// of one turn nothing is committed, so the screen still shows the turn's start (a swap, a layout pass and a widget's
+-    /// height report can all land in one turn). Cleared after the turn's commit.
++    /// of one turn nothing is committed, so the screen still shows the turn's start. Cleared after the turn's commit.
+     private var turnBackgroundBefore: BackgroundBeforePass?
+     private var turnBackgroundTransition: CoreListTransition = .immediate
+     private var turnEndObserver: CFRunLoopObserver?
+@@ -160,15 +132,8 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+     private let loadMoreDisposable = MetaDisposable()
+     private var isLoadingMore: Bool = false
+     
+-    /// widget-sandbox v0.2 (v0.2 W3): how widget results draw, from the chat's interface state once laid out, and the
+-    /// height each result's widget last reported (by result id), which its row is laid out from: a row scrolled out and
+-    /// back in is a new view, whose widget starts at that height. Ids are the bot's own, so it is cleared when the results
+-    /// come from another bot (the panel stays for any list-presented results).
+-    private var widgetAppearance: ChatContextResultWidgetAppearance
+-    private var widgetPreviewHeights: [String: CGFloat] = [:]
+     
+     override init(context: AccountContext, theme: PresentationTheme, strings: PresentationStrings, fontSize: PresentationFontSize, chatPresentationContext: ChatPresentationContext) {
+-        self.widgetAppearance = ChatContextResultWidgetAppearance(theme: theme, wallpaper: .builtin(WallpaperSettings()), fontSize: fontSize, cornerRadius: 16.0)
+         self.backgroundClipView = UIView()
+         self.backgroundClipView.clipsToBounds = true
+         self.backgroundClipView.isUserInteractionEnabled = false
+@@ -228,9 +193,6 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+         if self.currentExternalResults == results {
+             return
+         }
+-        if let currentExternalResults = self.currentExternalResults, currentExternalResults.botId != results.botId {
+-            self.widgetPreviewHeights.removeAll()
+-        }
+         self.currentExternalResults = results
+         self.currentProcessedResults = results
+         
+@@ -258,14 +220,9 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+             entries.append(entry)
+             resultIds.insert(entry.stableId)
+         }
+-        let widgetsEnabled = chatMessageWidgetRenderingEnabled()
+         for result in results.results {
+             let entry: VerticalListContextResultsChatInputContextPanelEntry
+-            if let widget = messageWidgetPreviewWidget(result.message, renderingEnabled: widgetsEnabled) {
+-                entry = .widgetResult(index, self.theme, result, widget, self.widgetAppearance, self.widgetPreviewHeights[result.id])
+-            } else {
+-                entry = .result(index, self.theme, result)
+-            }
++            entry = .result(index, self.theme, result)
+             if resultIds.contains(entry.stableId) {
+                 continue
+             } else {
+@@ -299,10 +256,7 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+                 return false
+             }
+         }
+-        let widgetHeightReported: (String, CGFloat) -> Void = { [weak self] resultId, height in
+-            self?.widgetPreviewHeightReported(resultId: resultId, height: height)
+-        }
+-        let listItems = entries.map { $0.item(engine: self.context.engine, strings: self.strings, actionSelected: actionSelected, resultSelected: resultSelected, widgetHeightReported: widgetHeightReported) }
++        let listItems = entries.map { $0.item(engine: self.context.engine, strings: self.strings, actionSelected: actionSelected, resultSelected: resultSelected) }
+         var items: [CoreListItem] = []
+         for (index, entry) in entries.enumerated() {
+             let neighbors = ListViewItemNeighbors(previous: index > 0 ? listItems[index - 1].neighborDescriptor : nil, next: index + 1 < listItems.count ? listItems[index + 1].neighborDescriptor : nil)
+@@ -539,16 +493,6 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+         self.backgroundView.layer.animate(from: offset as NSNumber, to: 0.0 as NSNumber, keyPath: "position.y", timingFunction: curve.timingFunction, duration: duration, mediaTimingFunction: curve.mediaTimingFunction, additive: true, key: Self.glassAnimationKeyPrefix + "slide")
+     }
+     
+-    /// A widget result's widget reported a new height: its row lays out again from it.
+-    private func widgetPreviewHeightReported(resultId: String, height: CGFloat) {
+-        guard self.widgetPreviewHeights[resultId] != height else {
+-            return
+-        }
+-        self.widgetPreviewHeights[resultId] = height
+-        if let currentProcessedResults = self.currentProcessedResults {
+-            self.updateInternalResults(currentProcessedResults, animated: false)
+-        }
+-    }
+     
+     private func topInsetForLayout(size: CGSize, bottomInset: CGFloat, hasSwitchPeer: Bool) -> CGFloat {
+         var minimumItemHeights: CGFloat = floor(VerticalListContextResultsChatInputPanelItemNode.itemHeight * 3.5)
+@@ -615,14 +559,7 @@ final class VerticalListContextResultsChatInputContextPanelNode: ChatInputContex
+         // `ListViewImpl`'s threshold: load more once the content's bottom is within 40 pt of the visible bottom.
+         self.listView.loadedEdgeMargin = bottomInset - 40.0
+         
+-        let widgetAppearance = ChatContextResultWidgetAppearance(theme: interfaceState.theme, wallpaper: interfaceState.chatWallpaper, fontSize: interfaceState.fontSize, cornerRadius: interfaceState.bubbleCorners.mainRadius)
+-        if self.widgetAppearance != widgetAppearance {
+-            self.widgetAppearance = widgetAppearance
+-            self.theme = interfaceState.theme
+-            if let currentProcessedResults = self.currentProcessedResults {
+-                self.updateInternalResults(currentProcessedResults)
+-            }
+-        } else if self.theme !== interfaceState.theme, let currentEntries = self.currentEntries {
++        if self.theme !== interfaceState.theme, let currentEntries = self.currentEntries {
+             self.theme = interfaceState.theme
+             self.currentEntries = currentEntries.map({ $0.withUpdatedTheme(interfaceState.theme) })
+         }

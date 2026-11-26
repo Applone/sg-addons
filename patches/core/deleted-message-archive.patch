@@ -1346,21 +1346,6 @@ index 58d209f..a4148d8 100644
          "//submodules/TgVoipWebrtc:TgCallsTests",
      ],
      visibility = [
-diff --git a/build-system/Make/Make.py b/build-system/Make/Make.py
-index 894ddfc..5cff2eb 100644
---- a/build-system/Make/Make.py
-+++ b/build-system/Make/Make.py
-@@ -976,6 +976,10 @@ if __name__ == '__main__':
-             '''
-     )
-     add_project_and_build_common_arguments(testParser)
-+    testParser.add_argument(
-+        '--disableProvisioningProfiles', action='store_true', default=False,
-+        help='Run simulator tests without provisioning profiles.'
-+    )
-     testParser.add_argument(
-         '--target',
-         type=str,
 diff --git a/submodules/Postbox/Sources/Postbox.swift b/submodules/Postbox/Sources/Postbox.swift
 index dc232a8..36721c5 100644
 --- a/submodules/Postbox/Sources/Postbox.swift
@@ -2467,3 +2452,30 @@ index 0000000..b5fb02b
 +        XCTAssertFalse(additionalPluginIsOrigin(correlation, account: first))
 +    }
 +}
+diff --git a/build-system/Make/Make.py b/build-system/Make/Make.py
+index e2ad1b85..c2f97b61 100644
+--- a/build-system/Make/Make.py
++++ b/build-system/Make/Make.py
+@@ -315,7 +315,10 @@ class BazelCommandLine:
+             combined_arguments += ['--spawn_strategy=sandboxed']
+ 
+         if self.disable_provisioning_profiles:
+-            combined_arguments += ['--//Telegram:disableProvisioningProfiles']
++            combined_arguments += [
++                '--//Telegram:disableProvisioningProfiles',
++                '--features=disable_legacy_signing',
++            ]
+ 
+         combined_arguments += self.common_args
+         combined_arguments += self.common_build_args
+@@ -977,6 +980,10 @@ if __name__ == '__main__':
+             '''
+     )
+     add_project_and_build_common_arguments(testParser)
++    testParser.add_argument(
++        '--disableProvisioningProfiles', action='store_true', default=False,
++        help='Run simulator tests without provisioning profiles.'
++    )
+     testParser.add_argument(
+         '--target',
+         type=str,
